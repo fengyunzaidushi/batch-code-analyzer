@@ -1,0 +1,24 @@
+[workspace]
+members = [
+  "apps/desktop/src-tauri",
+  "crates/app-core",
+  "crates/domain",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97"
+license = "UNLICENSED"
+
+[workspace.dependencies]
+tauri = "=2.11.5"
+tauri-build = "=2.6.3"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }

@@ -11,6 +11,7 @@ coverage/
 
 # Tauri / local builds
 src-tauri/target/
+**/src-tauri/gen/
 *.AppImage
 *.dmg
 *.msi

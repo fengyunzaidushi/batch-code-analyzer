@@ -1,0 +1,12 @@
+[package]
+name = "batch-code-analyzer-app-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+batch-code-analyzer-domain = { path = "../domain" }
+
+[lints]
+workspace = true
