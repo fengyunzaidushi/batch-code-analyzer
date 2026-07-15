@@ -1,0 +1,41 @@
+# Node
+node_modules/
+.pnpm-store/
+dist/
+coverage/
+*.log
+
+# Rust
+/target/
+**/*.rs.bk
+
+# Tauri / local builds
+src-tauri/target/
+*.AppImage
+*.dmg
+*.msi
+*.exe
+*.deb
+*.rpm
+
+# IDE / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Local databases and generated outputs
+*.db
+*.db-shm
+*.db-wal
+.batch-analysis/
+local-output/

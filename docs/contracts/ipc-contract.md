@@ -1,0 +1,248 @@
+# Tauri IPC 契约（v0.1）
+
+## 1. 目标
+
+本契约定义 React 前端与 Rust 核心之间的稳定边界。Rust 是 DTO、枚举和错误码的权威来源，TypeScript 类型由构建流程自动生成到 `packages/ipc-types`。
+
+## 2. 通用规则
+
+- Command 用于请求—响应；Event 用于长任务进度和状态变化。
+- 命令使用 `snake_case`，事件使用 `<domain>://<event>`。
+- 所有请求与响应 DTO 必须可序列化并具有稳定字段。
+- 所有 Event Payload 必须包含 `schemaVersion` 与 `updatedAt`。
+- 所有失败统一返回 `IpcError`，不得向 UI 暴露原始数据库错误、完整本地路径、API Key 或供应商原始敏感响应。
+- 前端不得通过 Tauri 文件系统插件直接遍历用户仓库。
+- 列表命令必须分页，结果正文按需读取。
+
+## 3. 通用类型
+
+```ts
+export interface IpcError {
+  schemaVersion: 1;
+  code: string;
+  category:
+    | 'validation'
+    | 'project'
+    | 'scan'
+    | 'security'
+    | 'persistence'
+    | 'provider'
+    | 'scheduler'
+    | 'output'
+    | 'recovery'
+    | 'internal';
+  message: string;
+  retryable: boolean;
+  switchProfile: boolean;
+  correlationId: string;
+  details?: Record<string, unknown>;
+}
+
+export interface PageRequest {
+  cursor?: string;
+  limit: number; // 1..500
+}
+
+export interface PageResponse<T> {
+  items: T[];
+  nextCursor?: string;
+  total: number;
+}
+```
+
+## 4. Command 清单
+
+### 4.1 Project
+
+```text
+project_list
+project_add
+project_update
+project_remove
+project_relocate
+```
+
+最低语义：
+
+- `project_add`：输入用户选择的目录，完成 canonical path 校验；重复目录返回已有项目。
+- `project_remove`：只移除客户端登记，不删除仓库或历史输出。
+- `project_relocate`：重新绑定不可用项目，必须校验项目 ID 或仓库配置的一致性。
+
+### 4.2 Scan
+
+```text
+scan_start
+scan_cancel
+scan_get_report
+```
+
+`scan_start` 返回操作 ID，不等待完整扫描结束；进度通过 Event 提供。任一项目同一时间最多一个扫描操作。
+
+### 4.3 Context
+
+```text
+context_generate
+context_update_manual
+context_get
+```
+
+上下文生成是独立辅助请求，不计入文件任务成功/失败统计。
+
+### 4.4 API Profile
+
+```text
+api_profile_list
+api_profile_save
+api_profile_test
+api_profile_delete
+api_models_fetch
+```
+
+- API Key 只通过 SecretStore 写入，不通过读取命令返回前端。
+- `api_profile_list` 只返回是否已配置密钥和脱敏摘要。
+- 删除仍被项目引用的档案必须失败并返回稳定错误码。
+
+### 4.5 Run
+
+```text
+run_preview
+run_create
+run_pause
+run_resume
+run_cancel
+run_get
+run_list
+```
+
+- `run_preview` 返回任务数量、排除数量、预计使用配置和阻塞项，不创建 Run。
+- `run_create` 在事务内创建不可变快照与 Task。
+- 首期存在活动 Run 时，第二次 `run_create` 返回 `run_active_exists`。
+
+### 4.6 File
+
+```text
+file_list
+file_update_override
+file_set_included
+```
+
+`file_update_override` 只更新未来 Run 的单文件覆盖，不修改已创建 Run 的 Task 快照。
+
+### 4.7 Task
+
+```text
+task_list
+task_get_detail
+task_retry
+task_regenerate
+task_cancel
+```
+
+- `task_retry`：只对允许重试的失败、中断或取消任务创建新 Attempt。
+- `task_regenerate`：创建新的 Task 版本，不覆盖原 Task。
+- 运行中 Task 不允许重复提交。
+
+### 4.8 Result
+
+```text
+result_read
+result_open_in_folder
+```
+
+- `result_read` 按需读取已完成结果；不得通过 `task_list` 返回完整 Markdown。
+- `result_open_in_folder` 只能打开已验证位于允许输出根目录内的路径。
+
+### 4.9 App
+
+```text
+app_get_settings
+app_update_settings
+```
+
+## 5. Event 清单
+
+```text
+scan://progress
+scan://completed
+scan://failed
+
+run://state-changed
+run://stats-changed
+run://completed
+
+task://state-changed
+task://attempt-started
+task://attempt-finished
+task://result-written
+
+context://state-changed
+api-profile://health-changed
+app://fatal-error
+```
+
+通用事件示例：
+
+```json
+{
+  "schemaVersion": 1,
+  "projectId": "project-uuid",
+  "runId": "run-uuid",
+  "taskId": "task-uuid",
+  "previousStatus": "queued",
+  "status": "running",
+  "updatedAt": "2026-07-15T10:38:30Z",
+  "correlationId": "correlation-uuid"
+}
+```
+
+## 6. Task 分页契约
+
+```ts
+export interface TaskListRequest {
+  runId: string;
+  cursor?: string;
+  limit: number; // 最大 500
+  filters: {
+    statuses?: string[];
+    pathContains?: string;
+    model?: string;
+    hasPromptOverride?: boolean;
+    hasModelOverride?: boolean;
+    minDurationMs?: number;
+    maxDurationMs?: number;
+    minTokens?: number;
+    maxTokens?: number;
+  };
+  sort: Array<{
+    field: 'relativePath' | 'status' | 'durationMs' | 'totalTokens' | 'updatedAt';
+    direction: 'asc' | 'desc';
+  }>;
+}
+
+export interface TaskListResponse {
+  items: TaskSummary[];
+  nextCursor?: string;
+  total: number;
+}
+```
+
+## 7. 事件顺序与一致性
+
+Rust 必须按以下顺序处理：
+
+```text
+数据库事务提交
+→ 更新内存状态
+→ 发送 Tauri Event
+```
+
+Event 是 UI 加速机制，不是业务状态权威来源。前端错过 Event 后，必须能通过查询 Command 恢复一致状态。
+
+## 8. 类型生成
+
+工程初始化阶段应选择 `ts-rs` 或等价工具，满足：
+
+- Rust DTO 自动生成 TypeScript；
+- CI 检查生成文件无漂移；
+- 枚举值不允许前后端重复手写；
+- 破坏性修改升级 `schemaVersion` 并记录 ADR。
