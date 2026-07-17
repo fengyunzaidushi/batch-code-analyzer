@@ -157,7 +157,26 @@ result_open_in_folder
 ```text
 app_get_settings
 app_update_settings
+health_check
 ```
+
+`health_check` 返回桌面核心的受控启动状态，可用于前端启动检测、自动化测试和故障诊断。`status: ready` 仅表示 Rust 核心可响应，不表示数据库、扫描或模型服务已经可用。
+
+```ts
+export interface HealthCheckResponse {
+  schemaVersion: 1;
+  status: 'ready' | 'degraded' | 'unavailable';
+  appVersion: string;
+  databaseStatus:
+    | 'not_initialized'
+    | 'ready'
+    | 'migration_failed'
+    | 'unavailable';
+  databaseSchemaVersion: number;
+}
+```
+
+数据库基础设施尚未建立时，响应必须为 `databaseStatus: 'not_initialized'` 与 `databaseSchemaVersion: 0`。
 
 ## 5. Event 清单
 

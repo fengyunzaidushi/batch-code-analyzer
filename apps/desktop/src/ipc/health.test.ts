@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { HealthCheckResponse } from "@batch-code-analyzer/ipc-types";
 
 const { invokeMock } = vi.hoisted(() => ({
   invokeMock: vi.fn(),
@@ -15,19 +16,12 @@ describe("checkBackendHealth", () => {
     invokeMock.mockReset();
   });
 
-  it("accepts the expected health response", async () => {
-    invokeMock.mockResolvedValue("ok");
+  it("returns the generated health check DTO", async () => {
+    const response = readyResponse();
+    invokeMock.mockResolvedValue(response);
 
-    await expect(checkBackendHealth()).resolves.toBeUndefined();
+    await expect(checkBackendHealth()).resolves.toEqual(response);
     expect(invokeMock).toHaveBeenCalledWith("health_check");
-  });
-
-  it("rejects an unexpected response", async () => {
-    invokeMock.mockResolvedValue(null);
-
-    await expect(checkBackendHealth()).rejects.toThrow(
-      "Unexpected health check response",
-    );
   });
 
   it("preserves an IPC rejection for the presentation layer", async () => {
@@ -36,3 +30,13 @@ describe("checkBackendHealth", () => {
     await expect(checkBackendHealth()).rejects.toThrow("IPC unavailable");
   });
 });
+
+function readyResponse(): HealthCheckResponse {
+  return {
+    schemaVersion: 1,
+    status: "ready",
+    appVersion: "0.1.0",
+    databaseStatus: "not_initialized",
+    databaseSchemaVersion: 0,
+  };
+}

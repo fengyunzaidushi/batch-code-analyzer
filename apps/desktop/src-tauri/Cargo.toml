@@ -14,6 +14,7 @@ crate-type = ["lib", "cdylib", "staticlib"]
 tauri-build.workspace = true
 
 [dependencies]
+batch-code-analyzer-ipc-contracts = { path = "../../../crates/ipc-contracts" }
 tauri.workspace = true
 
 [lints]

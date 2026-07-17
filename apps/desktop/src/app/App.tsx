@@ -1,9 +1,10 @@
 import { Activity, CheckCircle2, RefreshCw, TriangleAlert } from "lucide-react";
 import { useEffect, useState } from "react";
+import type { HealthCheckResponse } from "@batch-code-analyzer/ipc-types";
 
 import { checkBackendHealth } from "../ipc/health";
 
-type HealthState = "checking" | "ready" | "unavailable";
+type HealthState = "checking" | HealthCheckResponse["status"];
 
 export function App() {
   const [healthState, setHealthState] = useState<HealthState>("checking");
@@ -13,8 +14,8 @@ export function App() {
     let active = true;
 
     void checkBackendHealth().then(
-      () => {
-        if (active) setHealthState("ready");
+      (response) => {
+        if (active) setHealthState(response.status);
       },
       () => {
         if (active) setHealthState("unavailable");
@@ -47,7 +48,7 @@ export function App() {
           <HealthIndicator state={healthState} />
         </div>
 
-        {healthState === "unavailable" ? (
+        {healthState === "degraded" || healthState === "unavailable" ? (
           <button
             className="retry-button"
             type="button"
@@ -80,6 +81,15 @@ function HealthIndicator({ state }: { state: HealthState }) {
       <div className="status status-error" role="alert">
         <TriangleAlert size={18} aria-hidden="true" />
         无法连接本地核心
+      </div>
+    );
+  }
+
+  if (state === "degraded") {
+    return (
+      <div className="status status-degraded" role="status">
+        <TriangleAlert size={18} aria-hidden="true" />
+        本地核心降级
       </div>
     );
   }

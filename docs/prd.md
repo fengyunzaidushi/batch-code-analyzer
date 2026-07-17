@@ -787,7 +787,7 @@ API Key 和敏感请求头不进入上述 JSON，仅保存安全存储引用 ID�
   "apiProfileId": "profile-uuid",
   "apiProfileName": "OpenAI Primary",
   "actualModel": "gpt-5",
-  "status": "failed",
+  "status": "failed_retryable",
   "startedAt": "2026-07-15T10:38:30+08:00",
   "finishedAt": "2026-07-15T10:38:40+08:00",
   "durationMs": 10000,
@@ -806,6 +806,9 @@ API Key 和敏感请求头不进入上述 JSON，仅保存安全存储引用 ID�
 ```
 
 Attempt 采用追加写入，不覆盖之前的自动重试、主备切换或人工重试记录。
+
+Attempt 不定义通用 `failed` 状态。可继续重试的失败使用
+`failed_retryable`；不可重试或重试耗尽的失败使用 `failed_terminal`。
 
 ### 8.6 ContextVersion
 

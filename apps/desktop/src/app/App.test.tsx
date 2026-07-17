@@ -1,6 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { HealthCheckResponse } from "@batch-code-analyzer/ipc-types";
 
 const { checkBackendHealthMock } = vi.hoisted(() => ({
   checkBackendHealthMock: vi.fn(),
@@ -26,7 +27,7 @@ describe("App", () => {
   });
 
   it("shows the ready state after a successful health check", async () => {
-    checkBackendHealthMock.mockResolvedValue(undefined);
+    checkBackendHealthMock.mockResolvedValue(readyResponse());
 
     render(<App />);
 
@@ -37,7 +38,7 @@ describe("App", () => {
     const user = userEvent.setup();
     checkBackendHealthMock
       .mockRejectedValueOnce(new Error("sensitive backend detail"))
-      .mockResolvedValueOnce(undefined);
+      .mockResolvedValueOnce(readyResponse());
 
     render(<App />);
 
@@ -51,4 +52,25 @@ describe("App", () => {
     expect(await screen.findByText("本地核心已就绪")).toBeInTheDocument();
     expect(checkBackendHealthMock).toHaveBeenCalledTimes(2);
   });
+
+  it("shows the degraded state when the core reports degradation", async () => {
+    checkBackendHealthMock.mockResolvedValue({
+      ...readyResponse(),
+      status: "degraded",
+    } satisfies HealthCheckResponse);
+
+    render(<App />);
+
+    expect(await screen.findByText("本地核心降级")).toBeInTheDocument();
+  });
 });
+
+function readyResponse(): HealthCheckResponse {
+  return {
+    schemaVersion: 1,
+    status: "ready",
+    appVersion: "0.1.0",
+    databaseStatus: "not_initialized",
+    databaseSchemaVersion: 0,
+  };
+}
