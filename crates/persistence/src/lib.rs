@@ -4,6 +4,7 @@
 
 mod database;
 mod error;
+pub mod repositories;
 mod rows;
 
 pub use database::{
@@ -11,6 +12,7 @@ pub use database::{
     WriteTransaction, LATEST_SCHEMA_VERSION,
 };
 pub use error::PersistenceError;
+pub use repositories::Repository;
 pub use rows::{
     AttemptRow, AttemptRowMetadata, ContextVersionRow, FileRecordRow, FileRecordRowMetadata,
     ProjectRow, ProjectRowMetadata, RunRow, RunRowMetadata, TaskRow,
