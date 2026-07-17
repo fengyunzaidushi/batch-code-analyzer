@@ -36,7 +36,7 @@ function readyResponse(): HealthCheckResponse {
     schemaVersion: 1,
     status: "ready",
     appVersion: "0.1.0",
-    databaseStatus: "not_initialized",
-    databaseSchemaVersion: 0,
+    databaseStatus: "ready",
+    databaseSchemaVersion: 1,
   };
 }
