@@ -15,6 +15,7 @@ tauri-build.workspace = true
 
 [dependencies]
 batch-code-analyzer-ipc-contracts = { path = "../../../crates/ipc-contracts" }
+batch-code-analyzer-persistence = { path = "../../../crates/persistence" }
 tauri.workspace = true
 
 [lints]
