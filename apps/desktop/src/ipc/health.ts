@@ -1,11 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { HealthCheckResponse } from "@batch-code-analyzer/ipc-types";
 
-const HEALTHY_RESPONSE = "ok";
-
-export async function checkBackendHealth(): Promise<void> {
-  const response = await invoke<unknown>("health_check");
-
-  if (response !== HEALTHY_RESPONSE) {
-    throw new Error("Unexpected health check response");
-  }
+export function checkBackendHealth(): Promise<HealthCheckResponse> {
+  return invoke<HealthCheckResponse>("health_check");
 }

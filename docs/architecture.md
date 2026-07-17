@@ -229,7 +229,7 @@ batch-code-analyzer/
 │
 ├─ crates/
 │  ├─ domain/                         # 纯 Rust 领域实体和状态机
-│  ├─ application/                    # 用例服务
+│  ├─ app-core/                       # 用例服务与应用编排
 │  ├─ persistence/                    # SQLite Repository 实现
 │  ├─ repository-scanner/             # 扫描、ignore、编码和哈希
 │  ├─ model-providers/                # Responses API Adapter
@@ -765,6 +765,7 @@ result_open_in_folder
 
 app_get_settings
 app_update_settings
+health_check
 ```
 
 ### 10.3 Event 命名

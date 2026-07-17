@@ -114,6 +114,10 @@ button {
   color: #b42318;
 }
 
+.status-degraded {
+  color: #9a6500;
+}
+
 .status-checking {
   color: #596170;
 }
@@ -200,6 +204,10 @@ button {
 
   .status-error {
     color: #ff8f88;
+  }
+
+  .status-degraded {
+    color: #f2b45a;
   }
 
   .retry-button {

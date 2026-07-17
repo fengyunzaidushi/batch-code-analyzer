@@ -1,2 +1,35 @@
-// DTOs will be generated from their Rust definitions by TASK-0002.
-export {};
+// The declarations in generated/ are produced by `pnpm ipc:generate`.
+export type { ApiProfileId } from "./generated/ApiProfileId";
+export type { AttemptDto } from "./generated/AttemptDto";
+export type { AttemptErrorDto } from "./generated/AttemptErrorDto";
+export type { AttemptId } from "./generated/AttemptId";
+export type { AttemptStatus } from "./generated/AttemptStatus";
+export type { ContextStatus } from "./generated/ContextStatus";
+export type { ContextVersionDto } from "./generated/ContextVersionDto";
+export type { ContextVersionId } from "./generated/ContextVersionId";
+export type { ContextVersionSourceFileDto } from "./generated/ContextVersionSourceFileDto";
+export type { DatabaseStatus } from "./generated/DatabaseStatus";
+export type { ErrorCategory } from "./generated/ErrorCategory";
+export type { FileRecordId } from "./generated/FileRecordId";
+export type { FileRecordSummaryDto } from "./generated/FileRecordSummaryDto";
+export type { FileResultStatus } from "./generated/FileResultStatus";
+export type { FileSourceStatus } from "./generated/FileSourceStatus";
+export type { HealthCheckResponse } from "./generated/HealthCheckResponse";
+export type { HealthStatus } from "./generated/HealthStatus";
+export type { IpcError } from "./generated/IpcError";
+export type { PageRequest } from "./generated/PageRequest";
+export type { PageResponse } from "./generated/PageResponse";
+export type { ProjectId } from "./generated/ProjectId";
+export type { ProjectPathStatus } from "./generated/ProjectPathStatus";
+export type { ProjectSummaryDto } from "./generated/ProjectSummaryDto";
+export type { Rfc3339Timestamp } from "./generated/Rfc3339Timestamp";
+export type { RunId } from "./generated/RunId";
+export type { RunStatsDto } from "./generated/RunStatsDto";
+export type { RunStatus } from "./generated/RunStatus";
+export type { RunSummaryDto } from "./generated/RunSummaryDto";
+export type { RunTransition } from "./generated/RunTransition";
+export type { TaskId } from "./generated/TaskId";
+export type { TaskStatus } from "./generated/TaskStatus";
+export type { TaskSummaryDto } from "./generated/TaskSummaryDto";
+export type { TaskTransition } from "./generated/TaskTransition";
+export type { TaskValueSource } from "./generated/TaskValueSource";
