@@ -15,6 +15,7 @@ import { useMemo, useState, type ReactNode } from "react";
 import type {
   ProjectPathStatus,
   ProjectSummaryDto,
+  ScanReportDto,
 } from "@batch-code-analyzer/ipc-types";
 
 import { MarkdownPreview } from "../features/markdown/MarkdownPreview";
@@ -40,9 +41,12 @@ interface AppShellProps {
   healthState?: ShellHealthState;
   activeRun?: ActiveRunSummary | null;
   onAddProject?: () => void;
+  onCancelScan?: () => void;
   onRetryHealth?: () => void;
   onSelectProject?: (id: string) => void;
+  onStartScan?: () => void;
   projectError?: string | null;
+  scanReport?: ScanReportDto | null;
   selectedProjectId?: string | null;
   isAddingProject?: boolean;
 }
@@ -54,9 +58,12 @@ export function AppShell({
   healthState = "checking",
   activeRun = null,
   onAddProject = () => undefined,
+  onCancelScan = () => undefined,
   onRetryHealth = () => undefined,
   onSelectProject,
+  onStartScan = () => undefined,
   projectError = null,
+  scanReport = null,
   selectedProjectId: controlledSelectedProjectId,
   isAddingProject = false,
 }: AppShellProps) {
@@ -109,8 +116,11 @@ export function AppShell({
         />
         <ProjectWorkspace
           activeRun={activeRun}
+          onCancelScan={onCancelScan}
           onPreview={() => setPreviewOpen(true)}
+          onStartScan={onStartScan}
           project={selectedProject}
+          scanReport={scanReport}
           tab={tab}
           setTab={setTab}
         />
@@ -352,14 +362,20 @@ function PathStatus({ status }: { status: ProjectPathStatus }) {
 
 function ProjectWorkspace({
   activeRun,
+  onCancelScan,
   onPreview,
+  onStartScan,
   project,
+  scanReport,
   tab,
   setTab,
 }: {
   activeRun: ActiveRunSummary | null;
+  onCancelScan: () => void;
   onPreview: () => void;
+  onStartScan: () => void;
   project: ShellProject | null;
+  scanReport: ScanReportDto | null;
   tab: WorkspaceTab;
   setTab: (tab: WorkspaceTab) => void;
 }) {
@@ -381,7 +397,13 @@ function ProjectWorkspace({
         />
       </div>
       {tab === "prompt" ? (
-        <PromptWorkspace onPreview={onPreview} project={project} />
+        <PromptWorkspace
+          onCancelScan={onCancelScan}
+          onPreview={onPreview}
+          onStartScan={onStartScan}
+          project={project}
+          scanReport={scanReport}
+        />
       ) : (
         <ApiWorkspace />
       )}
@@ -465,11 +487,17 @@ function TabButton({
 }
 
 function PromptWorkspace({
+  onCancelScan,
   onPreview,
+  onStartScan,
   project,
+  scanReport,
 }: {
+  onCancelScan: () => void;
   onPreview: () => void;
+  onStartScan: () => void;
   project: ShellProject | null;
+  scanReport: ScanReportDto | null;
 }) {
   const [prompt, setPrompt] = useState(
     "请结合提供的项目上下文，用通俗但准确的语言解释当前代码文件。\n\n请说明核心职责、关键输入输出、协作模块和修改影响。",
@@ -523,10 +551,17 @@ function PromptWorkspace({
             <button
               className="outline-button"
               disabled={!hasProject}
+              onClick={
+                scanReport?.status === "running" ? onCancelScan : onStartScan
+              }
               type="button"
             >
-              <FolderPlus size={15} />
-              扫描仓库
+              {scanReport?.status === "running" ? (
+                <RefreshCw size={15} />
+              ) : (
+                <FolderPlus size={15} />
+              )}
+              {scanReport?.status === "running" ? "取消扫描" : "扫描仓库"}
             </button>
             <button
               className="primary-button"
@@ -550,7 +585,7 @@ function PromptWorkspace({
           <SummaryMetric label="最近 Run" value="—" />
           <div className="scan-summary-note">
             <CircleAlert size={15} />
-            扫描与任务状态将在 Rust 查询接入后显示
+            {scanSummaryMessage(scanReport)}
           </div>
         </div>
         <VirtualTaskTable
@@ -590,6 +625,20 @@ function SummaryMetric({ label, value }: { label: string; value: string }) {
       <strong>{value}</strong>
     </div>
   );
+}
+
+function scanSummaryMessage(report: ScanReportDto | null): string {
+  if (!report) return "尚未扫描项目；扫描结果将在这里显示。";
+  switch (report.status) {
+    case "running":
+      return `正在扫描：已检查 ${report.scannedFiles} 个文件`;
+    case "completed":
+      return `扫描完成：纳入 ${report.includedFiles} 个文件`;
+    case "cancelled":
+      return "扫描已取消，本次结果未提交。";
+    case "failed":
+      return "扫描失败，请检查项目路径和权限。";
+  }
 }
 
 function ApiWorkspace() {

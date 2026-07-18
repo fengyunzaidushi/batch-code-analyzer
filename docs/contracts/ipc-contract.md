@@ -78,6 +78,44 @@ scan_get_report
 
 `scan_start` 返回操作 ID，不等待完整扫描结束；进度通过 Event 提供。任一项目同一时间最多一个扫描操作。
 
+本地实现使用以下稳定 DTO：
+
+```ts
+interface ScanStartRequest {
+  projectId: ProjectId;
+}
+
+interface ScanStartResponse {
+  schemaVersion: 1;
+  operationId: string;
+  projectId: ProjectId;
+}
+
+interface ScanReportDto {
+  schemaVersion: 1;
+  operationId: string;
+  projectId: ProjectId;
+  status: 'running' | 'completed' | 'cancelled' | 'failed';
+  visitedEntries: number;
+  scannedFiles: number;
+  includedFiles: number;
+  excludedByReason: Record<string, number>;
+  unreadableFiles: string[];
+  unsupportedEncodingFiles: string[];
+  sensitiveFiles: string[];
+  symlinkFiles: string[];
+  invalidGitignoreRules: string[];
+  cancelled: boolean;
+  fileCount: number | null;
+  generation: number | null;
+  errorCode: string | null;
+  updatedAt: Rfc3339Timestamp;
+}
+```
+
+完成或取消前不会提交正式扫描代次；进度和最终报告通过
+`scan://progress` Event 发送，`scan_get_report` 可按 operation ID 查询最近状态。
+
 ### 4.3 Context
 
 ```text

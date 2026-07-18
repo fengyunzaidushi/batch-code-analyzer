@@ -1,12 +1,24 @@
-use batch_code_analyzer_app_core::{domain::ProjectId, ProjectService, ProjectServiceError};
+use std::{
+    sync::atomic::{AtomicU64, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+use batch_code_analyzer_app_core::{
+    domain::ProjectId, timestamp_now, ProjectService, ProjectServiceError, ScanService,
+};
 use batch_code_analyzer_ipc_contracts::{
     DatabaseStatus, ErrorCategory, HealthCheckResponse, HealthStatus, IpcError, ProjectAddRequest,
-    ProjectAddResponse, ProjectDetailDto, ProjectSummaryDto, HEALTH_CHECK_SCHEMA_VERSION,
+    ProjectAddResponse, ProjectDetailDto, ProjectSummaryDto, ScanCancelRequest, ScanCancelResponse,
+    ScanOperationStatus, ScanReportDto, ScanStartRequest, ScanStartResponse,
+    HEALTH_CHECK_SCHEMA_VERSION,
 };
 use batch_code_analyzer_persistence::DatabaseHealth;
-use tauri::State;
+use batch_code_analyzer_repository_scanner::{ImportReport, ScanCancellation};
+use tauri::{AppHandle, Emitter, State};
 
-use crate::PersistenceState;
+use crate::{scan_state::ScanStateError, PersistenceState};
+
+static NEXT_SCAN_OPERATION_ID: AtomicU64 = AtomicU64::new(1);
 
 // Tauri's `CommandArg` implementation requires `State<T>` by value.
 #[allow(clippy::needless_pass_by_value)]
@@ -56,6 +68,202 @@ pub(crate) async fn project_get(
         .map_err(|error| persistence_error(&error))?
         .ok_or_else(|| project_not_found(project_id.as_str()))?;
     Ok(ProjectDetailDto::from(&project))
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_lines)]
+pub(crate) async fn scan_start(
+    request: ScanStartRequest,
+    state: State<'_, PersistenceState>,
+    app: AppHandle,
+) -> Result<ScanStartResponse, IpcError> {
+    let database = state.database.as_ref().ok_or_else(database_unavailable)?;
+    let project = ProjectService::new(database)
+        .get_project(&request.project_id)
+        .await
+        .map_err(|error| persistence_error(&error))?
+        .ok_or_else(|| project_not_found(request.project_id.as_str()))?;
+    let operation_id = new_scan_operation_id();
+    let cancellation = ScanCancellation::new();
+    let report = scan_report(
+        &operation_id,
+        &project.id,
+        ScanOperationStatus::Running,
+        &ImportReport::default(),
+        None,
+        None,
+        None,
+    );
+    state
+        .scans
+        .begin(
+            operation_id.clone(),
+            project.id.clone(),
+            cancellation.clone(),
+            report.clone(),
+        )
+        .map_err(scan_state_error)?;
+    emit_scan_progress(&app, &report);
+
+    let scans = state.scans.clone();
+    let database = database.clone();
+    let operation_id_for_task = operation_id.clone();
+    let project_id_for_task = project.id.clone();
+    let project_id_for_response = project.id.clone();
+    tauri::async_runtime::spawn(async move {
+        let project_for_scan = project.clone();
+        let cancellation_for_scan = cancellation.clone();
+        let scan_result = tauri::async_runtime::spawn_blocking(move || {
+            ScanService::scan_project(&project_for_scan, cancellation_for_scan)
+        })
+        .await;
+        let report = match scan_result {
+            Ok(Ok(result)) if !result.completed => scan_report(
+                &operation_id_for_task,
+                &project_id_for_task,
+                ScanOperationStatus::Cancelled,
+                &result.report,
+                None,
+                None,
+                Some("scan_cancelled"),
+            ),
+            Ok(Ok(result)) => match ScanService::new(&database)
+                .persist_scan(&project_id_for_task, result)
+                .await
+            {
+                Ok(summary) => scan_report(
+                    &operation_id_for_task,
+                    &project_id_for_task,
+                    ScanOperationStatus::Completed,
+                    &summary.report,
+                    Some(summary.file_count),
+                    Some(summary.generation),
+                    None,
+                ),
+                Err(error) => scan_report(
+                    &operation_id_for_task,
+                    &project_id_for_task,
+                    ScanOperationStatus::Failed,
+                    &ImportReport::default(),
+                    None,
+                    None,
+                    Some(error.code()),
+                ),
+            },
+            Ok(Err(error)) => scan_report(
+                &operation_id_for_task,
+                &project_id_for_task,
+                ScanOperationStatus::Failed,
+                &ImportReport::default(),
+                None,
+                None,
+                Some(error.code()),
+            ),
+            Err(_) => scan_report(
+                &operation_id_for_task,
+                &project_id_for_task,
+                ScanOperationStatus::Failed,
+                &ImportReport::default(),
+                None,
+                None,
+                Some("scan_failed"),
+            ),
+        };
+        let _ = scans.update(&operation_id_for_task, report.clone());
+        emit_scan_progress(&app, &report);
+    });
+
+    Ok(ScanStartResponse {
+        schema_version: 1,
+        operation_id,
+        project_id: project_id_for_response,
+    })
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub(crate) fn scan_cancel(
+    request: ScanCancelRequest,
+    state: State<'_, PersistenceState>,
+) -> Result<ScanCancelResponse, IpcError> {
+    let accepted = state
+        .scans
+        .cancel(&request.operation_id)
+        .map_err(scan_state_error)?;
+    Ok(ScanCancelResponse {
+        schema_version: 1,
+        operation_id: request.operation_id,
+        accepted,
+    })
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub(crate) fn scan_get_report(
+    operation_id: String,
+    state: State<'_, PersistenceState>,
+) -> Result<ScanReportDto, IpcError> {
+    state.scans.report(&operation_id).map_err(scan_state_error)
+}
+
+fn emit_scan_progress(app: &AppHandle, report: &ScanReportDto) {
+    let _ = app.emit("scan://progress", report);
+}
+
+fn scan_report(
+    operation_id: &str,
+    project_id: &ProjectId,
+    status: ScanOperationStatus,
+    report: &ImportReport,
+    file_count: Option<u32>,
+    generation: Option<u32>,
+    error_code: Option<&str>,
+) -> ScanReportDto {
+    ScanReportDto {
+        schema_version: 1,
+        operation_id: operation_id.into(),
+        project_id: project_id.clone(),
+        status,
+        visited_entries: report.visited_entries,
+        scanned_files: report.scanned_files,
+        included_files: report.included_files,
+        excluded_by_reason: report.excluded_by_reason.clone(),
+        unreadable_files: report.unreadable_files.clone(),
+        unsupported_encoding_files: report.unsupported_encoding_files.clone(),
+        sensitive_files: report.sensitive_files.clone(),
+        symlink_files: report.symlink_files.clone(),
+        invalid_gitignore_rules: report.invalid_gitignore_rules.clone(),
+        cancelled: report.cancelled,
+        file_count,
+        generation,
+        error_code: error_code.map(str::to_owned),
+        updated_at: timestamp_now(),
+    }
+}
+
+fn new_scan_operation_id() -> String {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    let sequence = NEXT_SCAN_OPERATION_ID.fetch_add(1, Ordering::Relaxed);
+    format!("scan-{timestamp}-{sequence}")
+}
+
+fn scan_state_error(error: ScanStateError) -> IpcError {
+    match error {
+        ScanStateError::AlreadyRunning => ipc_error(
+            "scan_already_running",
+            ErrorCategory::Scan,
+            "当前项目已有扫描",
+            false,
+        ),
+        ScanStateError::NotFound => ipc_error(
+            "scan_not_found",
+            ErrorCategory::Scan,
+            "扫描操作不存在",
+            false,
+        ),
+    }
 }
 
 fn database_unavailable() -> IpcError {

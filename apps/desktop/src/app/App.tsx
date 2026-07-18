@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import type {
   IpcError,
   ProjectSummaryDto,
+  ScanReportDto,
 } from "@batch-code-analyzer/ipc-types";
 
 import {
@@ -11,6 +12,12 @@ import {
   listProjects,
 } from "../ipc/projects";
 import { checkBackendHealth } from "../ipc/health";
+import {
+  cancelScan,
+  getScanReport,
+  startScan,
+  subscribeScanProgress,
+} from "../ipc/scan";
 import { AppShell, type ShellHealthState, type ShellProject } from "./AppShell";
 
 export function App() {
@@ -22,6 +29,9 @@ export function App() {
   );
   const [projectError, setProjectError] = useState<string | null>(null);
   const [isAddingProject, setIsAddingProject] = useState(false);
+  const [scanReports, setScanReports] = useState<Record<string, ScanReportDto>>(
+    {},
+  );
 
   const refreshProjects = useCallback(async () => {
     const items = await listProjects();
@@ -72,6 +82,28 @@ export function App() {
   }, [refreshProjects]);
 
   useEffect(() => {
+    let active = true;
+    let unlisten: (() => void) | undefined;
+    void subscribeScanProgress((report) => {
+      if (!active) return;
+      setScanReports((current) => ({
+        ...current,
+        [report.projectId]: report,
+      }));
+    }).then((cleanup) => {
+      if (active) {
+        unlisten = cleanup;
+      } else {
+        cleanup();
+      }
+    });
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
     if (!selectedProjectId) return;
     let active = true;
     void getProject(selectedProjectId).then(
@@ -111,18 +143,49 @@ export function App() {
     }
   };
 
+  const handleStartScan = async () => {
+    if (!selectedProjectId) return;
+    setProjectError(null);
+    try {
+      const response = await startScan(selectedProjectId);
+      const report = await getScanReport(response.operationId);
+      setScanReports((current) => ({
+        ...current,
+        [selectedProjectId]: report,
+      }));
+    } catch (error) {
+      setProjectError(safeProjectError(error));
+    }
+  };
+
+  const handleCancelScan = async () => {
+    if (!selectedProjectId) return;
+    const report = scanReports[selectedProjectId];
+    if (!report || report.status !== "running") return;
+    try {
+      await cancelScan(report.operationId);
+    } catch (error) {
+      setProjectError(safeProjectError(error));
+    }
+  };
+
   return (
     <AppShell
       healthState={healthState}
       isAddingProject={isAddingProject}
       onAddProject={handleAddProject}
+      onCancelScan={handleCancelScan}
       onSelectProject={setSelectedProjectId}
+      onStartScan={handleStartScan}
       onRetryHealth={() => {
         setHealthState("checking");
         setRequestId((current) => current + 1);
       }}
       projectError={projectError}
       projects={projects}
+      scanReport={
+        selectedProjectId ? (scanReports[selectedProjectId] ?? null) : null
+      }
       selectedProjectId={selectedProjectId}
     />
   );
@@ -136,6 +199,10 @@ function safeProjectError(error: unknown): string {
       persistence_transaction_failed: "项目数据暂时无法保存。",
       project_path_duplicate: "该目录已经登记，已保留原项目。",
       project_path_unavailable: "所选目录不可用。",
+      scan_already_running: "当前项目已有扫描。",
+      scan_cancelled: "扫描已取消，本次结果未提交。",
+      scan_failed: "扫描失败，请检查项目路径和权限。",
+      scan_not_found: "扫描操作不存在。",
     };
     return messages[error.code] ?? "项目暂时无法添加。";
   }

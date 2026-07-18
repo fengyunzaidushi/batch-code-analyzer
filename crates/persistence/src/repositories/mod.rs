@@ -1,9 +1,9 @@
 //! Transactional repositories for persisted domain entities.
 
 use batch_code_analyzer_domain::{
-    Attempt, AttemptId, ContextVersion, ContextVersionId, FileRecord, FileRecordId, Project,
-    ProjectId, Run, RunId, RunStats, RunStatus, Task, TaskId, TaskStateMachine, TaskStatus,
-    TaskTransition,
+    Attempt, AttemptId, ContextVersion, ContextVersionId, FileRecord, FileRecordId,
+    FileResultStatus, FileSourceStatus, Project, ProjectId, Rfc3339Timestamp, Run, RunId, RunStats,
+    RunStatus, Task, TaskId, TaskStateMachine, TaskStatus, TaskTransition,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
@@ -246,6 +246,78 @@ impl Repository<'_> {
         }
         .await;
         finish_read(transaction, result).await
+    }
+
+    /// Commits one completed scanner generation atomically.
+    ///
+    /// Existing rows are updated by normalized path, while rows absent from
+    /// the new generation become deleted. A cancelled or failed scan must not
+    /// call this method, so it cannot leave a partial generation behind.
+    ///
+    /// # Errors
+    ///
+    /// Returns a persistence error when the generation cannot be written or
+    /// the stored state cannot be encoded.
+    pub async fn commit_scan(
+        &self,
+        project_id: &ProjectId,
+        file_records: &[FileRecord],
+        now: &Rfc3339Timestamp,
+    ) -> Result<u32, PersistenceError> {
+        let mut transaction = self.database.begin_write().await?;
+        let result = async {
+            let generation: i64 = sqlx::query_scalar(
+                "SELECT COALESCE(MAX(scan_generation), 0) + 1
+                 FROM file_records WHERE project_id = ?",
+            )
+            .bind(project_id.as_str())
+            .fetch_one(transaction.connection())
+            .await
+            .map_err(|_| PersistenceError::TransactionFailed)?;
+            let generation =
+                u32::try_from(generation).map_err(|_| PersistenceError::InvalidStoredState)?;
+
+            for file_record in file_records {
+                if file_record.project_id != *project_id {
+                    return Err(PersistenceError::InvalidStoredState);
+                }
+                let row = FileRecordRow::from_domain(
+                    file_record,
+                    FileRecordRowMetadata {
+                        normalized_relative_path: normalized_path(&file_record.relative_path),
+                        latest_successful_task_id: None,
+                        scan_generation: generation,
+                        created_at: now.clone(),
+                        updated_at: now.clone(),
+                    },
+                )?;
+                upsert_file_record(&mut transaction, &row).await?;
+            }
+
+            let deleted_source_status = encode_status(FileSourceStatus::Deleted)?;
+            let stale_result_status = encode_status(FileResultStatus::Stale)?;
+            sqlx::query(
+                "UPDATE file_records
+                 SET source_status = ?, included = 0, exclusion_reason = ?,
+                     result_status = CASE WHEN result_status = ? THEN result_status ELSE ? END,
+                     updated_at = ?
+                 WHERE project_id = ? AND scan_generation < ?",
+            )
+            .bind(deleted_source_status)
+            .bind("deleted")
+            .bind(encode_status(FileResultStatus::None)?)
+            .bind(stale_result_status)
+            .bind(now.as_str())
+            .bind(project_id.as_str())
+            .bind(i64::from(generation))
+            .execute(transaction.connection())
+            .await
+            .map_err(|_| PersistenceError::TransactionFailed)?;
+
+            Ok(generation)
+        }
+        .await;
+        finish_write(transaction, result).await
     }
 
     /// Inserts an immutable `ContextVersion`.
@@ -671,6 +743,58 @@ async fn insert_file_record(
             latest_successful_run_id, latest_successful_task_id, scan_generation,
             created_at, updated_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&row.id)
+    .bind(&row.project_id)
+    .bind(&row.relative_path)
+    .bind(&row.normalized_relative_path)
+    .bind(row.size_bytes)
+    .bind(&row.modified_at)
+    .bind(&row.content_hash)
+    .bind(&row.encoding)
+    .bind(&row.language)
+    .bind(&row.source_status)
+    .bind(row.included)
+    .bind(&row.exclusion_reason)
+    .bind(&row.sensitive_findings_json)
+    .bind(&row.result_status)
+    .bind(&row.latest_successful_run_id)
+    .bind(&row.latest_successful_task_id)
+    .bind(row.scan_generation)
+    .bind(&row.created_at)
+    .bind(&row.updated_at)
+    .execute(transaction.connection())
+    .await
+    .map_err(|_| PersistenceError::TransactionFailed)?;
+    Ok(())
+}
+
+async fn upsert_file_record(
+    transaction: &mut WriteTransaction<'_>,
+    row: &FileRecordRow,
+) -> Result<(), PersistenceError> {
+    sqlx::query(
+        "INSERT INTO file_records (
+            id, project_id, relative_path, normalized_relative_path, size_bytes,
+            modified_at, content_hash, encoding, language, source_status, included,
+            exclusion_reason, sensitive_findings_json, result_status,
+            latest_successful_run_id, latest_successful_task_id, scan_generation,
+            created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(project_id, normalized_relative_path) DO UPDATE SET
+            relative_path = excluded.relative_path,
+            size_bytes = excluded.size_bytes,
+            modified_at = excluded.modified_at,
+            content_hash = excluded.content_hash,
+            encoding = excluded.encoding,
+            language = excluded.language,
+            source_status = excluded.source_status,
+            included = excluded.included,
+            exclusion_reason = excluded.exclusion_reason,
+            sensitive_findings_json = excluded.sensitive_findings_json,
+            result_status = excluded.result_status,
+            scan_generation = excluded.scan_generation,
+            updated_at = excluded.updated_at",
     )
     .bind(&row.id)
     .bind(&row.project_id)
@@ -1197,6 +1321,14 @@ where
 
 fn encode<T: Serialize>(value: &T) -> Result<String, PersistenceError> {
     serde_json::to_string(value).map_err(|_| PersistenceError::InvalidStoredState)
+}
+
+fn encode_status<T: Serialize>(status: T) -> Result<String, PersistenceError> {
+    encode(&status)
+}
+
+fn normalized_path(path: &str) -> String {
+    path.replace('\\', "/")
 }
 
 fn decode_status<T: DeserializeOwned>(value: &str) -> Result<T, PersistenceError> {
