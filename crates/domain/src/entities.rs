@@ -89,6 +89,50 @@ pub struct ApiRouting {
     pub fallbacks: Vec<ApiFallback>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "kebab-case")]
+pub enum ApiProtocol {
+    #[default]
+    #[serde(rename = "openai-responses")]
+    OpenAiResponses,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiModelInfo {
+    pub id: String,
+    pub display_name: Option<String>,
+    pub owned_by: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ApiProfileConnectionStatus {
+    #[default]
+    Unknown,
+    Healthy,
+    Failed,
+}
+
+/// Persisted API profile metadata. The secret itself is never part of this entity.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiProfile {
+    pub id: ApiProfileId,
+    pub name: String,
+    pub protocol: ApiProtocol,
+    pub base_url: String,
+    pub secret_ref: Option<String>,
+    pub default_model: Option<String>,
+    pub model_cache: Vec<ApiModelInfo>,
+    pub model_cache_updated_at: Option<Rfc3339Timestamp>,
+    pub last_connection_status: ApiProfileConnectionStatus,
+    pub last_error_code: Option<String>,
+    pub last_tested_at: Option<Rfc3339Timestamp>,
+    pub created_at: Rfc3339Timestamp,
+    pub updated_at: Rfc3339Timestamp,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ExecutionDefaults {

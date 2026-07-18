@@ -2,11 +2,14 @@
 members = [
   "apps/desktop/src-tauri",
   "crates/app-core",
+  "crates/api-profiles",
   "crates/domain",
   "crates/ipc-contracts",
+  "crates/model-providers",
   "crates/persistence",
   "crates/repository-scanner",
   "crates/security-core",
+  "crates/secret-store",
 ]
 resolver = "2"
 
@@ -25,6 +28,7 @@ ts-rs = { version = "=12.0.1", features = ["serde-compat"] }
 sqlx = { version = "=0.8.6", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "migrate"] }
 tokio = { version = "=1.52.3", features = ["macros", "rt-multi-thread"] }
 time = { version = "0.3.44", features = ["formatting"] }
+url = "2.5.7"
 tauri-plugin-dialog = "=2.7.1"
 
 [workspace.lints.rust]

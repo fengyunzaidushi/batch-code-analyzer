@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type {
+  ApiProfileSaveRequest,
+  ApiProfileSummaryDto,
   FileRecordSummaryDto,
   IpcError,
   ProjectSummaryDto,
@@ -20,6 +22,15 @@ import {
   startScan,
   subscribeScanProgress,
 } from "../ipc/scan";
+import {
+  deleteApiProfile,
+  fetchApiModels,
+  listApiProfiles,
+  putApiProfileSecret,
+  saveApiProfile,
+  testApiProfile,
+  type ApiProfileSecretPutRequest,
+} from "../ipc/apiProfiles";
 import { AppShell, type ShellHealthState, type ShellProject } from "./AppShell";
 
 export function App() {
@@ -38,6 +49,8 @@ export function App() {
     Record<string, FileRecordSummaryDto[]>
   >({});
   const [fileTotals, setFileTotals] = useState<Record<string, number>>({});
+  const [apiProfiles, setApiProfiles] = useState<ApiProfileSummaryDto[]>([]);
+  const [apiProfileError, setApiProfileError] = useState<string | null>(null);
 
   const refreshProjects = useCallback(async () => {
     const items = await listProjects();
@@ -171,6 +184,21 @@ export function App() {
     };
   }, [refreshFiles, selectedProjectId]);
 
+  useEffect(() => {
+    let active = true;
+    void listApiProfiles().then(
+      (response) => {
+        if (active) setApiProfiles(response.items);
+      },
+      (error) => {
+        if (active) setApiProfileError(safeApiProfileError(error));
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, []);
+
   const handleAddProject = async () => {
     setProjectError(null);
     setIsAddingProject(true);
@@ -240,6 +268,88 @@ export function App() {
     }
   };
 
+  const handleSaveApiProfile = async (
+    request: ApiProfileSaveRequest,
+  ): Promise<ApiProfileSummaryDto> => {
+    setApiProfileError(null);
+    try {
+      const response = await saveApiProfile(request);
+      setApiProfiles((current) => {
+        const existing = current.some(
+          (profile) => profile.id === response.profile.id,
+        );
+        return existing
+          ? current.map((profile) =>
+              profile.id === response.profile.id ? response.profile : profile,
+            )
+          : [...current, response.profile];
+      });
+      return response.profile;
+    } catch (error) {
+      setApiProfileError(safeApiProfileError(error));
+      throw error;
+    }
+  };
+
+  const handlePutApiProfileSecret = async (
+    request: ApiProfileSecretPutRequest,
+  ): Promise<ApiProfileSummaryDto> => {
+    setApiProfileError(null);
+    try {
+      const response = await putApiProfileSecret(request);
+      setApiProfiles((current) =>
+        current.map((profile) =>
+          profile.id === response.profile.id ? response.profile : profile,
+        ),
+      );
+      return response.profile;
+    } catch (error) {
+      setApiProfileError(safeApiProfileError(error));
+      throw error;
+    }
+  };
+
+  const handleTestApiProfile = async (id: string) => {
+    setApiProfileError(null);
+    try {
+      const response = await testApiProfile({ id });
+      setApiProfiles((current) =>
+        current.map((profile) =>
+          profile.id === response.profile.id ? response.profile : profile,
+        ),
+      );
+    } catch (error) {
+      setApiProfileError(safeApiProfileError(error));
+    }
+  };
+
+  const handleFetchApiModels = async (id: string) => {
+    setApiProfileError(null);
+    try {
+      const response = await fetchApiModels({ id });
+      setApiProfiles((current) =>
+        current.map((profile) =>
+          profile.id === response.profile.id ? response.profile : profile,
+        ),
+      );
+    } catch (error) {
+      setApiProfileError(safeApiProfileError(error));
+    }
+  };
+
+  const handleDeleteApiProfile = async (id: string) => {
+    setApiProfileError(null);
+    try {
+      await deleteApiProfile({ id });
+      setApiProfiles((current) =>
+        current.filter((profile) => profile.id !== id),
+      );
+    } catch (error) {
+      setApiProfileError(safeApiProfileError(error));
+      throw error;
+    }
+  };
+
   return (
     <AppShell
       healthState={healthState}
@@ -253,6 +363,13 @@ export function App() {
         setRequestId((current) => current + 1);
       }}
       onSetFileIncluded={handleSetFileIncluded}
+      apiProfileError={apiProfileError}
+      apiProfiles={apiProfiles}
+      onDeleteApiProfile={handleDeleteApiProfile}
+      onFetchApiModels={handleFetchApiModels}
+      onPutApiProfileSecret={handlePutApiProfileSecret}
+      onSaveApiProfile={handleSaveApiProfile}
+      onTestApiProfile={handleTestApiProfile}
       projectError={projectError}
       projects={projects}
       fileRecords={
@@ -289,6 +406,30 @@ function safeProjectError(error: unknown): string {
     return messages[error.code] ?? "项目暂时无法添加。";
   }
   return "项目暂时无法添加。";
+}
+
+function safeApiProfileError(error: unknown): string {
+  if (isIpcError(error)) {
+    const messages: Record<string, string> = {
+      api_profile_in_use: "该 API Profile 仍被项目使用，不能删除。",
+      api_profile_name_duplicate: "API Profile 名称已存在。",
+      provider_authentication_failed: "API Key 无效。",
+      provider_connection_failed: "无法连接 API 服务。",
+      provider_invalid_response: "API 服务返回格式无法识别。",
+      provider_model_unavailable: "模型不可用。",
+      provider_permission_denied: "API Profile 没有访问该模型的权限。",
+      provider_rate_limited: "API 服务当前受到限流。",
+      provider_server_error: "API 服务暂时不可用。",
+      provider_timeout: "API 连接超时。",
+      security_invalid_secret_reference: "API Profile 密钥引用无效。",
+      security_secret_store_failure: "安全存储操作失败。",
+      security_secret_store_unavailable: "安全存储不可用。",
+      validation_invalid_value: "API Profile 配置无效。",
+      validation_required_field: "请填写必填的 API Profile 信息。",
+    };
+    return messages[error.code] ?? "API Profile 操作失败。";
+  }
+  return "API Profile 操作失败。";
 }
 
 function isIpcError(error: unknown): error is IpcError {

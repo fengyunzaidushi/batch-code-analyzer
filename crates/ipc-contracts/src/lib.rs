@@ -5,8 +5,9 @@
 use std::{collections::BTreeMap, path::Path};
 
 use batch_code_analyzer_domain::{
-    ApiProfileId, Attempt as DomainAttempt, AttemptError as DomainAttemptError, AttemptId,
-    AttemptStatus, ContextStatus, ContextVersion as DomainContextVersion, ContextVersionId,
+    ApiModelInfo, ApiProfile, ApiProfileConnectionStatus, ApiProfileId, ApiProtocol,
+    Attempt as DomainAttempt, AttemptError as DomainAttemptError, AttemptId, AttemptStatus,
+    ContextStatus, ContextVersion as DomainContextVersion, ContextVersionId,
     FileRecord as DomainFileRecord, FileRecordId, FileResultStatus, FileSourceStatus,
     Project as DomainProject, ProjectId, ProjectPathStatus, Rfc3339Timestamp, Run as DomainRun,
     RunId, RunStats, RunStatus, RunTransition, Task as DomainTask, TaskId, TaskStatus,
@@ -110,6 +111,104 @@ impl HealthCheckResponse {
 }
 
 pub const DTO_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiProfileSummaryDto {
+    #[ts(type = "1")]
+    pub schema_version: u32,
+    pub id: ApiProfileId,
+    pub name: String,
+    pub protocol: ApiProtocol,
+    pub base_url: String,
+    pub default_model: Option<String>,
+    pub model_cache: Vec<ApiModelInfo>,
+    pub model_cache_updated_at: Option<Rfc3339Timestamp>,
+    pub has_secret: bool,
+    pub last_connection_status: ApiProfileConnectionStatus,
+    pub last_error_code: Option<String>,
+    pub last_tested_at: Option<Rfc3339Timestamp>,
+}
+
+impl ApiProfileSummaryDto {
+    #[must_use]
+    pub fn from_profile(profile: &ApiProfile, has_secret: bool) -> Self {
+        Self {
+            schema_version: DTO_SCHEMA_VERSION,
+            id: profile.id.clone(),
+            name: profile.name.clone(),
+            protocol: profile.protocol,
+            base_url: profile.base_url.clone(),
+            default_model: profile.default_model.clone(),
+            model_cache: profile.model_cache.clone(),
+            model_cache_updated_at: profile.model_cache_updated_at.clone(),
+            has_secret,
+            last_connection_status: profile.last_connection_status,
+            last_error_code: profile.last_error_code.clone(),
+            last_tested_at: profile.last_tested_at.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiProfileSaveRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub id: Option<ApiProfileId>,
+    pub name: String,
+    pub base_url: String,
+    pub default_model: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiProfileSaveResponse {
+    pub profile: ApiProfileSummaryDto,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiProfileListResponse {
+    pub items: Vec<ApiProfileSummaryDto>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiProfileTestRequest {
+    pub id: ApiProfileId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiProfileTestResponse {
+    pub profile: ApiProfileSummaryDto,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiProfileDeleteRequest {
+    pub id: ApiProfileId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiProfileDeleteResponse {
+    pub id: ApiProfileId,
+    pub deleted: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiModelsFetchRequest {
+    pub id: ApiProfileId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiModelsFetchResponse {
+    pub profile: ApiProfileSummaryDto,
+}
 
 /// UI-safe project list item. The repository's absolute location remains in
 /// the Rust application layer and is never exposed as a list DTO field.
@@ -546,6 +645,16 @@ pub fn export_types(out_dir: &Path) -> Result<(), ExportError> {
     let config = Config::new().with_out_dir(out_dir);
 
     IpcError::export_all(&config)?;
+    ApiProfileSummaryDto::export_all(&config)?;
+    ApiProfileSaveRequest::export_all(&config)?;
+    ApiProfileSaveResponse::export_all(&config)?;
+    ApiProfileListResponse::export_all(&config)?;
+    ApiProfileTestRequest::export_all(&config)?;
+    ApiProfileTestResponse::export_all(&config)?;
+    ApiProfileDeleteRequest::export_all(&config)?;
+    ApiProfileDeleteResponse::export_all(&config)?;
+    ApiModelsFetchRequest::export_all(&config)?;
+    ApiModelsFetchResponse::export_all(&config)?;
     PageRequest::export_all(&config)?;
     PageResponse::<String>::export_all(&config)?;
     HealthCheckResponse::export_all(&config)?;
@@ -594,12 +703,13 @@ mod tests {
     use std::{env, fs};
 
     use super::{
-        export_types, HealthCheckResponse, HealthStatus, ProjectSummaryDto,
+        export_types, ApiProfileSummaryDto, HealthCheckResponse, HealthStatus, ProjectSummaryDto,
         HEALTH_CHECK_SCHEMA_VERSION,
     };
     use batch_code_analyzer_domain::{
-        ApiProfileId, ApiRouting, ContextStatus, ExecutionDefaults, FilterRules,
-        Project as DomainProject, ProjectContext, ProjectId, ProjectPathStatus, Rfc3339Timestamp,
+        ApiProfile, ApiProfileConnectionStatus, ApiProfileId, ApiProtocol, ApiRouting,
+        ContextStatus, ExecutionDefaults, FilterRules, Project as DomainProject, ProjectContext,
+        ProjectId, ProjectPathStatus, Rfc3339Timestamp,
     };
 
     #[test]
@@ -685,5 +795,29 @@ mod tests {
         assert!(!serialized.contains("sourceDirectory"));
         assert!(!serialized.contains("/private/workspace"));
         assert!(!serialized.contains("apiKey"));
+    }
+
+    #[test]
+    fn api_profile_summary_never_serializes_secret_reference() {
+        let profile = ApiProfile {
+            id: ApiProfileId::new("profile-1"),
+            name: "Local".into(),
+            protocol: ApiProtocol::OpenAiResponses,
+            base_url: "https://example.test/v1".into(),
+            secret_ref: Some("session-secret-1".into()),
+            default_model: None,
+            model_cache: Vec::new(),
+            model_cache_updated_at: None,
+            last_connection_status: ApiProfileConnectionStatus::Unknown,
+            last_error_code: None,
+            last_tested_at: None,
+            created_at: Rfc3339Timestamp::new("2026-07-18T10:00:00Z"),
+            updated_at: Rfc3339Timestamp::new("2026-07-18T10:00:00Z"),
+        };
+        let json = serde_json::to_string(&ApiProfileSummaryDto::from_profile(&profile, true))
+            .expect("summary should serialize");
+        assert!(json.contains("hasSecret"));
+        assert!(!json.contains("session-secret-1"));
+        assert!(!json.contains("secretRef"));
     }
 }

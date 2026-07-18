@@ -1,4 +1,6 @@
 use batch_code_analyzer_persistence::{Database, DatabaseHealth, DatabaseStartup};
+use batch_code_analyzer_secret_store::{MemorySecretStore, SecretStoreAvailability};
+use std::sync::Arc;
 use tauri::Manager;
 
 mod commands;
@@ -10,6 +12,7 @@ pub(crate) struct PersistenceState {
     pub(crate) database: Option<Database>,
     pub(crate) health: DatabaseHealth,
     pub(crate) scans: ScanState,
+    pub(crate) secret_store: Arc<MemorySecretStore>,
 }
 
 /// Starts the desktop application and registers its IPC commands.
@@ -28,11 +31,17 @@ pub fn run() {
                     health: database.health(),
                     database: Some(database),
                     scans: ScanState::default(),
+                    secret_store: Arc::new(MemorySecretStore::with_availability(
+                        SecretStoreAvailability::SessionOnly,
+                    )),
                 },
                 DatabaseStartup::Recovery(recovery) => PersistenceState {
                     health: recovery.health(),
                     database: None,
                     scans: ScanState::default(),
+                    secret_store: Arc::new(MemorySecretStore::with_availability(
+                        SecretStoreAvailability::SessionOnly,
+                    )),
                 },
             };
 
@@ -45,6 +54,12 @@ pub fn run() {
             commands::project_list,
             commands::project_add,
             commands::project_get,
+            commands::api_profile_list,
+            commands::api_profile_save,
+            commands::api_profile_secret_put,
+            commands::api_profile_test,
+            commands::api_models_fetch,
+            commands::api_profile_delete,
             commands::file_list,
             commands::file_set_included,
             commands::scan_start,

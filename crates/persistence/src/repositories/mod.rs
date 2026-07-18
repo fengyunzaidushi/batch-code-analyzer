@@ -1,15 +1,17 @@
 //! Transactional repositories for persisted domain entities.
 
 use batch_code_analyzer_domain::{
-    Attempt, AttemptId, ContextVersion, ContextVersionId, FileRecord, FileRecordId,
-    FileResultStatus, FileSourceStatus, Project, ProjectId, Rfc3339Timestamp, Run, RunId, RunStats,
-    RunStatus, Task, TaskId, TaskStateMachine, TaskStatus, TaskTransition,
+    ApiProfile, ApiProfileId, ApiRouting, Attempt, AttemptId, ContextVersion, ContextVersionId,
+    FileRecord, FileRecordId, FileResultStatus, FileSourceStatus, Project, ProjectId,
+    Rfc3339Timestamp, Run, RunId, RunStats, RunStatus, Task, TaskId, TaskStateMachine, TaskStatus,
+    TaskTransition,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 use sqlx::{sqlite::SqliteRow, Row};
 
 use crate::{
+    rows::{ApiProfileRow, ApiProfileRowMetadata},
     AttemptRow, AttemptRowMetadata, ContextVersionRow, Database, FileRecordRow,
     FileRecordRowMetadata, PersistenceError, ProjectRow, ProjectRowMetadata, RunRow,
     RunRowMetadata, TaskRow, WriteTransaction,
@@ -125,6 +127,197 @@ impl Repository<'_> {
         }
         .await;
         finish_read(transaction, result).await
+    }
+
+    /// Inserts an API profile's non-sensitive metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns a persistence error when metadata cannot be encoded or `SQLite`
+    /// rejects the transaction.
+    pub async fn create_api_profile(&self, profile: &ApiProfile) -> Result<(), PersistenceError> {
+        let row = ApiProfileRow::from_domain(
+            profile,
+            &ApiProfileRowMetadata {
+                created_at: profile.created_at.clone(),
+                updated_at: profile.updated_at.clone(),
+            },
+        )?;
+        let mut transaction = self.database.begin_write().await?;
+        let result = sqlx::query(
+            "INSERT INTO api_profiles (
+                id, name, protocol, base_url, key_reference_id, default_model,
+                model_cache_json, model_cache_updated_at, last_connection_status,
+                last_error_code, last_tested_at, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&row.id)
+        .bind(&row.name)
+        .bind(&row.protocol)
+        .bind(&row.base_url)
+        .bind(&row.key_reference_id)
+        .bind(&row.default_model)
+        .bind(&row.model_cache_json)
+        .bind(&row.model_cache_updated_at)
+        .bind(&row.last_connection_status)
+        .bind(&row.last_error_code)
+        .bind(&row.last_tested_at)
+        .bind(&row.created_at)
+        .bind(&row.updated_at)
+        .execute(transaction.connection())
+        .await
+        .map_err(|error| map_api_profile_write_error(&error))
+        .map(|_| ());
+        finish_write(transaction, result).await
+    }
+
+    /// Updates an API profile's non-sensitive metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns a persistence error when the profile is missing or `SQLite`
+    /// rejects the transaction.
+    pub async fn update_api_profile(&self, profile: &ApiProfile) -> Result<(), PersistenceError> {
+        let row = ApiProfileRow::from_domain(
+            profile,
+            &ApiProfileRowMetadata {
+                created_at: profile.created_at.clone(),
+                updated_at: profile.updated_at.clone(),
+            },
+        )?;
+        let mut transaction = self.database.begin_write().await?;
+        let result = sqlx::query(
+            "UPDATE api_profiles SET name = ?, protocol = ?, base_url = ?,
+                key_reference_id = ?, default_model = ?, model_cache_json = ?,
+                model_cache_updated_at = ?, last_connection_status = ?,
+                last_error_code = ?, last_tested_at = ?, updated_at = ?
+             WHERE id = ?",
+        )
+        .bind(&row.name)
+        .bind(&row.protocol)
+        .bind(&row.base_url)
+        .bind(&row.key_reference_id)
+        .bind(&row.default_model)
+        .bind(&row.model_cache_json)
+        .bind(&row.model_cache_updated_at)
+        .bind(&row.last_connection_status)
+        .bind(&row.last_error_code)
+        .bind(&row.last_tested_at)
+        .bind(&row.updated_at)
+        .bind(&row.id)
+        .execute(transaction.connection())
+        .await
+        .map_err(|error| map_api_profile_write_error(&error))
+        .and_then(|result| {
+            if result.rows_affected() == 0 {
+                Err(PersistenceError::RecordNotFound {
+                    kind: "api_profile",
+                    id: row.id.clone(),
+                })
+            } else {
+                Ok(())
+            }
+        });
+        finish_write(transaction, result).await
+    }
+
+    /// Loads one API profile by ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns a persistence error when the query or stored metadata cannot be
+    /// decoded.
+    pub async fn get_api_profile(
+        &self,
+        profile_id: &ApiProfileId,
+    ) -> Result<Option<ApiProfile>, PersistenceError> {
+        let mut transaction = self.database.begin_write().await?;
+        let result = sqlx::query(
+            "SELECT id, name, protocol, base_url, key_reference_id, default_model,
+                model_cache_json, model_cache_updated_at, last_connection_status,
+                last_error_code, last_tested_at, created_at, updated_at
+             FROM api_profiles WHERE id = ?",
+        )
+        .bind(profile_id.as_str())
+        .fetch_optional(transaction.connection())
+        .await
+        .map_err(|_| PersistenceError::TransactionFailed)?
+        .map(|row| api_profile_from_row(&row))
+        .transpose();
+        finish_read(transaction, result).await
+    }
+
+    /// Lists API profiles in stable name/ID order.
+    ///
+    /// # Errors
+    ///
+    /// Returns a persistence error when the query or stored metadata cannot be
+    /// decoded.
+    pub async fn list_api_profiles(&self) -> Result<Vec<ApiProfile>, PersistenceError> {
+        let mut transaction = self.database.begin_write().await?;
+        let result = sqlx::query(
+            "SELECT id, name, protocol, base_url, key_reference_id, default_model,
+                model_cache_json, model_cache_updated_at, last_connection_status,
+                last_error_code, last_tested_at, created_at, updated_at
+             FROM api_profiles ORDER BY name ASC, id ASC",
+        )
+        .fetch_all(transaction.connection())
+        .await
+        .map_err(|_| PersistenceError::TransactionFailed)?
+        .into_iter()
+        .map(|row| api_profile_from_row(&row))
+        .collect();
+        finish_read(transaction, result).await
+    }
+
+    /// Deletes an API profile unless a Project still references it.
+    ///
+    /// # Errors
+    ///
+    /// Returns `api_profile_in_use` for referenced profiles, or a persistence
+    /// error when the query or delete transaction fails.
+    pub async fn delete_api_profile(
+        &self,
+        profile_id: &ApiProfileId,
+    ) -> Result<(), PersistenceError> {
+        let mut transaction = self.database.begin_write().await?;
+        let result = async {
+            let projects = sqlx::query("SELECT api_routing_json FROM projects")
+                .fetch_all(transaction.connection())
+                .await
+                .map_err(|_| PersistenceError::TransactionFailed)?;
+            for row in projects {
+                let routing: ApiRouting = serde_json::from_str(
+                    &row.try_get::<String, _>("api_routing_json")
+                        .map_err(|_| PersistenceError::TransactionFailed)?,
+                )
+                .map_err(|_| PersistenceError::InvalidStoredState)?;
+                if routing.primary_profile_id.as_ref() == Some(profile_id)
+                    || routing
+                        .fallbacks
+                        .iter()
+                        .any(|fallback| fallback.profile_id == *profile_id)
+                {
+                    return Err(PersistenceError::StateTransition {
+                        code: "api_profile_in_use",
+                    });
+                }
+            }
+            let result = sqlx::query("DELETE FROM api_profiles WHERE id = ?")
+                .bind(profile_id.as_str())
+                .execute(transaction.connection())
+                .await
+                .map_err(|error| map_api_profile_write_error(&error))?;
+            if result.rows_affected() == 0 {
+                return Err(PersistenceError::RecordNotFound {
+                    kind: "api_profile",
+                    id: profile_id.to_string(),
+                });
+            }
+            Ok(())
+        }
+        .await;
+        finish_write(transaction, result).await
     }
 
     /// Updates mutable Project settings and its canonical path atomically.
@@ -1356,6 +1549,27 @@ fn attempt_from_row(row: &SqliteRow) -> Result<Attempt, PersistenceError> {
     .try_into()
 }
 
+fn api_profile_from_row(row: &SqliteRow) -> Result<ApiProfile, PersistenceError> {
+    ApiProfileRow {
+        id: get(row, "id")?,
+        name: get(row, "name")?,
+        protocol: get(row, "protocol")?,
+        base_url: get(row, "base_url")?,
+        key_reference_id: get(row, "key_reference_id")?,
+        default_model: get(row, "default_model")?,
+        model_cache_json: get::<Option<String>>(row, "model_cache_json")?
+            .unwrap_or_else(|| "[]".into()),
+        model_cache_updated_at: get(row, "model_cache_updated_at")?,
+        last_connection_status: get::<Option<String>>(row, "last_connection_status")?
+            .unwrap_or_else(|| "\"unknown\"".into()),
+        last_error_code: get(row, "last_error_code")?,
+        last_tested_at: get(row, "last_tested_at")?,
+        created_at: get(row, "created_at")?,
+        updated_at: get(row, "updated_at")?,
+    }
+    .try_into()
+}
+
 fn get<T>(row: &SqliteRow, column: &str) -> Result<T, PersistenceError>
 where
     for<'r> T: sqlx::Decode<'r, sqlx::Sqlite> + sqlx::Type<sqlx::Sqlite>,
@@ -1393,6 +1607,17 @@ fn map_project_write_error(error: &sqlx::Error) -> PersistenceError {
         if database_error.message().contains("UNIQUE") {
             return PersistenceError::StateTransition {
                 code: "project_path_duplicate",
+            };
+        }
+    }
+    PersistenceError::TransactionFailed
+}
+
+fn map_api_profile_write_error(error: &sqlx::Error) -> PersistenceError {
+    if let sqlx::Error::Database(database_error) = error {
+        if database_error.message().contains("UNIQUE") {
+            return PersistenceError::StateTransition {
+                code: "api_profile_name_duplicate",
             };
         }
     }

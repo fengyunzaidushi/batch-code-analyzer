@@ -5,8 +5,6 @@ edition = "2021"
 rust-version = "1.97"
 license = "UNLICENSED"
 
-[workspace]
-
 [dependencies]
 async-trait = "0.1.89"
 batch-code-analyzer-api-profiles = { path = "../api-profiles" }

@@ -11,9 +11,10 @@ use std::{
 };
 
 use batch_code_analyzer_domain::{
-    ApiRouting, ContextStatus, ExecutionDefaults, FileRecord, FileRecordId, FileResultStatus,
-    FileSourceStatus, FilterRules, Project, ProjectContext, ProjectId, ProjectPathStatus,
-    Rfc3339Timestamp, SensitiveFinding,
+    ApiModelInfo, ApiProfile, ApiProfileConnectionStatus, ApiProfileId, ApiProtocol, ApiRouting,
+    ContextStatus, ExecutionDefaults, FileRecord, FileRecordId, FileResultStatus, FileSourceStatus,
+    FilterRules, Project, ProjectContext, ProjectId, ProjectPathStatus, Rfc3339Timestamp,
+    SensitiveFinding,
 };
 use batch_code_analyzer_persistence::{
     Database, PersistenceError, ProjectRowMetadata, LATEST_SCHEMA_VERSION,
@@ -30,6 +31,7 @@ pub use batch_code_analyzer_domain as domain;
 const DEFAULT_PROMPT: &str = "请结合提供的项目上下文，用通俗但准确的语言解释当前代码文件。\n请说明：\n1. 该文件在项目中的核心职责；\n2. 关键输入、输出、状态或数据流；\n3. 它与哪些模块或功能协作，以及它为何存在；\n4. 修改或缺失它可能带来的影响。\n如无法从上下文或代码中确认，请明确说明不确定性，不要臆测。";
 static NEXT_PROJECT_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_FILE_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_API_PROFILE_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum ProjectServiceError {
@@ -103,6 +105,40 @@ impl From<PersistenceError> for FileServiceError {
     }
 }
 
+#[derive(Debug, Eq, PartialEq)]
+pub enum ApiProfileServiceError {
+    NotFound,
+    InvalidName,
+    InvalidBaseUrl,
+    UrlContainsCredentials,
+    Persistence(PersistenceError),
+}
+
+impl ApiProfileServiceError {
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::NotFound | Self::InvalidName | Self::InvalidBaseUrl => "validation_invalid_value",
+            Self::UrlContainsCredentials => "security_invalid_secret_reference",
+            Self::Persistence(error) => error.code(),
+        }
+    }
+}
+
+impl std::fmt::Display for ApiProfileServiceError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.code())
+    }
+}
+
+impl std::error::Error for ApiProfileServiceError {}
+
+impl From<PersistenceError> for ApiProfileServiceError {
+    fn from(error: PersistenceError) -> Self {
+        Self::Persistence(error)
+    }
+}
+
 #[derive(Debug)]
 pub struct ProjectAddResult {
     pub project: Project,
@@ -111,6 +147,10 @@ pub struct ProjectAddResult {
 }
 
 pub struct ProjectService<'database> {
+    database: &'database Database,
+}
+
+pub struct ApiProfileService<'database> {
     database: &'database Database,
 }
 
@@ -518,6 +558,173 @@ impl<'database> ProjectService<'database> {
     }
 }
 
+impl<'database> ApiProfileService<'database> {
+    #[must_use]
+    pub const fn new(database: &'database Database) -> Self {
+        Self { database }
+    }
+
+    /// Lists persisted API profile metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns a persistence error when the database cannot be read.
+    pub async fn list(&self) -> Result<Vec<ApiProfile>, PersistenceError> {
+        self.database.repository().list_api_profiles().await
+    }
+
+    /// Loads one API profile.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable service error when the profile is missing or storage
+    /// cannot be read.
+    pub async fn get(
+        &self,
+        profile_id: &ApiProfileId,
+    ) -> Result<ApiProfile, ApiProfileServiceError> {
+        self.database
+            .repository()
+            .get_api_profile(profile_id)
+            .await?
+            .ok_or(ApiProfileServiceError::NotFound)
+    }
+
+    /// Creates or updates validated non-sensitive API profile metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation or persistence error when the profile is invalid
+    /// or cannot be stored.
+    pub async fn save(
+        &self,
+        profile_id: Option<ApiProfileId>,
+        name: String,
+        base_url: String,
+        default_model: Option<String>,
+    ) -> Result<ApiProfile, ApiProfileServiceError> {
+        let name = name.trim().to_owned();
+        if name.is_empty() {
+            return Err(ApiProfileServiceError::InvalidName);
+        }
+        let base_url = normalize_profile_base_url(&base_url)?;
+        let now = timestamp_now();
+        if let Some(profile_id) = profile_id {
+            let mut profile = self.get(&profile_id).await?;
+            profile.name = name;
+            profile.base_url = base_url;
+            profile.default_model = default_model;
+            profile.updated_at = now;
+            self.database
+                .repository()
+                .update_api_profile(&profile)
+                .await?;
+            return Ok(profile);
+        }
+
+        let profile = ApiProfile {
+            id: new_api_profile_id(),
+            name,
+            protocol: ApiProtocol::OpenAiResponses,
+            base_url,
+            secret_ref: None,
+            default_model,
+            model_cache: Vec::new(),
+            model_cache_updated_at: None,
+            last_connection_status: ApiProfileConnectionStatus::Unknown,
+            last_error_code: None,
+            last_tested_at: None,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        self.database
+            .repository()
+            .create_api_profile(&profile)
+            .await?;
+        Ok(profile)
+    }
+
+    /// Associates an opaque `SecretStore` reference with a profile.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable service error when the profile is missing or storage
+    /// cannot be updated.
+    pub async fn set_secret_ref(
+        &self,
+        profile_id: &ApiProfileId,
+        secret_ref: Option<String>,
+    ) -> Result<ApiProfile, ApiProfileServiceError> {
+        let mut profile = self.get(profile_id).await?;
+        profile.secret_ref = secret_ref;
+        profile.updated_at = timestamp_now();
+        self.database
+            .repository()
+            .update_api_profile(&profile)
+            .await?;
+        Ok(profile)
+    }
+
+    /// Persists a sanitized connection result and optional model cache.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable service error when the profile is missing or storage
+    /// cannot be updated.
+    pub async fn set_test_result(
+        &self,
+        profile_id: &ApiProfileId,
+        status: ApiProfileConnectionStatus,
+        error_code: Option<String>,
+        models: Vec<ApiModelInfo>,
+    ) -> Result<ApiProfile, ApiProfileServiceError> {
+        let mut profile = self.get(profile_id).await?;
+        let now = timestamp_now();
+        profile.last_connection_status = status;
+        profile.last_error_code = error_code;
+        profile.last_tested_at = Some(now.clone());
+        profile.updated_at = now;
+        if !models.is_empty() {
+            profile.model_cache = models;
+            profile.model_cache_updated_at = profile.last_tested_at.clone();
+        }
+        self.database
+            .repository()
+            .update_api_profile(&profile)
+            .await?;
+        Ok(profile)
+    }
+
+    /// Deletes a profile that is not referenced by a project.
+    ///
+    /// # Errors
+    ///
+    /// Returns `api_profile_in_use`, a not-found error, or a persistence error.
+    pub async fn delete(&self, profile_id: &ApiProfileId) -> Result<(), ApiProfileServiceError> {
+        self.database
+            .repository()
+            .delete_api_profile(profile_id)
+            .await
+            .map_err(Into::into)
+    }
+}
+
+fn normalize_profile_base_url(value: &str) -> Result<String, ApiProfileServiceError> {
+    let trimmed = value.trim().trim_end_matches('/');
+    let parsed = url::Url::parse(trimmed).map_err(|_| ApiProfileServiceError::InvalidBaseUrl)?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host_str().is_none()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(ApiProfileServiceError::InvalidBaseUrl);
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(ApiProfileServiceError::UrlContainsCredentials);
+    }
+    Ok(trimmed.to_owned())
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ProjectConfigMirror<'project> {
@@ -572,6 +779,14 @@ fn new_file_id() -> FileRecordId {
     FileRecordId::new(format!("file-{sequence}"))
 }
 
+fn new_api_profile_id() -> ApiProfileId {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    let sequence = NEXT_API_PROFILE_ID.fetch_add(1, Ordering::Relaxed);
+    ApiProfileId::new(format!("profile-{timestamp}-{sequence}"))
+}
+
 #[must_use]
 pub fn timestamp_now() -> Rfc3339Timestamp {
     let value = OffsetDateTime::now_utc()
@@ -587,7 +802,10 @@ mod tests {
     use batch_code_analyzer_persistence::Database;
     use batch_code_analyzer_repository_scanner::ScanCancellation;
 
-    use super::{FileServiceError, ProjectService, ProjectServiceError, ScanService};
+    use super::{
+        ApiProfileService, ApiProfileServiceError, FileServiceError, ProjectService,
+        ProjectServiceError, ScanService,
+    };
 
     fn temporary_directory(name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
@@ -832,5 +1050,39 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(path);
+    }
+
+    #[tokio::test]
+    async fn api_profile_service_validates_and_persists_metadata_without_secrets() {
+        let database = Database::open_in_memory()
+            .await
+            .expect("database should open");
+        let service = ApiProfileService::new(&database);
+        assert_eq!(
+            service
+                .save(None, "Profile".into(), "ftp://example.test".into(), None,)
+                .await
+                .expect_err("unsupported protocol should fail"),
+            ApiProfileServiceError::InvalidBaseUrl
+        );
+        let profile = service
+            .save(
+                None,
+                "Profile".into(),
+                "https://example.test/v1/".into(),
+                Some("gpt-5".into()),
+            )
+            .await
+            .expect("profile should save");
+        assert_eq!(profile.base_url, "https://example.test/v1");
+        assert_eq!(profile.secret_ref, None);
+        let with_secret_ref = service
+            .set_secret_ref(&profile.id, Some("session-secret-1".into()))
+            .await
+            .expect("secret reference should update");
+        assert_eq!(
+            with_secret_ref.secret_ref.as_deref(),
+            Some("session-secret-1")
+        );
     }
 }

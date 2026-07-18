@@ -7,11 +7,11 @@ mod ids;
 mod state_machine;
 
 pub use entities::{
-    ApiFallback, ApiRouting, Attempt, AttemptError, ContextStatus, ContextVersion,
-    ContextVersionSourceFile, ExecutionDefaults, FileRecord, FileResultStatus, FileSnapshot,
-    FileSourceStatus, FilterRules, ModelRoutingStrategy, Project, ProjectContext,
-    ProjectPathStatus, RetryPolicy, Rfc3339Timestamp, Run, RunSnapshot, RunStats, SensitiveFinding,
-    Task, TaskValueSource,
+    ApiFallback, ApiModelInfo, ApiProfile, ApiProfileConnectionStatus, ApiProtocol, ApiRouting,
+    Attempt, AttemptError, ContextStatus, ContextVersion, ContextVersionSourceFile,
+    ExecutionDefaults, FileRecord, FileResultStatus, FileSnapshot, FileSourceStatus, FilterRules,
+    ModelRoutingStrategy, Project, ProjectContext, ProjectPathStatus, RetryPolicy,
+    Rfc3339Timestamp, Run, RunSnapshot, RunStats, SensitiveFinding, Task, TaskValueSource,
 };
 pub use ids::{ApiProfileId, AttemptId, ContextVersionId, FileRecordId, ProjectId, RunId, TaskId};
 pub use state_machine::{

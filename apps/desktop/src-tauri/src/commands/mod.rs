@@ -3,24 +3,41 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use batch_code_analyzer_api_profiles::{
+    ApiProfile as ProviderApiProfile, ApiProfileId as ProviderApiProfileId,
+};
 use batch_code_analyzer_app_core::{
-    domain::ProjectId, timestamp_now, FileServiceError, ProjectService, ProjectServiceError,
-    ScanService,
+    domain::{ApiModelInfo, ApiProfile, ApiProfileConnectionStatus, ApiProfileId, ProjectId},
+    timestamp_now, ApiProfileService, ApiProfileServiceError, FileServiceError, ProjectService,
+    ProjectServiceError, ScanService,
 };
 use batch_code_analyzer_ipc_contracts::{
+    ApiModelsFetchRequest, ApiModelsFetchResponse, ApiProfileDeleteRequest,
+    ApiProfileDeleteResponse, ApiProfileListResponse, ApiProfileSaveRequest,
+    ApiProfileSaveResponse, ApiProfileSummaryDto, ApiProfileTestRequest, ApiProfileTestResponse,
     DatabaseStatus, ErrorCategory, FileListRequest, FileRecordSummaryDto, FileSetIncludedRequest,
     FileSetIncludedResponse, HealthCheckResponse, HealthStatus, IpcError, PageResponse,
     ProjectAddRequest, ProjectAddResponse, ProjectDetailDto, ProjectSummaryDto, ScanCancelRequest,
     ScanCancelResponse, ScanOperationStatus, ScanReportDto, ScanStartRequest, ScanStartResponse,
     HEALTH_CHECK_SCHEMA_VERSION,
 };
+use batch_code_analyzer_model_providers::{ModelProvider, OpenAiResponsesProvider, ProviderError};
 use batch_code_analyzer_persistence::DatabaseHealth;
 use batch_code_analyzer_repository_scanner::{ImportReport, ScanCancellation};
+use batch_code_analyzer_secret_store::{SecretRef, SecretStore, SecretValue};
+use serde::Deserialize;
 use tauri::{AppHandle, Emitter, State};
 
 use crate::{scan_state::ScanStateError, PersistenceState};
 
 static NEXT_SCAN_OPERATION_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ApiProfileSecretPutRequest {
+    pub profile_id: ApiProfileId,
+    pub secret: String,
+}
 
 // Tauri's `CommandArg` implementation requires `State<T>` by value.
 #[allow(clippy::needless_pass_by_value)]
@@ -70,6 +87,282 @@ pub(crate) async fn project_get(
         .map_err(|error| persistence_error(&error))?
         .ok_or_else(|| project_not_found(project_id.as_str()))?;
     Ok(ProjectDetailDto::from(&project))
+}
+
+#[tauri::command]
+pub(crate) async fn api_profile_list(
+    state: State<'_, PersistenceState>,
+) -> Result<ApiProfileListResponse, IpcError> {
+    let database = state.database.as_ref().ok_or_else(database_unavailable)?;
+    let profiles = ApiProfileService::new(database)
+        .list()
+        .await
+        .map_err(|error| persistence_error(&error))?;
+    let mut items = Vec::with_capacity(profiles.len());
+    for profile in profiles {
+        items.push(profile_summary(&state, &profile).await);
+    }
+    Ok(ApiProfileListResponse { items })
+}
+
+#[tauri::command]
+pub(crate) async fn api_profile_save(
+    request: ApiProfileSaveRequest,
+    state: State<'_, PersistenceState>,
+) -> Result<ApiProfileSaveResponse, IpcError> {
+    let database = state.database.as_ref().ok_or_else(database_unavailable)?;
+    let profile = ApiProfileService::new(database)
+        .save(
+            request.id,
+            request.name,
+            request.base_url,
+            request.default_model,
+        )
+        .await
+        .map_err(api_profile_service_error)?;
+    Ok(ApiProfileSaveResponse {
+        profile: profile_summary(&state, &profile).await,
+    })
+}
+
+#[tauri::command]
+pub(crate) async fn api_profile_secret_put(
+    request: ApiProfileSecretPutRequest,
+    state: State<'_, PersistenceState>,
+) -> Result<ApiProfileSaveResponse, IpcError> {
+    if request.secret.trim().is_empty() {
+        return Err(ipc_error(
+            "validation_required_field",
+            ErrorCategory::Validation,
+            "API Key 不能为空",
+            false,
+        ));
+    }
+    let database = state.database.as_ref().ok_or_else(database_unavailable)?;
+    let secret_ref = state
+        .secret_store
+        .put(SecretValue::new(request.secret))
+        .await
+        .map_err(secret_store_error)?;
+    let profile = match ApiProfileService::new(database)
+        .set_secret_ref(&request.profile_id, Some(secret_ref.as_str().to_owned()))
+        .await
+    {
+        Ok(profile) => profile,
+        Err(error) => {
+            let _ = state.secret_store.delete(&secret_ref).await;
+            return Err(api_profile_service_error(error));
+        }
+    };
+    Ok(ApiProfileSaveResponse {
+        profile: profile_summary(&state, &profile).await,
+    })
+}
+
+#[tauri::command]
+pub(crate) async fn api_profile_test(
+    request: ApiProfileTestRequest,
+    state: State<'_, PersistenceState>,
+) -> Result<ApiProfileTestResponse, IpcError> {
+    let database = state.database.as_ref().ok_or_else(database_unavailable)?;
+    let profile = ApiProfileService::new(database)
+        .get(&request.id)
+        .await
+        .map_err(api_profile_service_error)?;
+    let models = match fetch_models(&state, &profile).await {
+        Ok(models) => models,
+        Err(error) => {
+            let _ = ApiProfileService::new(database)
+                .set_test_result(
+                    &profile.id,
+                    ApiProfileConnectionStatus::Failed,
+                    Some(error.code().to_owned()),
+                    Vec::new(),
+                )
+                .await;
+            return Err(provider_error(&error));
+        }
+    };
+    let profile = ApiProfileService::new(database)
+        .set_test_result(
+            &profile.id,
+            ApiProfileConnectionStatus::Healthy,
+            None,
+            models,
+        )
+        .await
+        .map_err(api_profile_service_error)?;
+    Ok(ApiProfileTestResponse {
+        profile: profile_summary(&state, &profile).await,
+    })
+}
+
+#[tauri::command]
+pub(crate) async fn api_models_fetch(
+    request: ApiModelsFetchRequest,
+    state: State<'_, PersistenceState>,
+) -> Result<ApiModelsFetchResponse, IpcError> {
+    let database = state.database.as_ref().ok_or_else(database_unavailable)?;
+    let profile = ApiProfileService::new(database)
+        .get(&request.id)
+        .await
+        .map_err(api_profile_service_error)?;
+    let models = fetch_models(&state, &profile)
+        .await
+        .map_err(|error| provider_error(&error))?;
+    let profile = ApiProfileService::new(database)
+        .set_test_result(
+            &profile.id,
+            ApiProfileConnectionStatus::Healthy,
+            None,
+            models,
+        )
+        .await
+        .map_err(api_profile_service_error)?;
+    Ok(ApiModelsFetchResponse {
+        profile: profile_summary(&state, &profile).await,
+    })
+}
+
+#[tauri::command]
+pub(crate) async fn api_profile_delete(
+    request: ApiProfileDeleteRequest,
+    state: State<'_, PersistenceState>,
+) -> Result<ApiProfileDeleteResponse, IpcError> {
+    let database = state.database.as_ref().ok_or_else(database_unavailable)?;
+    ApiProfileService::new(database)
+        .delete(&request.id)
+        .await
+        .map_err(api_profile_service_error)?;
+    // Keep the opaque secret reference alive. It may be shared by another
+    // profile; explicit orphan cleanup belongs to a later reference-counted task.
+    Ok(ApiProfileDeleteResponse {
+        id: request.id,
+        deleted: true,
+    })
+}
+
+async fn profile_summary(
+    state: &State<'_, PersistenceState>,
+    profile: &ApiProfile,
+) -> ApiProfileSummaryDto {
+    let has_secret = match profile.secret_ref.as_deref() {
+        Some(reference) => state
+            .secret_store
+            .get(&SecretRef::new(reference))
+            .await
+            .is_ok(),
+        None => false,
+    };
+    ApiProfileSummaryDto::from_profile(profile, has_secret)
+}
+
+async fn fetch_models(
+    state: &State<'_, PersistenceState>,
+    profile: &ApiProfile,
+) -> Result<Vec<ApiModelInfo>, ProviderError> {
+    let secret_ref = profile
+        .secret_ref
+        .as_deref()
+        .ok_or(ProviderError::SecretStoreUnavailable)?;
+    let provider_profile = ProviderApiProfile::new(
+        ProviderApiProfileId::new(profile.id.to_string()),
+        profile.name.clone(),
+        profile.base_url.clone(),
+        SecretRef::new(secret_ref),
+    )
+    .map_err(|_| ProviderError::InvalidRequest { status: 400 })?;
+    let provider = OpenAiResponsesProvider::new(state.secret_store.clone())
+        .map_err(|_| ProviderError::ConnectionFailed)?;
+    let models = provider.list_models(&provider_profile.resolve()).await?;
+    Ok(models
+        .into_iter()
+        .map(|model| ApiModelInfo {
+            id: model.id,
+            display_name: model.display_name,
+            owned_by: model.owned_by,
+        })
+        .collect())
+}
+
+fn provider_error(error: &ProviderError) -> IpcError {
+    let category = if error.code().starts_with("security_") {
+        ErrorCategory::Security
+    } else {
+        ErrorCategory::Provider
+    };
+    ipc_error_with_switch(
+        error.code(),
+        category,
+        "API Profile 连接测试失败",
+        error.retryable(),
+        error.switch_profile(),
+    )
+}
+
+fn secret_store_error(error: batch_code_analyzer_secret_store::SecretError) -> IpcError {
+    ipc_error(
+        error.code(),
+        ErrorCategory::Security,
+        "安全存储暂不可用",
+        matches!(
+            error,
+            batch_code_analyzer_secret_store::SecretError::Unavailable
+                | batch_code_analyzer_secret_store::SecretError::BackendFailure
+        ),
+    )
+}
+
+fn api_profile_service_error(error: ApiProfileServiceError) -> IpcError {
+    match error {
+        ApiProfileServiceError::NotFound => ipc_error(
+            "validation_invalid_value",
+            ErrorCategory::Validation,
+            "API Profile 不存在",
+            false,
+        ),
+        ApiProfileServiceError::InvalidName | ApiProfileServiceError::InvalidBaseUrl => ipc_error(
+            "validation_invalid_value",
+            ErrorCategory::Validation,
+            "API Profile 配置无效",
+            false,
+        ),
+        ApiProfileServiceError::UrlContainsCredentials => ipc_error(
+            "security_invalid_secret_reference",
+            ErrorCategory::Security,
+            "Base URL 不得包含凭据",
+            false,
+        ),
+        ApiProfileServiceError::Persistence(error) => {
+            if matches!(
+                error,
+                batch_code_analyzer_persistence::PersistenceError::StateTransition {
+                    code: "api_profile_in_use"
+                }
+            ) {
+                ipc_error(
+                    "api_profile_in_use",
+                    ErrorCategory::Project,
+                    "API Profile 仍被项目使用",
+                    false,
+                )
+            } else if matches!(
+                error,
+                batch_code_analyzer_persistence::PersistenceError::StateTransition {
+                    code: "api_profile_name_duplicate"
+                }
+            ) {
+                ipc_error(
+                    "api_profile_name_duplicate",
+                    ErrorCategory::Validation,
+                    "API Profile 名称已存在",
+                    false,
+                )
+            } else {
+                persistence_error(&error)
+            }
+        }
+    }
 }
 
 #[tauri::command]
@@ -438,13 +731,23 @@ fn ipc_error(
     message: &'static str,
     retryable: bool,
 ) -> IpcError {
+    ipc_error_with_switch(code, category, message, retryable, false)
+}
+
+fn ipc_error_with_switch(
+    code: &'static str,
+    category: ErrorCategory,
+    message: &'static str,
+    retryable: bool,
+    switch_profile: bool,
+) -> IpcError {
     IpcError {
         schema_version: 1,
         code: code.into(),
         category,
         message: message.into(),
         retryable,
-        switch_profile: false,
+        switch_profile,
         correlation_id: "project-command".into(),
         details: None,
     }
@@ -474,7 +777,10 @@ fn health_check_response(database_health: DatabaseHealth) -> HealthCheckResponse
 
 #[cfg(test)]
 mod tests {
-    use super::{health_check_response, FileServiceError, ProjectServiceError};
+    use super::{
+        health_check_response, ApiProfileServiceError, FileServiceError, ProjectServiceError,
+        ProviderError,
+    };
     use batch_code_analyzer_persistence::DatabaseHealth;
 
     #[test]
@@ -553,5 +859,20 @@ mod tests {
         assert_eq!(missing.code, "validation_invalid_value");
         assert_eq!(missing.message, "文件记录不存在或已删除");
         assert!(missing.details.is_none());
+    }
+
+    #[test]
+    fn api_profile_errors_use_stable_codes_and_never_include_secrets() {
+        let invalid =
+            super::api_profile_service_error(ApiProfileServiceError::UrlContainsCredentials);
+        assert_eq!(invalid.code, "security_invalid_secret_reference");
+        assert_eq!(invalid.message, "Base URL 不得包含凭据");
+        assert!(invalid.details.is_none());
+
+        let provider = super::provider_error(&ProviderError::AuthenticationFailed { status: 401 });
+        assert_eq!(provider.code, "provider_authentication_failed");
+        assert_eq!(provider.message, "API Profile 连接测试失败");
+        assert!(provider.details.is_none());
+        assert!(!provider.message.contains("401"));
     }
 }
