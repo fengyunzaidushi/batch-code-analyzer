@@ -45,6 +45,7 @@ pub fn run() {
             commands::project_list,
             commands::project_add,
             commands::project_get,
+            commands::file_list,
             commands::scan_start,
             commands::scan_cancel,
             commands::scan_get_report

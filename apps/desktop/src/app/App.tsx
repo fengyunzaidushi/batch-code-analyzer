@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import type {
+  FileRecordSummaryDto,
   IpcError,
   ProjectSummaryDto,
   ScanReportDto,
@@ -12,6 +13,7 @@ import {
   listProjects,
 } from "../ipc/projects";
 import { checkBackendHealth } from "../ipc/health";
+import { listFiles } from "../ipc/files";
 import {
   cancelScan,
   getScanReport,
@@ -32,6 +34,10 @@ export function App() {
   const [scanReports, setScanReports] = useState<Record<string, ScanReportDto>>(
     {},
   );
+  const [fileRecords, setFileRecords] = useState<
+    Record<string, FileRecordSummaryDto[]>
+  >({});
+  const [fileTotals, setFileTotals] = useState<Record<string, number>>({});
 
   const refreshProjects = useCallback(async () => {
     const items = await listProjects();
@@ -41,6 +47,18 @@ export function App() {
         ? current
         : (items[0]?.id ?? null),
     );
+  }, []);
+
+  const refreshFiles = useCallback(async (projectId: string) => {
+    const response = await listFiles(projectId);
+    setFileRecords((current) => ({
+      ...current,
+      [projectId]: response.items,
+    }));
+    setFileTotals((current) => ({
+      ...current,
+      [projectId]: response.total,
+    }));
   }, []);
 
   useEffect(() => {
@@ -90,6 +108,11 @@ export function App() {
         ...current,
         [report.projectId]: report,
       }));
+      if (report.status === "completed") {
+        void refreshFiles(report.projectId).catch((error) => {
+          if (active) setProjectError(safeProjectError(error));
+        });
+      }
     }).then((cleanup) => {
       if (active) {
         unlisten = cleanup;
@@ -101,7 +124,7 @@ export function App() {
       active = false;
       unlisten?.();
     };
-  }, []);
+  }, [refreshFiles]);
 
   useEffect(() => {
     if (!selectedProjectId) return;
@@ -123,6 +146,30 @@ export function App() {
       active = false;
     };
   }, [selectedProjectId]);
+
+  useEffect(() => {
+    if (!selectedProjectId) return;
+    let active = true;
+    void listFiles(selectedProjectId).then(
+      (response) => {
+        if (!active) return;
+        setFileRecords((current) => ({
+          ...current,
+          [selectedProjectId]: response.items,
+        }));
+        setFileTotals((current) => ({
+          ...current,
+          [selectedProjectId]: response.total,
+        }));
+      },
+      (error) => {
+        if (active) setProjectError(safeProjectError(error));
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, [refreshFiles, selectedProjectId]);
 
   const handleAddProject = async () => {
     setProjectError(null);
@@ -183,6 +230,10 @@ export function App() {
       }}
       projectError={projectError}
       projects={projects}
+      fileRecords={
+        selectedProjectId ? (fileRecords[selectedProjectId] ?? []) : []
+      }
+      fileTotal={selectedProjectId ? (fileTotals[selectedProjectId] ?? 0) : 0}
       scanReport={
         selectedProjectId ? (scanReports[selectedProjectId] ?? null) : null
       }

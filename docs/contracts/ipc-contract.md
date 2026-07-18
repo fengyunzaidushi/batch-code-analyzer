@@ -164,6 +164,10 @@ file_update_override
 file_set_included
 ```
 
+`file_list` 接收 `projectId`、可选的数字游标和 `1..=500` 的 `limit`，返回
+`PageResponse<FileRecordSummaryDto>`。摘要只包含相对路径、文件状态、纳入标记和结果状态，
+不返回源码内容或绝对仓库路径。
+
 `file_update_override` 只更新未来 Run 的单文件覆盖，不修改已创建 Run 的 Task 快照。
 
 ### 4.7 Task

@@ -7,10 +7,10 @@ use batch_code_analyzer_app_core::{
     domain::ProjectId, timestamp_now, ProjectService, ProjectServiceError, ScanService,
 };
 use batch_code_analyzer_ipc_contracts::{
-    DatabaseStatus, ErrorCategory, HealthCheckResponse, HealthStatus, IpcError, ProjectAddRequest,
-    ProjectAddResponse, ProjectDetailDto, ProjectSummaryDto, ScanCancelRequest, ScanCancelResponse,
-    ScanOperationStatus, ScanReportDto, ScanStartRequest, ScanStartResponse,
-    HEALTH_CHECK_SCHEMA_VERSION,
+    DatabaseStatus, ErrorCategory, FileListRequest, FileRecordSummaryDto, HealthCheckResponse,
+    HealthStatus, IpcError, PageResponse, ProjectAddRequest, ProjectAddResponse, ProjectDetailDto,
+    ProjectSummaryDto, ScanCancelRequest, ScanCancelResponse, ScanOperationStatus, ScanReportDto,
+    ScanStartRequest, ScanStartResponse, HEALTH_CHECK_SCHEMA_VERSION,
 };
 use batch_code_analyzer_persistence::DatabaseHealth;
 use batch_code_analyzer_repository_scanner::{ImportReport, ScanCancellation};
@@ -68,6 +68,61 @@ pub(crate) async fn project_get(
         .map_err(|error| persistence_error(&error))?
         .ok_or_else(|| project_not_found(project_id.as_str()))?;
     Ok(ProjectDetailDto::from(&project))
+}
+
+#[tauri::command]
+pub(crate) async fn file_list(
+    request: FileListRequest,
+    state: State<'_, PersistenceState>,
+) -> Result<PageResponse<FileRecordSummaryDto>, IpcError> {
+    if !(1..=500).contains(&request.limit) {
+        return Err(ipc_error(
+            "validation_limit_exceeded",
+            ErrorCategory::Validation,
+            "文件列表分页大小无效",
+            false,
+        ));
+    }
+    let offset = request
+        .cursor
+        .as_deref()
+        .map(str::parse::<usize>)
+        .transpose()
+        .map_err(|_| {
+            ipc_error(
+                "validation_invalid_value",
+                ErrorCategory::Validation,
+                "文件列表游标无效",
+                false,
+            )
+        })?
+        .unwrap_or(0);
+    let database = state.database.as_ref().ok_or_else(database_unavailable)?;
+    let project = ProjectService::new(database)
+        .get_project(&request.project_id)
+        .await
+        .map_err(|error| persistence_error(&error))?
+        .ok_or_else(|| project_not_found(request.project_id.as_str()))?;
+    let _ = project;
+    let records = ProjectService::new(database)
+        .list_file_records(&request.project_id)
+        .await
+        .map_err(|error| persistence_error(&error))?;
+    let total = u32::try_from(records.len()).unwrap_or(u32::MAX);
+    let limit = usize::from(request.limit);
+    let items: Vec<FileRecordSummaryDto> = records
+        .iter()
+        .skip(offset)
+        .take(limit)
+        .map(FileRecordSummaryDto::from)
+        .collect();
+    let next_offset = offset.saturating_add(items.len());
+    let next_cursor = (next_offset < records.len()).then(|| next_offset.to_string());
+    Ok(PageResponse {
+        items,
+        next_cursor,
+        total,
+    })
 }
 
 #[tauri::command]

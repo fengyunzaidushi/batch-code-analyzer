@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
 import type {
+  FileRecordSummaryDto,
   ProjectPathStatus,
   ProjectSummaryDto,
   ScanReportDto,
@@ -37,6 +38,8 @@ export interface ActiveRunSummary {
 }
 
 interface AppShellProps {
+  fileRecords?: readonly FileRecordSummaryDto[];
+  fileTotal?: number;
   projects?: readonly ShellProject[];
   healthState?: ShellHealthState;
   activeRun?: ActiveRunSummary | null;
@@ -54,6 +57,8 @@ interface AppShellProps {
 type WorkspaceTab = "prompt" | "api";
 
 export function AppShell({
+  fileRecords = [],
+  fileTotal = 0,
   projects = [],
   healthState = "checking",
   activeRun = null,
@@ -116,6 +121,8 @@ export function AppShell({
         />
         <ProjectWorkspace
           activeRun={activeRun}
+          fileRecords={fileRecords}
+          fileTotal={fileTotal}
           onCancelScan={onCancelScan}
           onPreview={() => setPreviewOpen(true)}
           onStartScan={onStartScan}
@@ -362,6 +369,8 @@ function PathStatus({ status }: { status: ProjectPathStatus }) {
 
 function ProjectWorkspace({
   activeRun,
+  fileRecords,
+  fileTotal,
   onCancelScan,
   onPreview,
   onStartScan,
@@ -371,6 +380,8 @@ function ProjectWorkspace({
   setTab,
 }: {
   activeRun: ActiveRunSummary | null;
+  fileRecords: readonly FileRecordSummaryDto[];
+  fileTotal: number;
   onCancelScan: () => void;
   onPreview: () => void;
   onStartScan: () => void;
@@ -398,6 +409,8 @@ function ProjectWorkspace({
       </div>
       {tab === "prompt" ? (
         <PromptWorkspace
+          fileRecords={fileRecords}
+          fileTotal={fileTotal}
           onCancelScan={onCancelScan}
           onPreview={onPreview}
           onStartScan={onStartScan}
@@ -487,6 +500,8 @@ function TabButton({
 }
 
 function PromptWorkspace({
+  fileRecords,
+  fileTotal,
   onCancelScan,
   onPreview,
   onStartScan,
@@ -494,6 +509,8 @@ function PromptWorkspace({
   scanReport,
 }: {
   onCancelScan: () => void;
+  fileRecords: readonly FileRecordSummaryDto[];
+  fileTotal: number;
   onPreview: () => void;
   onStartScan: () => void;
   project: ShellProject | null;
@@ -503,6 +520,10 @@ function PromptWorkspace({
     "请结合提供的项目上下文，用通俗但准确的语言解释当前代码文件。\n\n请说明核心职责、关键输入输出、协作模块和修改影响。",
   );
   const hasProject = project !== null;
+  const includedFileCount =
+    scanReport?.status === "completed"
+      ? scanReport.includedFiles
+      : fileRecords.filter((file) => file.included).length;
   return (
     <div className="workspace-content">
       <div className="content-intro">
@@ -578,7 +599,9 @@ function PromptWorkspace({
           <SummaryMetric
             label="已纳入文件"
             value={
-              project?.runningTaskCount ? `${project.runningTaskCount}` : "—"
+              scanReport?.status === "completed" || fileTotal > 0
+                ? `${includedFileCount}`
+                : "—"
             }
           />
           <SummaryMetric label="待处理" value="—" />
@@ -590,11 +613,13 @@ function PromptWorkspace({
         </div>
         <VirtualTaskTable
           emptyLabel={
-            hasProject
-              ? "扫描项目后，文件任务会显示在这里"
-              : "添加项目后，文件任务会显示在这里"
+            scanReport?.status === "completed"
+              ? "没有符合当前扫描规则的文件"
+              : hasProject
+                ? "扫描项目后，文件任务会显示在这里"
+                : "添加项目后，文件任务会显示在这里"
           }
-          getRowKey={(item) => item}
+          getRowKey={(item) => item.id}
           header={
             <>
               <span>文件</span>
@@ -603,13 +628,13 @@ function PromptWorkspace({
               <span>结果</span>
             </>
           }
-          items={[] as string[]}
+          items={fileRecords}
           renderRow={(item) => (
             <>
-              <span>{item}</span>
-              <span>未执行</span>
+              <span>{item.relativePath}</span>
+              <span>{fileSourceStatusLabel(item)}</span>
               <span>—</span>
-              <span>—</span>
+              <span>{fileResultStatusLabel(item.resultStatus)}</span>
             </>
           )}
         />
@@ -638,6 +663,37 @@ function scanSummaryMessage(report: ScanReportDto | null): string {
       return "扫描已取消，本次结果未提交。";
     case "failed":
       return "扫描失败，请检查项目路径和权限。";
+  }
+}
+
+function fileSourceStatusLabel(file: FileRecordSummaryDto): string {
+  if (file.included)
+    return file.sourceStatus === "modified" ? "已修改" : "待处理";
+  if (file.exclusionReason) return `已排除：${file.exclusionReason}`;
+  switch (file.sourceStatus) {
+    case "deleted":
+      return "已删除";
+    case "sensitive":
+      return "敏感文件";
+    case "unreadable":
+      return "不可读取";
+    case "unsupported_encoding":
+      return "编码不支持";
+    default:
+      return "已排除";
+  }
+}
+
+function fileResultStatusLabel(
+  status: FileRecordSummaryDto["resultStatus"],
+): string {
+  switch (status) {
+    case "current":
+      return "当前结果";
+    case "stale":
+      return "结果过期";
+    default:
+      return "—";
   }
 }
 

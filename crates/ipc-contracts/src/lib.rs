@@ -156,6 +156,16 @@ pub struct ProjectAddResponse {
     pub config_mirror_warning: bool,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct FileListRequest {
+    pub project_id: ProjectId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub cursor: Option<String>,
+    pub limit: u16,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum ScanOperationStatus {
@@ -534,6 +544,7 @@ pub fn export_types(out_dir: &Path) -> Result<(), ExportError> {
     ScanCancelRequest::export_all(&config)?;
     ScanCancelResponse::export_all(&config)?;
     ScanReportDto::export_all(&config)?;
+    FileListRequest::export_all(&config)?;
     FileRecordSummaryDto::export_all(&config)?;
     RunSummaryDto::export_all(&config)?;
     TaskSummaryDto::export_all(&config)?;

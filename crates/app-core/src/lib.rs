@@ -392,6 +392,21 @@ impl<'database> ProjectService<'database> {
         self.database.repository().list_projects().await
     }
 
+    /// Lists a project's persisted file records for the file table.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable persistence error when records cannot be read.
+    pub async fn list_file_records(
+        &self,
+        project_id: &ProjectId,
+    ) -> Result<Vec<FileRecord>, PersistenceError> {
+        self.database
+            .repository()
+            .list_file_records(project_id)
+            .await
+    }
+
     /// Loads one project with its path for the detail view.
     ///
     /// # Errors

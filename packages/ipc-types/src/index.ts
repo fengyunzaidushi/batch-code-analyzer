@@ -13,6 +13,7 @@ export type { ContextVersionSourceFileDto } from "./generated/ContextVersionSour
 export type { DatabaseStatus } from "./generated/DatabaseStatus";
 export type { ErrorCategory } from "./generated/ErrorCategory";
 export type { FileRecordId } from "./generated/FileRecordId";
+export type { FileListRequest } from "./generated/FileListRequest";
 export type { FileRecordSummaryDto } from "./generated/FileRecordSummaryDto";
 export type { FileResultStatus } from "./generated/FileResultStatus";
 export type { FileSourceStatus } from "./generated/FileSourceStatus";

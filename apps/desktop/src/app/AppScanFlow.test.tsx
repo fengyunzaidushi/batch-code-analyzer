@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   checkBackendHealth: vi.fn(),
   getProject: vi.fn(),
   getScanReport: vi.fn(),
+  listFiles: vi.fn(),
   listProjects: vi.fn(),
   startScan: vi.fn(),
   subscribeScanProgress: vi.fn(),
@@ -19,6 +20,9 @@ vi.mock("../ipc/health", () => ({
 vi.mock("../ipc/projects", () => ({
   getProject: mocks.getProject,
   listProjects: mocks.listProjects,
+}));
+vi.mock("../ipc/files", () => ({
+  listFiles: mocks.listFiles,
 }));
 vi.mock("../ipc/scan", () => ({
   cancelScan: mocks.cancelScan,
@@ -75,6 +79,21 @@ describe("App scan flow", () => {
       await screen.findByText(/扫描完成：纳入 1 个文件/),
     ).toBeInTheDocument();
   });
+
+  it("loads persisted file summaries into the task table", async () => {
+    const detail = projectDetail();
+    arrangeProject(detail);
+    mocks.listFiles.mockResolvedValue({
+      items: [fileRecord()],
+      nextCursor: null,
+      total: 1,
+    });
+    mocks.subscribeScanProgress.mockResolvedValue(() => undefined);
+    render(<App />);
+
+    expect(await screen.findByText("src/main.rs")).toBeInTheDocument();
+    expect(screen.getAllByText("待处理")).toHaveLength(2);
+  });
 });
 
 function arrangeProject(detail: ReturnType<typeof projectDetail>) {
@@ -95,6 +114,7 @@ function arrangeProject(detail: ReturnType<typeof projectDetail>) {
     },
   ]);
   mocks.getProject.mockResolvedValue(detail);
+  mocks.listFiles.mockResolvedValue({ items: [], nextCursor: null, total: 0 });
 }
 
 function projectDetail() {
@@ -133,5 +153,21 @@ function scanReport(status: ScanReportDto["status"]): ScanReportDto {
     unsupportedEncodingFiles: [],
     updatedAt: "2026-07-18T12:00:00Z",
     visitedEntries: 2,
+  };
+}
+
+function fileRecord() {
+  return {
+    exclusionReason: null,
+    id: "file-main",
+    included: true,
+    language: "rust",
+    modifiedAt: "2026-07-18T12:00:00Z",
+    projectId: "project-scan",
+    relativePath: "src/main.rs",
+    resultStatus: "none" as const,
+    schemaVersion: 1 as const,
+    sizeBytes: 42,
+    sourceStatus: "normal" as const,
   };
 }
