@@ -37,6 +37,13 @@ async fn project_repository_enforces_canonical_path_uniqueness() {
         repository.get_project(&project_entity.id).await.unwrap(),
         Some(project_entity)
     );
+    assert_eq!(
+        repository
+            .find_project_by_canonical_path("/workspace/project")
+            .await
+            .unwrap(),
+        Some(project("project-1", "/workspace/project"))
+    );
 }
 
 #[tokio::test]
@@ -231,7 +238,7 @@ fn project(id: &str, canonical_path: &str) -> Project {
         default_model: Some("gpt-5".into()),
         context_model: None,
         api_routing: ApiRouting {
-            primary_profile_id: ApiProfileId::new("profile-1"),
+            primary_profile_id: Some(ApiProfileId::new("profile-1")),
             fallbacks: Vec::new(),
         },
         execution_defaults: ExecutionDefaults {
@@ -304,7 +311,7 @@ fn run(id: &str, project_id: &ProjectId, status: RunStatus) -> Run {
         output_directory: "/workspace/results/run-1".into(),
         snapshot: RunSnapshot {
             api_routing: ApiRouting {
-                primary_profile_id: ApiProfileId::new("profile-1"),
+                primary_profile_id: Some(ApiProfileId::new("profile-1")),
                 fallbacks: Vec::new(),
             },
             concurrency: 5,

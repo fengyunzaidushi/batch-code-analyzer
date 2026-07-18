@@ -124,6 +124,38 @@ pub struct ProjectSummaryDto {
     pub last_opened_at: Rfc3339Timestamp,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectAddRequest {
+    pub source_directory: String,
+}
+
+/// Detail DTO intentionally exposes the selected project's path only on demand.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectDetailDto {
+    #[ts(type = "1")]
+    pub schema_version: u32,
+    pub id: ProjectId,
+    pub name: String,
+    pub source_directory: String,
+    pub path_status: ProjectPathStatus,
+    pub default_prompt: String,
+    pub default_model: Option<String>,
+    pub context_model: Option<String>,
+    pub api_routing: batch_code_analyzer_domain::ApiRouting,
+    pub output_root: Option<String>,
+    pub last_opened_at: Rfc3339Timestamp,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectAddResponse {
+    pub project: ProjectDetailDto,
+    pub created: bool,
+    pub config_mirror_warning: bool,
+}
+
 impl From<&DomainProject> for ProjectSummaryDto {
     fn from(project: &DomainProject) -> Self {
         Self {
@@ -131,6 +163,24 @@ impl From<&DomainProject> for ProjectSummaryDto {
             id: project.id.clone(),
             name: project.name.clone(),
             path_status: project.path_status,
+            last_opened_at: project.last_opened_at.clone(),
+        }
+    }
+}
+
+impl From<&DomainProject> for ProjectDetailDto {
+    fn from(project: &DomainProject) -> Self {
+        Self {
+            schema_version: DTO_SCHEMA_VERSION,
+            id: project.id.clone(),
+            name: project.name.clone(),
+            source_directory: project.source_directory.clone(),
+            path_status: project.path_status,
+            default_prompt: project.default_prompt.clone(),
+            default_model: project.default_model.clone(),
+            context_model: project.context_model.clone(),
+            api_routing: project.api_routing.clone(),
+            output_root: project.output_root.clone(),
             last_opened_at: project.last_opened_at.clone(),
         }
     }
@@ -407,6 +457,9 @@ pub fn export_types(out_dir: &Path) -> Result<(), ExportError> {
     PageResponse::<String>::export_all(&config)?;
     HealthCheckResponse::export_all(&config)?;
     ProjectSummaryDto::export_all(&config)?;
+    ProjectAddRequest::export_all(&config)?;
+    ProjectDetailDto::export_all(&config)?;
+    ProjectAddResponse::export_all(&config)?;
     FileRecordSummaryDto::export_all(&config)?;
     RunSummaryDto::export_all(&config)?;
     TaskSummaryDto::export_all(&config)?;
@@ -504,7 +557,7 @@ mod tests {
             default_model: Some("gpt-5".into()),
             context_model: None,
             api_routing: ApiRouting {
-                primary_profile_id: ApiProfileId::new("profile-1"),
+                primary_profile_id: Some(ApiProfileId::new("profile-1")),
                 fallbacks: Vec::new(),
             },
             execution_defaults: ExecutionDefaults {

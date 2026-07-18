@@ -5,6 +5,7 @@ members = [
   "crates/domain",
   "crates/ipc-contracts",
   "crates/persistence",
+  "crates/security-core",
 ]
 resolver = "2"
 
@@ -22,6 +23,8 @@ serde_json = "=1.0.150"
 ts-rs = { version = "=12.0.1", features = ["serde-compat"] }
 sqlx = { version = "=0.8.6", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "migrate"] }
 tokio = { version = "=1.52.3", features = ["macros", "rt-multi-thread"] }
+time = { version = "0.3.44", features = ["formatting"] }
+tauri-plugin-dialog = "=2.7.1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

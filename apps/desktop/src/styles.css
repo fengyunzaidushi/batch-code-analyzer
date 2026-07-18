@@ -234,6 +234,16 @@ button:disabled {
 .search-field input::placeholder {
   color: #8190a1;
 }
+.project-error {
+  margin: 0 16px 10px;
+  padding: 8px 10px;
+  color: #ffd7d3;
+  background: #5a2e35;
+  border: 1px solid #8e4b51;
+  border-radius: 4px;
+  font-size: 10px;
+  line-height: 1.45;
+}
 .project-list {
   flex: 1;
   min-height: 0;

@@ -577,7 +577,7 @@ mod tests {
             default_model: Some("gpt-5".into()),
             context_model: None,
             api_routing: ApiRouting {
-                primary_profile_id: ApiProfileId::new("profile-1"),
+                primary_profile_id: Some(ApiProfileId::new("profile-1")),
                 fallbacks: Vec::new(),
             },
             execution_defaults: ExecutionDefaults {
@@ -676,7 +676,7 @@ mod tests {
             output_directory: "/workspace/results/run-1".into(),
             snapshot: RunSnapshot {
                 api_routing: ApiRouting {
-                    primary_profile_id: ApiProfileId::new("profile-1"),
+                    primary_profile_id: Some(ApiProfileId::new("profile-1")),
                     fallbacks: Vec::new(),
                 },
                 concurrency: 5,
