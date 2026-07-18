@@ -47,6 +47,53 @@ async fn project_repository_enforces_canonical_path_uniqueness() {
 }
 
 #[tokio::test]
+async fn file_inclusion_updates_are_scoped_and_round_trip() {
+    let database = Database::open_in_memory()
+        .await
+        .expect("database should open");
+    let repository = database.repository();
+    let project = project("project-1", "/workspace/project");
+    repository
+        .create_project(&project, project_metadata("/workspace/project"))
+        .await
+        .unwrap();
+    let file = file("file-1", &project.id);
+    repository
+        .create_file_record(&file, file_metadata())
+        .await
+        .unwrap();
+
+    let excluded = repository
+        .set_file_included(&project.id, &file.id, false, &timestamp())
+        .await
+        .unwrap()
+        .expect("file should be updated");
+    assert!(!excluded.included);
+    assert_eq!(excluded.exclusion_reason.as_deref(), Some("user_excluded"));
+
+    let included = repository
+        .set_file_included(&project.id, &file.id, true, &timestamp())
+        .await
+        .unwrap()
+        .expect("file should be restored");
+    assert!(included.included);
+    assert_eq!(included.exclusion_reason, None);
+
+    assert_eq!(
+        repository
+            .set_file_included(
+                &ProjectId::new("other-project"),
+                &file.id,
+                false,
+                &timestamp(),
+            )
+            .await
+            .unwrap(),
+        None
+    );
+}
+
+#[tokio::test]
 async fn run_and_tasks_are_created_as_one_transaction() {
     let database = Database::open_in_memory()
         .await

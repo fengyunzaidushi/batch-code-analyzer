@@ -1,6 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { FileRecordSummaryDto } from "@batch-code-analyzer/ipc-types";
 
 import { FileTreeTable } from "./FileTreeTable";
@@ -85,5 +85,41 @@ describe("FileTreeTable", () => {
 
     expect(screen.getByText("已排除：敏感文件")).toBeInTheDocument();
     expect(screen.queryByText("已排除：sensitive")).not.toBeInTheDocument();
+  });
+
+  it("delegates a normal file inclusion toggle", async () => {
+    const user = userEvent.setup();
+    const onSetIncluded = vi.fn().mockResolvedValue(undefined);
+    render(<FileTreeTable files={[file()]} onSetIncluded={onSetIncluded} />);
+
+    await user.click(
+      screen.getByRole("checkbox", { name: "排除文件 src/main.ts" }),
+    );
+
+    expect(onSetIncluded).toHaveBeenCalledWith(
+      expect.objectContaining({ relativePath: "src/main.ts" }),
+      false,
+    );
+  });
+
+  it("disables inclusion for sensitive files", () => {
+    render(
+      <FileTreeTable
+        files={[
+          file({
+            exclusionReason: "sensitive",
+            id: "file-env",
+            included: false,
+            relativePath: ".env",
+            sourceStatus: "sensitive",
+          }),
+        ]}
+        onSetIncluded={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    expect(
+      screen.getByRole("checkbox", { name: "纳入文件 .env" }),
+    ).toBeDisabled();
   });
 });

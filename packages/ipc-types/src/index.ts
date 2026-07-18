@@ -16,6 +16,8 @@ export type { FileRecordId } from "./generated/FileRecordId";
 export type { FileListRequest } from "./generated/FileListRequest";
 export type { FileRecordSummaryDto } from "./generated/FileRecordSummaryDto";
 export type { FileResultStatus } from "./generated/FileResultStatus";
+export type { FileSetIncludedRequest } from "./generated/FileSetIncludedRequest";
+export type { FileSetIncludedResponse } from "./generated/FileSetIncludedResponse";
 export type { FileSourceStatus } from "./generated/FileSourceStatus";
 export type { HealthCheckResponse } from "./generated/HealthCheckResponse";
 export type { HealthStatus } from "./generated/HealthStatus";

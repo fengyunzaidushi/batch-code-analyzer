@@ -170,6 +170,11 @@ file_set_included
 
 `file_update_override` 只更新未来 Run 的单文件覆盖，不修改已创建 Run 的 Task 快照。
 
+`file_set_included` 接收 `projectId`、`fileId` 和 `included`，返回
+`{ file: FileRecordSummaryDto }`。手动排除会持久化为当前 FileRecord 的用户覆盖，
+并在后续扫描中保留。敏感、二进制、过大、不可读取、编码不支持和已删除文件不能
+通过普通纳入命令绕过安全阻止；敏感文件授权另有独立流程。
+
 ### 4.7 Task
 
 ```text
@@ -207,7 +212,7 @@ health_check
 ```ts
 export interface HealthCheckResponse {
   schemaVersion: 1;
-  status: 'ready' | 'degraded' | 'unavailable';
+  status: "ready" | "degraded" | "unavailable";
   appVersion: string;
   databaseStatus:
     | 'not_initialized'

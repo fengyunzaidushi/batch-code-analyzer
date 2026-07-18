@@ -215,6 +215,51 @@ impl Repository<'_> {
         finish_read(transaction, result).await
     }
 
+    /// Updates the user's inclusion choice for one `FileRecord`.
+    ///
+    /// The scanner's source facts remain unchanged. A manual exclusion is
+    /// represented by a stable reason so a later scan can preserve it without
+    /// adding a second override column to the schema.
+    ///
+    /// # Errors
+    ///
+    /// Returns a persistence error when the transaction or stored row cannot
+    /// be updated or decoded.
+    pub async fn set_file_included(
+        &self,
+        project_id: &ProjectId,
+        file_id: &FileRecordId,
+        included: bool,
+        now: &Rfc3339Timestamp,
+    ) -> Result<Option<FileRecord>, PersistenceError> {
+        let mut transaction = self.database.begin_write().await?;
+        let result = async {
+            let affected = sqlx::query(
+                "UPDATE file_records
+                 SET included = ?,
+                     exclusion_reason = CASE WHEN ? = 1 THEN NULL ELSE 'user_excluded' END,
+                     updated_at = ?
+                 WHERE id = ? AND project_id = ?",
+            )
+            .bind(included)
+            .bind(included)
+            .bind(now.as_str())
+            .bind(file_id.as_str())
+            .bind(project_id.as_str())
+            .execute(transaction.connection())
+            .await
+            .map_err(|_| PersistenceError::TransactionFailed)?
+            .rows_affected();
+
+            if affected == 0 {
+                return Ok(None);
+            }
+            load_file_record(&mut transaction, file_id.as_str()).await
+        }
+        .await;
+        finish_write(transaction, result).await
+    }
+
     /// Lists a Project's current `FileRecords` in normalized path order.
     ///
     /// # Errors
