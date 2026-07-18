@@ -1,0 +1,23 @@
+[package]
+name = "batch-code-analyzer-provider-integration"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97"
+license = "UNLICENSED"
+
+[workspace]
+
+[dependencies]
+batch-code-analyzer-api-profiles = { path = "../../crates/api-profiles" }
+batch-code-analyzer-mock-provider = { path = "../mock-provider" }
+batch-code-analyzer-model-providers = { path = "../../crates/model-providers" }
+batch-code-analyzer-secret-store = { path = "../../crates/secret-store" }
+tokio = { version = "1.52.3", features = ["macros", "rt-multi-thread", "time"] }
+tokio-util = { version = "0.7.16", features = ["rt"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
