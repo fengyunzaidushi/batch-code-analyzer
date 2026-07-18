@@ -1,0 +1,29 @@
+[package]
+name = "batch-code-analyzer-model-providers"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97"
+license = "UNLICENSED"
+
+[workspace]
+
+[dependencies]
+async-trait = "0.1.89"
+batch-code-analyzer-api-profiles = { path = "../api-profiles" }
+batch-code-analyzer-secret-store = { path = "../secret-store" }
+httpdate = "1.0.3"
+reqwest = { version = "0.12.24", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+tokio = { version = "1.52.3", features = ["macros", "net", "rt-multi-thread", "time"] }
+tokio-util = { version = "0.7.16", features = ["rt"] }
+
+[dev-dependencies]
+tokio = { version = "1.52.3", features = ["io-util"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
