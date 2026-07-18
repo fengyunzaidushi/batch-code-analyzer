@@ -1,5 +1,7 @@
 // The declarations in generated/ are produced by `pnpm ipc:generate`.
+export type { ApiFallback } from "./generated/ApiFallback";
 export type { ApiProfileId } from "./generated/ApiProfileId";
+export type { ApiRouting } from "./generated/ApiRouting";
 export type { AttemptDto } from "./generated/AttemptDto";
 export type { AttemptErrorDto } from "./generated/AttemptErrorDto";
 export type { AttemptId } from "./generated/AttemptId";
@@ -19,7 +21,11 @@ export type { HealthStatus } from "./generated/HealthStatus";
 export type { IpcError } from "./generated/IpcError";
 export type { PageRequest } from "./generated/PageRequest";
 export type { PageResponse } from "./generated/PageResponse";
+export type { ModelRoutingStrategy } from "./generated/ModelRoutingStrategy";
 export type { ProjectId } from "./generated/ProjectId";
+export type { ProjectAddRequest } from "./generated/ProjectAddRequest";
+export type { ProjectAddResponse } from "./generated/ProjectAddResponse";
+export type { ProjectDetailDto } from "./generated/ProjectDetailDto";
 export type { ProjectPathStatus } from "./generated/ProjectPathStatus";
 export type { ProjectSummaryDto } from "./generated/ProjectSummaryDto";
 export type { Rfc3339Timestamp } from "./generated/Rfc3339Timestamp";

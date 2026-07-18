@@ -71,6 +71,35 @@ impl Repository<'_> {
         finish_read(transaction, result).await
     }
 
+    /// Finds a Project by its canonical source directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns a persistence error when the query or stored row cannot be
+    /// read or decoded.
+    pub async fn find_project_by_canonical_path(
+        &self,
+        canonical_path: &str,
+    ) -> Result<Option<Project>, PersistenceError> {
+        let mut transaction = self.database.begin_write().await?;
+        let result = sqlx::query(
+            "SELECT id, schema_version, name, source_directory,
+                canonical_source_directory, path_status, default_prompt,
+                default_model, context_model, output_root, filter_rules_json,
+                execution_defaults_json, api_routing_json,
+                current_context_version_id, context_enabled, context_status,
+                created_at, updated_at, last_opened_at
+             FROM projects WHERE canonical_source_directory = ?",
+        )
+        .bind(canonical_path)
+        .fetch_optional(transaction.connection())
+        .await
+        .map_err(|_| PersistenceError::TransactionFailed)?
+        .map(|row| project_from_row(&row))
+        .transpose();
+        finish_read(transaction, result).await
+    }
+
     /// Lists Projects in stable name/ID order.
     ///
     /// # Errors

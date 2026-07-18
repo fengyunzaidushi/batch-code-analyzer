@@ -41,6 +41,10 @@ interface AppShellProps {
   activeRun?: ActiveRunSummary | null;
   onAddProject?: () => void;
   onRetryHealth?: () => void;
+  onSelectProject?: (id: string) => void;
+  projectError?: string | null;
+  selectedProjectId?: string | null;
+  isAddingProject?: boolean;
 }
 
 type WorkspaceTab = "prompt" | "api";
@@ -51,13 +55,26 @@ export function AppShell({
   activeRun = null,
   onAddProject = () => undefined,
   onRetryHealth = () => undefined,
+  onSelectProject,
+  projectError = null,
+  selectedProjectId: controlledSelectedProjectId,
+  isAddingProject = false,
 }: AppShellProps) {
-  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(
-    projects[0]?.id ?? null,
-  );
+  const [internalSelectedProjectId, setInternalSelectedProjectId] = useState<
+    string | null
+  >(projects[0]?.id ?? null);
   const [search, setSearch] = useState("");
   const [tab, setTab] = useState<WorkspaceTab>("prompt");
   const [previewOpen, setPreviewOpen] = useState(false);
+  const selectedProjectId =
+    controlledSelectedProjectId === undefined
+      ? (internalSelectedProjectId ?? projects[0]?.id ?? null)
+      : controlledSelectedProjectId;
+
+  const selectProject = (id: string) => {
+    setInternalSelectedProjectId(id);
+    onSelectProject?.(id);
+  };
 
   const filteredProjects = useMemo(() => {
     const query = search.trim().toLocaleLowerCase();
@@ -82,11 +99,13 @@ export function AppShell({
         <ProjectSidebar
           activeRun={activeRun}
           onAddProject={onAddProject}
-          onSelect={setSelectedProjectId}
+          onSelect={selectProject}
           projects={filteredProjects}
+          projectError={projectError}
           search={search}
           selectedProjectId={selectedProjectId}
           setSearch={setSearch}
+          isAddingProject={isAddingProject}
         />
         <ProjectWorkspace
           activeRun={activeRun}
@@ -177,17 +196,21 @@ function ProjectSidebar({
   onAddProject,
   onSelect,
   projects,
+  projectError,
   search,
   selectedProjectId,
   setSearch,
+  isAddingProject,
 }: {
   activeRun: ActiveRunSummary | null;
   onAddProject: () => void;
   onSelect: (id: string) => void;
   projects: readonly ShellProject[];
+  projectError: string | null;
   search: string;
   selectedProjectId: string | null;
   setSearch: (value: string) => void;
+  isAddingProject: boolean;
 }) {
   return (
     <aside aria-label="项目侧栏" className="project-sidebar">
@@ -216,9 +239,17 @@ function ProjectSidebar({
           value={search}
         />
       </label>
+      {projectError ? (
+        <div className="project-error" role="alert">
+          {projectError}
+        </div>
+      ) : null}
       <div className="project-list" role="list">
         {projects.length === 0 ? (
-          <EmptyProjectState onAddProject={onAddProject} />
+          <EmptyProjectState
+            isAddingProject={isAddingProject}
+            onAddProject={onAddProject}
+          />
         ) : (
           projects.map((project) => (
             <ProjectListItem
@@ -241,7 +272,13 @@ function ProjectSidebar({
   );
 }
 
-function EmptyProjectState({ onAddProject }: { onAddProject: () => void }) {
+function EmptyProjectState({
+  isAddingProject,
+  onAddProject,
+}: {
+  isAddingProject: boolean;
+  onAddProject: () => void;
+}) {
   return (
     <div className="empty-project-state">
       <div className="empty-state-icon" aria-hidden="true">
@@ -249,9 +286,14 @@ function EmptyProjectState({ onAddProject }: { onAddProject: () => void }) {
       </div>
       <strong>还没有项目</strong>
       <p>添加一个本地代码仓库开始分析。</p>
-      <button className="secondary-button" onClick={onAddProject} type="button">
+      <button
+        className="secondary-button"
+        disabled={isAddingProject}
+        onClick={onAddProject}
+        type="button"
+      >
         <Plus aria-hidden="true" size={15} />
-        添加项目
+        {isAddingProject ? "正在选择" : "添加项目"}
       </button>
     </div>
   );
@@ -457,11 +499,7 @@ function PromptWorkspace({
               : "添加项目后可以编辑提示词"}
           </span>
           <div>
-            <button
-              className="outline-button"
-              disabled={!hasProject}
-              type="button"
-            >
+            <button className="outline-button" disabled type="button">
               保存为项目默认
             </button>
             <button

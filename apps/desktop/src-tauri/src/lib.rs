@@ -4,7 +4,7 @@ use tauri::Manager;
 mod commands;
 
 pub(crate) struct PersistenceState {
-    _database: Option<Database>,
+    pub(crate) database: Option<Database>,
     pub(crate) health: DatabaseHealth,
 }
 
@@ -22,18 +22,24 @@ pub fn run() {
             let state = match startup {
                 DatabaseStartup::Ready(database) => PersistenceState {
                     health: database.health(),
-                    _database: Some(database),
+                    database: Some(database),
                 },
                 DatabaseStartup::Recovery(recovery) => PersistenceState {
                     health: recovery.health(),
-                    _database: None,
+                    database: None,
                 },
             };
 
             app.manage(state);
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![commands::health_check])
+        .plugin(tauri_plugin_dialog::init())
+        .invoke_handler(tauri::generate_handler![
+            commands::health_check,
+            commands::project_list,
+            commands::project_add,
+            commands::project_get
+        ])
         .run(tauri::generate_context!())
         .expect("failed to run Batch Code Analyzer");
 }

@@ -85,7 +85,7 @@ pub struct ApiFallback {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiRouting {
-    pub primary_profile_id: ApiProfileId,
+    pub primary_profile_id: Option<ApiProfileId>,
     pub fallbacks: Vec<ApiFallback>,
 }
 
@@ -325,7 +325,7 @@ mod tests {
             default_model: Some("gpt-5".into()),
             context_model: None,
             api_routing: ApiRouting {
-                primary_profile_id: ApiProfileId::new("profile-1"),
+                primary_profile_id: Some(ApiProfileId::new("profile-1")),
                 fallbacks: Vec::new(),
             },
             execution_defaults: ExecutionDefaults {
@@ -375,6 +375,40 @@ mod tests {
     }
 
     #[test]
+    fn project_serializes_without_an_api_profile_before_configuration() {
+        let routing = ApiRouting {
+            primary_profile_id: None,
+            fallbacks: Vec::new(),
+        };
+
+        let value = to_value(routing).expect("empty routing should serialize");
+        assert_eq!(value["primaryProfileId"], serde_json::Value::Null);
+        assert_eq!(
+            serde_json::from_value::<ApiRouting>(value).expect("routing should deserialize"),
+            ApiRouting {
+                primary_profile_id: None,
+                fallbacks: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn project_deserializes_legacy_configured_api_routing() {
+        let legacy = serde_json::json!({
+            "primaryProfileId": "profile-1",
+            "fallbacks": [],
+        });
+
+        assert_eq!(
+            serde_json::from_value::<ApiRouting>(legacy).expect("legacy routing should decode"),
+            ApiRouting {
+                primary_profile_id: Some(ApiProfileId::new("profile-1")),
+                fallbacks: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
     fn file_record_serializes_optional_scan_metadata_without_secret_values() {
         let file_record = FileRecord {
             id: FileRecordId::new("file-1"),
@@ -417,7 +451,7 @@ mod tests {
             output_directory: "/workspace/results/runs/run-1".into(),
             snapshot: RunSnapshot {
                 api_routing: ApiRouting {
-                    primary_profile_id: ApiProfileId::new("profile-1"),
+                    primary_profile_id: Some(ApiProfileId::new("profile-1")),
                     fallbacks: Vec::new(),
                 },
                 concurrency: 5,
