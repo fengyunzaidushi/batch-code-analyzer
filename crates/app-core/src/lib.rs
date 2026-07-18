@@ -61,6 +61,48 @@ impl From<PersistenceError> for ProjectServiceError {
     }
 }
 
+#[derive(Debug, Eq, PartialEq)]
+pub enum FileServiceError {
+    NotFound,
+    SensitiveBlocked,
+    Unreadable,
+    UnsupportedEncoding,
+    Binary,
+    TooLarge,
+    RuleExcluded,
+    Deleted,
+    Persistence(PersistenceError),
+}
+
+impl FileServiceError {
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::NotFound | Self::Deleted | Self::RuleExcluded => "validation_invalid_value",
+            Self::SensitiveBlocked => "security_sensitive_file_blocked",
+            Self::Unreadable => "scan_file_unreadable",
+            Self::UnsupportedEncoding => "scan_encoding_unsupported",
+            Self::Binary => "scan_binary_file",
+            Self::TooLarge => "scan_file_too_large",
+            Self::Persistence(error) => error.code(),
+        }
+    }
+}
+
+impl std::fmt::Display for FileServiceError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.code())
+    }
+}
+
+impl std::error::Error for FileServiceError {}
+
+impl From<PersistenceError> for FileServiceError {
+    fn from(error: PersistenceError) -> Self {
+        Self::Persistence(error)
+    }
+}
+
 #[derive(Debug)]
 pub struct ProjectAddResult {
     pub project: Project,
@@ -206,7 +248,13 @@ fn map_scanned_files(
                     } else {
                         FileSourceStatus::Normal
                     };
-                    (status, true, None)
+                    if previous.is_some_and(|record| {
+                        record.exclusion_reason.as_deref() == Some("user_excluded")
+                    }) {
+                        (status, false, Some("user_excluded".into()))
+                    } else {
+                        (status, true, None)
+                    }
                 }
                 FileDecision::Excluded { reason } => {
                     (FileSourceStatus::Normal, false, Some(reason.clone()))
@@ -407,6 +455,56 @@ impl<'database> ProjectService<'database> {
             .await
     }
 
+    /// Applies a user's inclusion choice without changing scanner facts.
+    ///
+    /// Security and readability exclusions remain blocked until a dedicated
+    /// consent or recovery flow exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable file error when the record is missing or cannot be
+    /// safely included, and a persistence error when the update fails.
+    pub async fn set_file_included(
+        &self,
+        project_id: &ProjectId,
+        file_id: &FileRecordId,
+        included: bool,
+    ) -> Result<FileRecord, FileServiceError> {
+        let file = self
+            .database
+            .repository()
+            .get_file_record(file_id)
+            .await?
+            .filter(|record| record.project_id == *project_id)
+            .ok_or(FileServiceError::NotFound)?;
+
+        if included {
+            match file.source_status {
+                FileSourceStatus::Sensitive => return Err(FileServiceError::SensitiveBlocked),
+                FileSourceStatus::Unreadable => return Err(FileServiceError::Unreadable),
+                FileSourceStatus::UnsupportedEncoding => {
+                    return Err(FileServiceError::UnsupportedEncoding);
+                }
+                FileSourceStatus::Deleted => return Err(FileServiceError::Deleted),
+                FileSourceStatus::Normal | FileSourceStatus::Modified => {}
+            }
+            match file.exclusion_reason.as_deref() {
+                Some("binary") => return Err(FileServiceError::Binary),
+                Some("file_too_large") => return Err(FileServiceError::TooLarge),
+                Some("builtin_extension" | "symlink") => {
+                    return Err(FileServiceError::RuleExcluded);
+                }
+                _ => {}
+            }
+        }
+
+        self.database
+            .repository()
+            .set_file_included(project_id, file_id, included, &timestamp_now())
+            .await?
+            .ok_or(FileServiceError::NotFound)
+    }
+
     /// Loads one project with its path for the detail view.
     ///
     /// # Errors
@@ -489,7 +587,7 @@ mod tests {
     use batch_code_analyzer_persistence::Database;
     use batch_code_analyzer_repository_scanner::ScanCancellation;
 
-    use super::{ProjectService, ProjectServiceError, ScanService};
+    use super::{FileServiceError, ProjectService, ProjectServiceError, ScanService};
 
     fn temporary_directory(name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
@@ -648,6 +746,89 @@ mod tests {
                 .expect_err("cancelled scan must not be persisted")
                 .to_string(),
             "scan_cancelled"
+        );
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[tokio::test]
+    async fn file_inclusion_override_survives_rescan_and_blocks_sensitive_files() {
+        let database = Database::open_in_memory()
+            .await
+            .expect("database should open");
+        let path = temporary_directory("file-inclusion");
+        fs::write(path.join("main.rs"), "fn main() {}\n").expect("source file should be created");
+        let project = ProjectService::new(&database)
+            .add_project(&path)
+            .await
+            .expect("project should add")
+            .project;
+        let service = ScanService::new(&database);
+        let first = ScanService::scan_project(&project, ScanCancellation::new())
+            .expect("scan should complete");
+        service
+            .persist_scan(&project.id, first)
+            .await
+            .expect("scan should persist");
+        let main = database
+            .repository()
+            .list_file_records(&project.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|file| file.relative_path == "main.rs")
+            .expect("main file should exist");
+
+        let excluded = ProjectService::new(&database)
+            .set_file_included(&project.id, &main.id, false)
+            .await
+            .expect("file should be excluded");
+        assert!(!excluded.included);
+        assert_eq!(excluded.exclusion_reason.as_deref(), Some("user_excluded"));
+
+        let second = ScanService::scan_project(&project, ScanCancellation::new())
+            .expect("second scan should complete");
+        service
+            .persist_scan(&project.id, second)
+            .await
+            .expect("second scan should persist");
+        let persisted = database
+            .repository()
+            .get_file_record(&main.id)
+            .await
+            .unwrap()
+            .expect("excluded file should remain");
+        assert!(!persisted.included);
+        assert_eq!(persisted.exclusion_reason.as_deref(), Some("user_excluded"));
+
+        let restored = ProjectService::new(&database)
+            .set_file_included(&project.id, &main.id, true)
+            .await
+            .expect("normal file should be restored");
+        assert!(restored.included);
+
+        fs::write(path.join(".env"), "API_KEY=not-a-real-secret-value\n")
+            .expect("sensitive fixture should be created");
+        let third = ScanService::scan_project(&project, ScanCancellation::new())
+            .expect("third scan should complete");
+        service
+            .persist_scan(&project.id, third)
+            .await
+            .expect("third scan should persist");
+        let sensitive = database
+            .repository()
+            .list_file_records(&project.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|file| file.relative_path == ".env")
+            .expect("sensitive file should be recorded");
+        assert_eq!(
+            ProjectService::new(&database)
+                .set_file_included(&project.id, &sensitive.id, true)
+                .await
+                .expect_err("sensitive file should remain blocked"),
+            FileServiceError::SensitiveBlocked
         );
 
         let _ = fs::remove_dir_all(path);

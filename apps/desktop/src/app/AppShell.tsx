@@ -46,6 +46,7 @@ interface AppShellProps {
   onAddProject?: () => void;
   onCancelScan?: () => void;
   onRetryHealth?: () => void;
+  onSetFileIncluded?: (fileId: string, included: boolean) => Promise<void>;
   onSelectProject?: (id: string) => void;
   onStartScan?: () => void;
   projectError?: string | null;
@@ -65,6 +66,7 @@ export function AppShell({
   onAddProject = () => undefined,
   onCancelScan = () => undefined,
   onRetryHealth = () => undefined,
+  onSetFileIncluded = async () => undefined,
   onSelectProject,
   onStartScan = () => undefined,
   projectError = null,
@@ -125,6 +127,7 @@ export function AppShell({
           fileTotal={fileTotal}
           onCancelScan={onCancelScan}
           onPreview={() => setPreviewOpen(true)}
+          onSetFileIncluded={onSetFileIncluded}
           onStartScan={onStartScan}
           project={selectedProject}
           scanReport={scanReport}
@@ -373,6 +376,7 @@ function ProjectWorkspace({
   fileTotal,
   onCancelScan,
   onPreview,
+  onSetFileIncluded,
   onStartScan,
   project,
   scanReport,
@@ -384,6 +388,7 @@ function ProjectWorkspace({
   fileTotal: number;
   onCancelScan: () => void;
   onPreview: () => void;
+  onSetFileIncluded: (fileId: string, included: boolean) => Promise<void>;
   onStartScan: () => void;
   project: ShellProject | null;
   scanReport: ScanReportDto | null;
@@ -413,6 +418,7 @@ function ProjectWorkspace({
           fileTotal={fileTotal}
           onCancelScan={onCancelScan}
           onPreview={onPreview}
+          onSetFileIncluded={onSetFileIncluded}
           onStartScan={onStartScan}
           project={project}
           scanReport={scanReport}
@@ -504,6 +510,7 @@ function PromptWorkspace({
   fileTotal,
   onCancelScan,
   onPreview,
+  onSetFileIncluded,
   onStartScan,
   project,
   scanReport,
@@ -512,6 +519,7 @@ function PromptWorkspace({
   fileRecords: readonly FileRecordSummaryDto[];
   fileTotal: number;
   onPreview: () => void;
+  onSetFileIncluded: (fileId: string, included: boolean) => Promise<void>;
   onStartScan: () => void;
   project: ShellProject | null;
   scanReport: ScanReportDto | null;
@@ -620,6 +628,9 @@ function PromptWorkspace({
                 : "添加项目后，文件任务会显示在这里"
           }
           files={fileRecords}
+          onSetIncluded={async (file, included) =>
+            onSetFileIncluded(file.id, included)
+          }
         />
       </section>
     </div>

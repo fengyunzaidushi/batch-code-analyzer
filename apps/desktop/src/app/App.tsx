@@ -13,7 +13,7 @@ import {
   listProjects,
 } from "../ipc/projects";
 import { checkBackendHealth } from "../ipc/health";
-import { listFiles } from "../ipc/files";
+import { listFiles, setFileIncluded } from "../ipc/files";
 import {
   cancelScan,
   getScanReport,
@@ -205,6 +205,30 @@ export function App() {
     }
   };
 
+  const handleSetFileIncluded = useCallback(
+    async (fileId: string, included: boolean) => {
+      if (!selectedProjectId) return;
+      setProjectError(null);
+      try {
+        const response = await setFileIncluded(
+          selectedProjectId,
+          fileId,
+          included,
+        );
+        setFileRecords((current) => ({
+          ...current,
+          [selectedProjectId]: (current[selectedProjectId] ?? []).map((file) =>
+            file.id === response.file.id ? response.file : file,
+          ),
+        }));
+      } catch (error) {
+        setProjectError(safeProjectError(error));
+        throw error;
+      }
+    },
+    [selectedProjectId],
+  );
+
   const handleCancelScan = async () => {
     if (!selectedProjectId) return;
     const report = scanReports[selectedProjectId];
@@ -228,6 +252,7 @@ export function App() {
         setHealthState("checking");
         setRequestId((current) => current + 1);
       }}
+      onSetFileIncluded={handleSetFileIncluded}
       projectError={projectError}
       projects={projects}
       fileRecords={
@@ -254,6 +279,12 @@ function safeProjectError(error: unknown): string {
       scan_cancelled: "扫描已取消，本次结果未提交。",
       scan_failed: "扫描失败，请检查项目路径和权限。",
       scan_not_found: "扫描操作不存在。",
+      security_sensitive_file_blocked: "敏感文件需要单独确认后才能纳入。",
+      scan_file_unreadable: "文件不可读取，暂时不能纳入。",
+      scan_encoding_unsupported: "文件编码不支持，暂时不能纳入。",
+      scan_binary_file: "二进制文件不能纳入分析。",
+      scan_file_too_large: "文件超过大小限制，暂时不能纳入。",
+      validation_invalid_value: "文件状态无法修改。",
     };
     return messages[error.code] ?? "项目暂时无法添加。";
   }

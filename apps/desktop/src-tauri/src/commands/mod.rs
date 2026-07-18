@@ -4,13 +4,15 @@ use std::{
 };
 
 use batch_code_analyzer_app_core::{
-    domain::ProjectId, timestamp_now, ProjectService, ProjectServiceError, ScanService,
+    domain::ProjectId, timestamp_now, FileServiceError, ProjectService, ProjectServiceError,
+    ScanService,
 };
 use batch_code_analyzer_ipc_contracts::{
-    DatabaseStatus, ErrorCategory, FileListRequest, FileRecordSummaryDto, HealthCheckResponse,
-    HealthStatus, IpcError, PageResponse, ProjectAddRequest, ProjectAddResponse, ProjectDetailDto,
-    ProjectSummaryDto, ScanCancelRequest, ScanCancelResponse, ScanOperationStatus, ScanReportDto,
-    ScanStartRequest, ScanStartResponse, HEALTH_CHECK_SCHEMA_VERSION,
+    DatabaseStatus, ErrorCategory, FileListRequest, FileRecordSummaryDto, FileSetIncludedRequest,
+    FileSetIncludedResponse, HealthCheckResponse, HealthStatus, IpcError, PageResponse,
+    ProjectAddRequest, ProjectAddResponse, ProjectDetailDto, ProjectSummaryDto, ScanCancelRequest,
+    ScanCancelResponse, ScanOperationStatus, ScanReportDto, ScanStartRequest, ScanStartResponse,
+    HEALTH_CHECK_SCHEMA_VERSION,
 };
 use batch_code_analyzer_persistence::DatabaseHealth;
 use batch_code_analyzer_repository_scanner::{ImportReport, ScanCancellation};
@@ -122,6 +124,21 @@ pub(crate) async fn file_list(
         items,
         next_cursor,
         total,
+    })
+}
+
+#[tauri::command]
+pub(crate) async fn file_set_included(
+    request: FileSetIncludedRequest,
+    state: State<'_, PersistenceState>,
+) -> Result<FileSetIncludedResponse, IpcError> {
+    let database = state.database.as_ref().ok_or_else(database_unavailable)?;
+    let file = ProjectService::new(database)
+        .set_file_included(&request.project_id, &request.file_id, request.included)
+        .await
+        .map_err(file_service_error)?;
+    Ok(FileSetIncludedResponse {
+        file: FileRecordSummaryDto::from(&file),
     })
 }
 
@@ -342,6 +359,54 @@ fn project_service_error(error: ProjectServiceError) -> IpcError {
     }
 }
 
+fn file_service_error(error: FileServiceError) -> IpcError {
+    match error {
+        FileServiceError::NotFound | FileServiceError::Deleted => ipc_error(
+            "validation_invalid_value",
+            ErrorCategory::Validation,
+            "文件记录不存在或已删除",
+            false,
+        ),
+        FileServiceError::SensitiveBlocked => ipc_error(
+            "security_sensitive_file_blocked",
+            ErrorCategory::Security,
+            "敏感文件需要单独确认后才能纳入",
+            false,
+        ),
+        FileServiceError::Unreadable => ipc_error(
+            "scan_file_unreadable",
+            ErrorCategory::Scan,
+            "文件不可读取",
+            true,
+        ),
+        FileServiceError::UnsupportedEncoding => ipc_error(
+            "scan_encoding_unsupported",
+            ErrorCategory::Scan,
+            "文件编码不支持",
+            false,
+        ),
+        FileServiceError::Binary => ipc_error(
+            "scan_binary_file",
+            ErrorCategory::Scan,
+            "二进制文件不能纳入分析",
+            false,
+        ),
+        FileServiceError::TooLarge => ipc_error(
+            "scan_file_too_large",
+            ErrorCategory::Scan,
+            "文件超过大小限制",
+            false,
+        ),
+        FileServiceError::RuleExcluded => ipc_error(
+            "validation_invalid_value",
+            ErrorCategory::Validation,
+            "文件被扫描规则排除",
+            false,
+        ),
+        FileServiceError::Persistence(error) => persistence_error(&error),
+    }
+}
+
 fn persistence_error(error: &batch_code_analyzer_persistence::PersistenceError) -> IpcError {
     let retryable = matches!(
         error,
@@ -409,7 +474,7 @@ fn health_check_response(database_health: DatabaseHealth) -> HealthCheckResponse
 
 #[cfg(test)]
 mod tests {
-    use super::{health_check_response, ProjectServiceError};
+    use super::{health_check_response, FileServiceError, ProjectServiceError};
     use batch_code_analyzer_persistence::DatabaseHealth;
 
     #[test]
@@ -475,5 +540,18 @@ mod tests {
         let unavailable = super::database_unavailable();
         assert_eq!(unavailable.code, "persistence_database_unavailable");
         assert_eq!(unavailable.message, "本地数据库暂不可用");
+    }
+
+    #[test]
+    fn file_errors_use_stable_codes_and_safe_messages() {
+        let sensitive = super::file_service_error(FileServiceError::SensitiveBlocked);
+        assert_eq!(sensitive.code, "security_sensitive_file_blocked");
+        assert_eq!(sensitive.message, "敏感文件需要单独确认后才能纳入");
+        assert!(sensitive.details.is_none());
+
+        let missing = super::file_service_error(FileServiceError::NotFound);
+        assert_eq!(missing.code, "validation_invalid_value");
+        assert_eq!(missing.message, "文件记录不存在或已删除");
+        assert!(missing.details.is_none());
     }
 }

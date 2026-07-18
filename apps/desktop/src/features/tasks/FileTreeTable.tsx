@@ -13,6 +13,10 @@ import { VirtualTaskTable } from "./VirtualTaskTable";
 interface FileTreeTableProps {
   files: readonly FileRecordSummaryDto[];
   emptyLabel?: string;
+  onSetIncluded?: (
+    file: FileRecordSummaryDto,
+    included: boolean,
+  ) => Promise<void>;
 }
 
 interface DirectoryNode {
@@ -51,15 +55,18 @@ const EXCLUSION_LABELS: Record<string, string> = {
   symlink: "符号链接",
   unreadable: "无法读取",
   unsupported_encoding: "编码不支持",
+  user_excluded: "用户手动排除",
 };
 
 export function FileTreeTable({
   files,
   emptyLabel = "暂无文件",
+  onSetIncluded,
 }: FileTreeTableProps) {
   const [collapsedDirectories, setCollapsedDirectories] = useState<Set<string>>(
     () => new Set(),
   );
+  const [updatingFileId, setUpdatingFileId] = useState<string | null>(null);
   const root = useMemo(() => buildFileTree(files), [files]);
   const rows = useMemo(
     () => flattenFileTree(root, collapsedDirectories),
@@ -73,6 +80,18 @@ export function FileTreeTable({
       else next.add(key);
       return next;
     });
+  };
+
+  const toggleFile = async (file: FileRecordSummaryDto, included: boolean) => {
+    if (!onSetIncluded) return;
+    setUpdatingFileId(file.id);
+    try {
+      await onSetIncluded(file, included);
+    } catch {
+      // The application layer owns the user-facing error; this only clears the busy state.
+    } finally {
+      setUpdatingFileId(null);
+    }
   };
 
   return (
@@ -140,6 +159,20 @@ export function FileTreeTable({
               className="file-tree-cell file-tree-file"
               style={{ paddingLeft: `${row.depth * 18 + 18}px` }}
             >
+              <input
+                aria-label={`${row.file.included ? "排除" : "纳入"}文件 ${row.file.relativePath}`}
+                checked={row.file.included}
+                className="file-tree-checkbox"
+                disabled={
+                  !onSetIncluded ||
+                  updatingFileId === row.file.id ||
+                  (!row.file.included && !canIncludeFile(row.file))
+                }
+                onChange={(event) => {
+                  void toggleFile(row.file, event.currentTarget.checked);
+                }}
+                type="checkbox"
+              />
               <FileCode2
                 aria-hidden="true"
                 className="file-tree-icon"
@@ -160,6 +193,23 @@ export function FileTreeTable({
       }}
     />
   );
+}
+
+function canIncludeFile(file: FileRecordSummaryDto): boolean {
+  if (file.sourceStatus !== "normal" && file.sourceStatus !== "modified") {
+    return false;
+  }
+  return ![
+    "binary",
+    "builtin_extension",
+    "file_too_large",
+    "sensitive",
+    "sensitive_content",
+    "sensitive_filename",
+    "symlink",
+    "unreadable",
+    "unsupported_encoding",
+  ].includes(file.exclusionReason ?? "");
 }
 
 function buildFileTree(files: readonly FileRecordSummaryDto[]): DirectoryNode {

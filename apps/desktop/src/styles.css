@@ -680,6 +680,17 @@ button:disabled {
   align-items: center;
   gap: 6px;
 }
+.file-tree-checkbox {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  margin: 0 2px 0 0;
+  accent-color: #23639b;
+  cursor: pointer;
+}
+.file-tree-checkbox:disabled {
+  cursor: not-allowed;
+}
 .file-tree-toggle {
   display: grid;
   width: 18px;

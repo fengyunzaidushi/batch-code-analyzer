@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   getScanReport: vi.fn(),
   listFiles: vi.fn(),
   listProjects: vi.fn(),
+  setFileIncluded: vi.fn(),
   startScan: vi.fn(),
   subscribeScanProgress: vi.fn(),
 }));
@@ -23,6 +24,7 @@ vi.mock("../ipc/projects", () => ({
 }));
 vi.mock("../ipc/files", () => ({
   listFiles: mocks.listFiles,
+  setFileIncluded: mocks.setFileIncluded,
 }));
 vi.mock("../ipc/scan", () => ({
   cancelScan: mocks.cancelScan,
@@ -96,6 +98,38 @@ describe("App scan flow", () => {
       "src/main.rs",
     );
     expect(screen.getAllByText("待处理")).toHaveLength(2);
+  });
+
+  it("persists a file exclusion from the tree", async () => {
+    const user = userEvent.setup();
+    const detail = projectDetail();
+    const record = fileRecord();
+    arrangeProject(detail);
+    mocks.listFiles.mockResolvedValue({
+      items: [record],
+      nextCursor: null,
+      total: 1,
+    });
+    mocks.setFileIncluded.mockResolvedValue({
+      file: {
+        ...record,
+        exclusionReason: "user_excluded",
+        included: false,
+      },
+    });
+    mocks.subscribeScanProgress.mockResolvedValue(() => undefined);
+    render(<App />);
+
+    await user.click(
+      await screen.findByRole("checkbox", { name: "排除文件 src/main.rs" }),
+    );
+
+    expect(mocks.setFileIncluded).toHaveBeenCalledWith(
+      detail.id,
+      record.id,
+      false,
+    );
+    expect(await screen.findByText("已排除：用户手动排除")).toBeInTheDocument();
   });
 });
 
