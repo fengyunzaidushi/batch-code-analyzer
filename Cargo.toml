@@ -5,6 +5,7 @@ members = [
   "crates/domain",
   "crates/ipc-contracts",
   "crates/persistence",
+  "crates/repository-scanner",
   "crates/security-core",
 ]
 resolver = "2"

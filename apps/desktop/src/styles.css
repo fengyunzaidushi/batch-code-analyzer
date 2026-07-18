@@ -674,6 +674,54 @@ button:disabled {
   color: #8b98a5;
   font-size: 11px;
 }
+.file-tree-cell {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+}
+.file-tree-toggle {
+  display: grid;
+  width: 18px;
+  height: 22px;
+  flex: 0 0 18px;
+  place-items: center;
+  padding: 0;
+  color: #738292;
+  background: transparent;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.file-tree-toggle:hover {
+  color: #23639b;
+  background: #edf3f8;
+}
+.file-tree-icon {
+  flex: 0 0 auto;
+  color: #7d8b98;
+}
+.file-tree-directory .file-tree-icon {
+  color: #b78437;
+}
+.file-tree-directory {
+  color: #344454;
+  font-weight: 650;
+}
+.file-tree-file-name {
+  overflow: hidden;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-tree-count {
+  margin-left: 2px;
+  color: #99a5b0;
+  font-size: 10px;
+  font-weight: 500;
+}
+.file-tree-muted {
+  color: #9aa6b1;
+}
 .api-workspace .content-intro {
   align-items: center;
 }

@@ -17,6 +17,7 @@ tauri-build.workspace = true
 batch-code-analyzer-app-core = { path = "../../../crates/app-core" }
 batch-code-analyzer-ipc-contracts = { path = "../../../crates/ipc-contracts" }
 batch-code-analyzer-persistence = { path = "../../../crates/persistence" }
+batch-code-analyzer-repository-scanner = { path = "../../../crates/repository-scanner" }
 tauri.workspace = true
 tauri-plugin-dialog.workspace = true
 

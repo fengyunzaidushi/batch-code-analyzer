@@ -156,6 +156,85 @@ pub struct ProjectAddResponse {
     pub config_mirror_warning: bool,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct FileListRequest {
+    pub project_id: ProjectId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub cursor: Option<String>,
+    pub limit: u16,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ScanOperationStatus {
+    Running,
+    Completed,
+    Cancelled,
+    Failed,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanStartRequest {
+    pub project_id: ProjectId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanStartResponse {
+    #[ts(type = "1")]
+    pub schema_version: u32,
+    pub operation_id: String,
+    pub project_id: ProjectId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanCancelRequest {
+    pub operation_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanCancelResponse {
+    #[ts(type = "1")]
+    pub schema_version: u32,
+    pub operation_id: String,
+    pub accepted: bool,
+}
+
+/// Scan progress and the final import report share one stable payload so the
+/// UI can render the latest operation without retaining scanner internals.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanReportDto {
+    #[ts(type = "1")]
+    pub schema_version: u32,
+    pub operation_id: String,
+    pub project_id: ProjectId,
+    pub status: ScanOperationStatus,
+    #[ts(type = "number")]
+    pub visited_entries: u64,
+    #[ts(type = "number")]
+    pub scanned_files: u64,
+    #[ts(type = "number")]
+    pub included_files: u64,
+    #[ts(type = "Record<string, number>")]
+    pub excluded_by_reason: BTreeMap<String, u64>,
+    pub unreadable_files: Vec<String>,
+    pub unsupported_encoding_files: Vec<String>,
+    pub sensitive_files: Vec<String>,
+    pub symlink_files: Vec<String>,
+    pub invalid_gitignore_rules: Vec<String>,
+    pub cancelled: bool,
+    pub file_count: Option<u32>,
+    pub generation: Option<u32>,
+    pub error_code: Option<String>,
+    pub updated_at: Rfc3339Timestamp,
+}
+
 impl From<&DomainProject> for ProjectSummaryDto {
     fn from(project: &DomainProject) -> Self {
         Self {
@@ -460,6 +539,12 @@ pub fn export_types(out_dir: &Path) -> Result<(), ExportError> {
     ProjectAddRequest::export_all(&config)?;
     ProjectDetailDto::export_all(&config)?;
     ProjectAddResponse::export_all(&config)?;
+    ScanStartRequest::export_all(&config)?;
+    ScanStartResponse::export_all(&config)?;
+    ScanCancelRequest::export_all(&config)?;
+    ScanCancelResponse::export_all(&config)?;
+    ScanReportDto::export_all(&config)?;
+    FileListRequest::export_all(&config)?;
     FileRecordSummaryDto::export_all(&config)?;
     RunSummaryDto::export_all(&config)?;
     TaskSummaryDto::export_all(&config)?;
@@ -483,6 +568,7 @@ pub fn export_types(out_dir: &Path) -> Result<(), ExportError> {
     TaskStatus::export_all(&config)?;
     TaskTransition::export_all(&config)?;
     AttemptStatus::export_all(&config)?;
+    ScanOperationStatus::export_all(&config)?;
 
     Ok(())
 }

@@ -2,10 +2,14 @@ use batch_code_analyzer_persistence::{Database, DatabaseHealth, DatabaseStartup}
 use tauri::Manager;
 
 mod commands;
+mod scan_state;
+
+pub(crate) use scan_state::ScanState;
 
 pub(crate) struct PersistenceState {
     pub(crate) database: Option<Database>,
     pub(crate) health: DatabaseHealth,
+    pub(crate) scans: ScanState,
 }
 
 /// Starts the desktop application and registers its IPC commands.
@@ -23,10 +27,12 @@ pub fn run() {
                 DatabaseStartup::Ready(database) => PersistenceState {
                     health: database.health(),
                     database: Some(database),
+                    scans: ScanState::default(),
                 },
                 DatabaseStartup::Recovery(recovery) => PersistenceState {
                     health: recovery.health(),
                     database: None,
+                    scans: ScanState::default(),
                 },
             };
 
@@ -38,7 +44,11 @@ pub fn run() {
             commands::health_check,
             commands::project_list,
             commands::project_add,
-            commands::project_get
+            commands::project_get,
+            commands::file_list,
+            commands::scan_start,
+            commands::scan_cancel,
+            commands::scan_get_report
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Batch Code Analyzer");

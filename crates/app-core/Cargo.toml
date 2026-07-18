@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 batch-code-analyzer-domain = { path = "../domain" }
 batch-code-analyzer-persistence = { path = "../persistence" }
+batch-code-analyzer-repository-scanner = { path = "../repository-scanner" }
 batch-code-analyzer-security-core = { path = "../security-core" }
 serde.workspace = true
 serde_json.workspace = true

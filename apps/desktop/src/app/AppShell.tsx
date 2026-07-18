@@ -13,12 +13,14 @@ import {
 } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
 import type {
+  FileRecordSummaryDto,
   ProjectPathStatus,
   ProjectSummaryDto,
+  ScanReportDto,
 } from "@batch-code-analyzer/ipc-types";
 
 import { MarkdownPreview } from "../features/markdown/MarkdownPreview";
-import { VirtualTaskTable } from "../features/tasks/VirtualTaskTable";
+import { FileTreeTable } from "../features/tasks/FileTreeTable";
 
 export type ShellProject = ProjectSummaryDto & {
   rootDirectory?: string;
@@ -36,13 +38,18 @@ export interface ActiveRunSummary {
 }
 
 interface AppShellProps {
+  fileRecords?: readonly FileRecordSummaryDto[];
+  fileTotal?: number;
   projects?: readonly ShellProject[];
   healthState?: ShellHealthState;
   activeRun?: ActiveRunSummary | null;
   onAddProject?: () => void;
+  onCancelScan?: () => void;
   onRetryHealth?: () => void;
   onSelectProject?: (id: string) => void;
+  onStartScan?: () => void;
   projectError?: string | null;
+  scanReport?: ScanReportDto | null;
   selectedProjectId?: string | null;
   isAddingProject?: boolean;
 }
@@ -50,13 +57,18 @@ interface AppShellProps {
 type WorkspaceTab = "prompt" | "api";
 
 export function AppShell({
+  fileRecords = [],
+  fileTotal = 0,
   projects = [],
   healthState = "checking",
   activeRun = null,
   onAddProject = () => undefined,
+  onCancelScan = () => undefined,
   onRetryHealth = () => undefined,
   onSelectProject,
+  onStartScan = () => undefined,
   projectError = null,
+  scanReport = null,
   selectedProjectId: controlledSelectedProjectId,
   isAddingProject = false,
 }: AppShellProps) {
@@ -109,8 +121,13 @@ export function AppShell({
         />
         <ProjectWorkspace
           activeRun={activeRun}
+          fileRecords={fileRecords}
+          fileTotal={fileTotal}
+          onCancelScan={onCancelScan}
           onPreview={() => setPreviewOpen(true)}
+          onStartScan={onStartScan}
           project={selectedProject}
+          scanReport={scanReport}
           tab={tab}
           setTab={setTab}
         />
@@ -352,14 +369,24 @@ function PathStatus({ status }: { status: ProjectPathStatus }) {
 
 function ProjectWorkspace({
   activeRun,
+  fileRecords,
+  fileTotal,
+  onCancelScan,
   onPreview,
+  onStartScan,
   project,
+  scanReport,
   tab,
   setTab,
 }: {
   activeRun: ActiveRunSummary | null;
+  fileRecords: readonly FileRecordSummaryDto[];
+  fileTotal: number;
+  onCancelScan: () => void;
   onPreview: () => void;
+  onStartScan: () => void;
   project: ShellProject | null;
+  scanReport: ScanReportDto | null;
   tab: WorkspaceTab;
   setTab: (tab: WorkspaceTab) => void;
 }) {
@@ -381,7 +408,15 @@ function ProjectWorkspace({
         />
       </div>
       {tab === "prompt" ? (
-        <PromptWorkspace onPreview={onPreview} project={project} />
+        <PromptWorkspace
+          fileRecords={fileRecords}
+          fileTotal={fileTotal}
+          onCancelScan={onCancelScan}
+          onPreview={onPreview}
+          onStartScan={onStartScan}
+          project={project}
+          scanReport={scanReport}
+        />
       ) : (
         <ApiWorkspace />
       )}
@@ -465,16 +500,30 @@ function TabButton({
 }
 
 function PromptWorkspace({
+  fileRecords,
+  fileTotal,
+  onCancelScan,
   onPreview,
+  onStartScan,
   project,
+  scanReport,
 }: {
+  onCancelScan: () => void;
+  fileRecords: readonly FileRecordSummaryDto[];
+  fileTotal: number;
   onPreview: () => void;
+  onStartScan: () => void;
   project: ShellProject | null;
+  scanReport: ScanReportDto | null;
 }) {
   const [prompt, setPrompt] = useState(
     "请结合提供的项目上下文，用通俗但准确的语言解释当前代码文件。\n\n请说明核心职责、关键输入输出、协作模块和修改影响。",
   );
   const hasProject = project !== null;
+  const includedFileCount =
+    scanReport?.status === "completed"
+      ? scanReport.includedFiles
+      : fileRecords.filter((file) => file.included).length;
   return (
     <div className="workspace-content">
       <div className="content-intro">
@@ -523,10 +572,17 @@ function PromptWorkspace({
             <button
               className="outline-button"
               disabled={!hasProject}
+              onClick={
+                scanReport?.status === "running" ? onCancelScan : onStartScan
+              }
               type="button"
             >
-              <FolderPlus size={15} />
-              扫描仓库
+              {scanReport?.status === "running" ? (
+                <RefreshCw size={15} />
+              ) : (
+                <FolderPlus size={15} />
+              )}
+              {scanReport?.status === "running" ? "取消扫描" : "扫描仓库"}
             </button>
             <button
               className="primary-button"
@@ -543,40 +599,27 @@ function PromptWorkspace({
           <SummaryMetric
             label="已纳入文件"
             value={
-              project?.runningTaskCount ? `${project.runningTaskCount}` : "—"
+              scanReport?.status === "completed" || fileTotal > 0
+                ? `${includedFileCount}`
+                : "—"
             }
           />
           <SummaryMetric label="待处理" value="—" />
           <SummaryMetric label="最近 Run" value="—" />
           <div className="scan-summary-note">
             <CircleAlert size={15} />
-            扫描与任务状态将在 Rust 查询接入后显示
+            {scanSummaryMessage(scanReport)}
           </div>
         </div>
-        <VirtualTaskTable
+        <FileTreeTable
           emptyLabel={
-            hasProject
-              ? "扫描项目后，文件任务会显示在这里"
-              : "添加项目后，文件任务会显示在这里"
+            scanReport?.status === "completed"
+              ? "没有符合当前扫描规则的文件"
+              : hasProject
+                ? "扫描项目后，文件任务会显示在这里"
+                : "添加项目后，文件任务会显示在这里"
           }
-          getRowKey={(item) => item}
-          header={
-            <>
-              <span>文件</span>
-              <span>状态</span>
-              <span>模型</span>
-              <span>结果</span>
-            </>
-          }
-          items={[] as string[]}
-          renderRow={(item) => (
-            <>
-              <span>{item}</span>
-              <span>未执行</span>
-              <span>—</span>
-              <span>—</span>
-            </>
-          )}
+          files={fileRecords}
         />
       </section>
     </div>
@@ -590,6 +633,20 @@ function SummaryMetric({ label, value }: { label: string; value: string }) {
       <strong>{value}</strong>
     </div>
   );
+}
+
+function scanSummaryMessage(report: ScanReportDto | null): string {
+  if (!report) return "尚未扫描项目；扫描结果将在这里显示。";
+  switch (report.status) {
+    case "running":
+      return `正在扫描：已检查 ${report.scannedFiles} 个文件`;
+    case "completed":
+      return `扫描完成：纳入 ${report.includedFiles} 个文件`;
+    case "cancelled":
+      return "扫描已取消，本次结果未提交。";
+    case "failed":
+      return "扫描失败，请检查项目路径和权限。";
+  }
 }
 
 function ApiWorkspace() {

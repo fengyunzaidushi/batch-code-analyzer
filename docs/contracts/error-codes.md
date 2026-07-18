@@ -71,6 +71,8 @@ internal
 | --- | --- | --- | --- |
 | `scan_already_running` | 否 | 否 | 当前项目已有扫描 |
 | `scan_cancelled` | 否 | 否 | 用户取消扫描 |
+| `scan_failed` | 是 | 否 | 扫描未能完成 |
+| `scan_not_found` | 否 | 否 | 扫描操作不存在 |
 | `scan_file_unreadable` | 是 | 否 | 文件不可读取 |
 | `scan_gitignore_invalid_rule` | 否 | 否 | 忽略规则无法解析 |
 | `scan_file_too_large` | 否 | 否 | 文件超过大小限制 |

@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   checkBackendHealth: vi.fn(),
   chooseProjectDirectory: vi.fn(),
   getProject: vi.fn(),
+  listFiles: vi.fn(),
   listProjects: vi.fn(),
 }));
 
@@ -18,6 +19,9 @@ vi.mock("../ipc/projects", () => ({
   chooseProjectDirectory: mocks.chooseProjectDirectory,
   getProject: mocks.getProject,
   listProjects: mocks.listProjects,
+}));
+vi.mock("../ipc/files", () => ({
+  listFiles: mocks.listFiles,
 }));
 
 import { App } from "./App";
@@ -128,6 +132,7 @@ function arrangeEmptyProject() {
     status: "ready",
   });
   mocks.listProjects.mockResolvedValue([]);
+  mocks.listFiles.mockResolvedValue({ items: [], nextCursor: null, total: 0 });
 }
 
 function projectDetail() {

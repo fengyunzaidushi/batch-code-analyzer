@@ -98,7 +98,7 @@ impl DatabaseStartup {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Database {
     pool: SqlitePool,
     schema_version: u32,

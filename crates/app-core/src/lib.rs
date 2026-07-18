@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 use std::{
+    collections::BTreeMap,
     fs,
     path::Path,
     sync::atomic::{AtomicU64, Ordering},
@@ -10,11 +11,15 @@ use std::{
 };
 
 use batch_code_analyzer_domain::{
-    ApiRouting, ContextStatus, ExecutionDefaults, FilterRules, Project, ProjectContext, ProjectId,
-    ProjectPathStatus, Rfc3339Timestamp,
+    ApiRouting, ContextStatus, ExecutionDefaults, FileRecord, FileRecordId, FileResultStatus,
+    FileSourceStatus, FilterRules, Project, ProjectContext, ProjectId, ProjectPathStatus,
+    Rfc3339Timestamp, SensitiveFinding,
 };
 use batch_code_analyzer_persistence::{
     Database, PersistenceError, ProjectRowMetadata, LATEST_SCHEMA_VERSION,
+};
+use batch_code_analyzer_repository_scanner::{
+    FileDecision, ImportReport, ScanCancellation, ScanConfig, ScanError, ScanResult, Scanner,
 };
 use batch_code_analyzer_security_core::SafeRoot;
 use serde::Serialize;
@@ -24,6 +29,7 @@ pub use batch_code_analyzer_domain as domain;
 
 const DEFAULT_PROMPT: &str = "请结合提供的项目上下文，用通俗但准确的语言解释当前代码文件。\n请说明：\n1. 该文件在项目中的核心职责；\n2. 关键输入、输出、状态或数据流；\n3. 它与哪些模块或功能协作，以及它为何存在；\n4. 修改或缺失它可能带来的影响。\n如无法从上下文或代码中确认，请明确说明不确定性，不要臆测。";
 static NEXT_PROJECT_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_FILE_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum ProjectServiceError {
@@ -64,6 +70,208 @@ pub struct ProjectAddResult {
 
 pub struct ProjectService<'database> {
     database: &'database Database,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub enum ScanServiceError {
+    PathUnavailable,
+    Cancelled,
+    ScanFailed,
+    Persistence(PersistenceError),
+}
+
+impl ScanServiceError {
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::PathUnavailable => "project_path_unavailable",
+            Self::Cancelled => "scan_cancelled",
+            Self::ScanFailed => "scan_failed",
+            Self::Persistence(error) => error.code(),
+        }
+    }
+}
+
+impl std::fmt::Display for ScanServiceError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.code())
+    }
+}
+
+impl std::error::Error for ScanServiceError {}
+
+impl From<PersistenceError> for ScanServiceError {
+    fn from(error: PersistenceError) -> Self {
+        Self::Persistence(error)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ScanSummary {
+    pub generation: u32,
+    pub file_count: u32,
+    pub report: ImportReport,
+}
+
+pub struct ScanService<'database> {
+    database: &'database Database,
+}
+
+impl<'database> ScanService<'database> {
+    #[must_use]
+    pub const fn new(database: &'database Database) -> Self {
+        Self { database }
+    }
+
+    /// Runs the scanner synchronously. Callers must execute this method on a
+    /// blocking thread and only call `persist_scan` after `completed` is true.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable scan error without exposing scanner paths or driver
+    /// diagnostics.
+    pub fn scan_project(
+        project: &Project,
+        cancellation: ScanCancellation,
+    ) -> Result<ScanResult, ScanServiceError> {
+        Scanner::new(ScanConfig {
+            root: project.source_directory.clone().into(),
+            cancellation,
+            ..ScanConfig::new(project.source_directory.clone())
+        })
+        .scan()
+        .map_err(|error| match error {
+            ScanError::Root("project_path_unavailable") => ScanServiceError::PathUnavailable,
+            ScanError::Root(_) | ScanError::Io(_) => ScanServiceError::ScanFailed,
+        })
+    }
+
+    /// Converts a completed scanner result to Domain rows and commits one
+    /// generation atomically.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable persistence error when the generation cannot commit.
+    pub async fn persist_scan(
+        &self,
+        project_id: &ProjectId,
+        result: ScanResult,
+    ) -> Result<ScanSummary, ScanServiceError> {
+        if !result.completed {
+            return Err(ScanServiceError::Cancelled);
+        }
+        let existing = self
+            .database
+            .repository()
+            .list_file_records(project_id)
+            .await?;
+        let records = map_scanned_files(project_id, &existing, &result);
+        let now = timestamp_now();
+        let generation = self
+            .database
+            .repository()
+            .commit_scan(project_id, &records, &now)
+            .await?;
+        Ok(ScanSummary {
+            generation,
+            file_count: u32::try_from(records.len()).unwrap_or(u32::MAX),
+            report: result.report,
+        })
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn map_scanned_files(
+    project_id: &ProjectId,
+    existing: &[FileRecord],
+    result: &ScanResult,
+) -> Vec<FileRecord> {
+    let existing_by_path: BTreeMap<&str, &FileRecord> = existing
+        .iter()
+        .map(|record| (record.relative_path.as_str(), record))
+        .collect();
+    result
+        .files
+        .iter()
+        .map(|scanned| {
+            let previous = existing_by_path
+                .get(scanned.relative_path.as_str())
+                .copied();
+            let (source_status, included, exclusion_reason) = match &scanned.decision {
+                FileDecision::Included => {
+                    let status = if previous.is_some_and(|record| {
+                        record.content_hash.is_some() && record.content_hash != scanned.content_hash
+                    }) {
+                        FileSourceStatus::Modified
+                    } else {
+                        FileSourceStatus::Normal
+                    };
+                    (status, true, None)
+                }
+                FileDecision::Excluded { reason } => {
+                    (FileSourceStatus::Normal, false, Some(reason.clone()))
+                }
+                FileDecision::Unreadable => (
+                    FileSourceStatus::Unreadable,
+                    false,
+                    Some("unreadable".into()),
+                ),
+                FileDecision::Binary => (FileSourceStatus::Normal, false, Some("binary".into())),
+                FileDecision::UnsupportedEncoding => (
+                    FileSourceStatus::UnsupportedEncoding,
+                    false,
+                    Some("unsupported_encoding".into()),
+                ),
+                FileDecision::Sensitive => {
+                    (FileSourceStatus::Sensitive, false, Some("sensitive".into()))
+                }
+                FileDecision::TooLarge => (
+                    FileSourceStatus::Normal,
+                    false,
+                    Some("file_too_large".into()),
+                ),
+                FileDecision::Symlink => (FileSourceStatus::Normal, false, Some("symlink".into())),
+            };
+            let changed = previous.is_some_and(|record| {
+                record.content_hash != scanned.content_hash || record.source_status != source_status
+            });
+            let result_status = match previous {
+                Some(record) if changed && record.result_status != FileResultStatus::None => {
+                    FileResultStatus::Stale
+                }
+                Some(record) => record.result_status,
+                None => FileResultStatus::None,
+            };
+            FileRecord {
+                id: previous.map_or_else(new_file_id, |record| record.id.clone()),
+                project_id: project_id.clone(),
+                relative_path: scanned.relative_path.clone(),
+                size_bytes: scanned.size_bytes,
+                modified_at: scanned
+                    .modified_at
+                    .as_ref()
+                    .map(|value| Rfc3339Timestamp::new(value.clone())),
+                content_hash: scanned.content_hash.clone(),
+                encoding: scanned.encoding.clone(),
+                language: scanned.language.clone(),
+                source_status,
+                included,
+                exclusion_reason,
+                sensitive_findings: scanned
+                    .sensitive_findings
+                    .iter()
+                    .map(|finding| SensitiveFinding {
+                        kind: finding.kind.clone(),
+                        line: Some(finding.line),
+                        column: Some(finding.column),
+                    })
+                    .collect(),
+                latest_successful_run_id: previous
+                    .and_then(|record| record.latest_successful_run_id.clone()),
+                result_status,
+            }
+        })
+        .collect()
 }
 
 impl<'database> ProjectService<'database> {
@@ -184,6 +392,21 @@ impl<'database> ProjectService<'database> {
         self.database.repository().list_projects().await
     }
 
+    /// Lists a project's persisted file records for the file table.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable persistence error when records cannot be read.
+    pub async fn list_file_records(
+        &self,
+        project_id: &ProjectId,
+    ) -> Result<Vec<FileRecord>, PersistenceError> {
+        self.database
+            .repository()
+            .list_file_records(project_id)
+            .await
+    }
+
     /// Loads one project with its path for the detail view.
     ///
     /// # Errors
@@ -246,7 +469,13 @@ fn new_project_id() -> ProjectId {
     ProjectId::new(format!("project-{timestamp}-{sequence}"))
 }
 
-fn timestamp_now() -> Rfc3339Timestamp {
+fn new_file_id() -> FileRecordId {
+    let sequence = NEXT_FILE_ID.fetch_add(1, Ordering::Relaxed);
+    FileRecordId::new(format!("file-{sequence}"))
+}
+
+#[must_use]
+pub fn timestamp_now() -> Rfc3339Timestamp {
     let value = OffsetDateTime::now_utc()
         .format(&Rfc3339)
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".into());
@@ -258,8 +487,9 @@ mod tests {
     use std::{fs, path::PathBuf};
 
     use batch_code_analyzer_persistence::Database;
+    use batch_code_analyzer_repository_scanner::ScanCancellation;
 
-    use super::{ProjectService, ProjectServiceError};
+    use super::{ProjectService, ProjectServiceError, ScanService};
 
     fn temporary_directory(name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
@@ -351,6 +581,74 @@ mod tests {
         assert_ne!(first.created, second.created);
         assert_eq!(first.project.id, second.project.id);
         assert_eq!(service.list_projects().await.unwrap().len(), 1);
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[tokio::test]
+    async fn completed_scans_persist_files_and_mark_missing_files_deleted() {
+        let database = Database::open_in_memory()
+            .await
+            .expect("database should open");
+        let path = temporary_directory("scan");
+        fs::write(path.join("main.rs"), "fn main() {}\n").expect("source file should be created");
+        let project = ProjectService::new(&database)
+            .add_project(&path)
+            .await
+            .expect("project should add")
+            .project;
+        let service = ScanService::new(&database);
+
+        let first_result = ScanService::scan_project(&project, ScanCancellation::new())
+            .expect("scan should complete");
+        let first_summary = service
+            .persist_scan(&project.id, first_result)
+            .await
+            .expect("scan generation should commit");
+        assert_eq!(first_summary.generation, 1);
+        assert!(first_summary.report.included_files >= 1);
+        assert!(database
+            .repository()
+            .list_file_records(&project.id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|file| file.relative_path == "main.rs" && file.included));
+
+        fs::remove_file(path.join("main.rs")).expect("source file should be removed");
+        let second_result = ScanService::scan_project(&project, ScanCancellation::new())
+            .expect("second scan should complete");
+        let second_summary = service
+            .persist_scan(&project.id, second_result)
+            .await
+            .expect("second scan generation should commit");
+        assert_eq!(second_summary.generation, 2);
+        assert_eq!(
+            database
+                .repository()
+                .list_file_records(&project.id)
+                .await
+                .unwrap()
+                .iter()
+                .find(|file| file.relative_path == "main.rs")
+                .unwrap()
+                .source_status,
+            batch_code_analyzer_domain::FileSourceStatus::Deleted
+        );
+
+        let cancellation = ScanCancellation::new();
+        cancellation.cancel();
+        let cancelled = ScanService::scan_project(&project, cancellation)
+            .expect("cancelled scan should return diagnostics");
+        assert!(!cancelled.completed);
+        assert_eq!(
+            service
+                .persist_scan(&project.id, cancelled)
+                .await
+                .expect_err("cancelled scan must not be persisted")
+                .to_string(),
+            "scan_cancelled"
+        );
 
         let _ = fs::remove_dir_all(path);
     }
