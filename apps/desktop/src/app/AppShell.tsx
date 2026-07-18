@@ -20,7 +20,7 @@ import type {
 } from "@batch-code-analyzer/ipc-types";
 
 import { MarkdownPreview } from "../features/markdown/MarkdownPreview";
-import { VirtualTaskTable } from "../features/tasks/VirtualTaskTable";
+import { FileTreeTable } from "../features/tasks/FileTreeTable";
 
 export type ShellProject = ProjectSummaryDto & {
   rootDirectory?: string;
@@ -611,7 +611,7 @@ function PromptWorkspace({
             {scanSummaryMessage(scanReport)}
           </div>
         </div>
-        <VirtualTaskTable
+        <FileTreeTable
           emptyLabel={
             scanReport?.status === "completed"
               ? "没有符合当前扫描规则的文件"
@@ -619,24 +619,7 @@ function PromptWorkspace({
                 ? "扫描项目后，文件任务会显示在这里"
                 : "添加项目后，文件任务会显示在这里"
           }
-          getRowKey={(item) => item.id}
-          header={
-            <>
-              <span>文件</span>
-              <span>状态</span>
-              <span>模型</span>
-              <span>结果</span>
-            </>
-          }
-          items={fileRecords}
-          renderRow={(item) => (
-            <>
-              <span>{item.relativePath}</span>
-              <span>{fileSourceStatusLabel(item)}</span>
-              <span>—</span>
-              <span>{fileResultStatusLabel(item.resultStatus)}</span>
-            </>
-          )}
+          files={fileRecords}
         />
       </section>
     </div>
@@ -663,37 +646,6 @@ function scanSummaryMessage(report: ScanReportDto | null): string {
       return "扫描已取消，本次结果未提交。";
     case "failed":
       return "扫描失败，请检查项目路径和权限。";
-  }
-}
-
-function fileSourceStatusLabel(file: FileRecordSummaryDto): string {
-  if (file.included)
-    return file.sourceStatus === "modified" ? "已修改" : "待处理";
-  if (file.exclusionReason) return `已排除：${file.exclusionReason}`;
-  switch (file.sourceStatus) {
-    case "deleted":
-      return "已删除";
-    case "sensitive":
-      return "敏感文件";
-    case "unreadable":
-      return "不可读取";
-    case "unsupported_encoding":
-      return "编码不支持";
-    default:
-      return "已排除";
-  }
-}
-
-function fileResultStatusLabel(
-  status: FileRecordSummaryDto["resultStatus"],
-): string {
-  switch (status) {
-    case "current":
-      return "当前结果";
-    case "stale":
-      return "结果过期";
-    default:
-      return "—";
   }
 }
 

@@ -91,7 +91,10 @@ describe("App scan flow", () => {
     mocks.subscribeScanProgress.mockResolvedValue(() => undefined);
     render(<App />);
 
-    expect(await screen.findByText("src/main.rs")).toBeInTheDocument();
+    expect(await screen.findByText("main.rs")).toHaveAttribute(
+      "title",
+      "src/main.rs",
+    );
     expect(screen.getAllByText("待处理")).toHaveLength(2);
   });
 });
