@@ -57,6 +57,8 @@ export interface PageResponse<T> {
 ```text
 project_list
 project_add
+project_get
+project_update_run_settings
 project_update
 project_remove
 project_relocate
@@ -65,6 +67,9 @@ project_relocate
 最低语义：
 
 - `project_add`：输入用户选择的目录，完成 canonical path 校验；重复目录返回已有项目。
+- `project_get`：按需返回当前项目详情；绝对仓库路径不进入项目列表摘要。
+- `project_update_run_settings`：更新未来 Run 使用的主 API Profile 和项目默认模型；
+  Profile 引用必须存在，响应返回更新后的 `ProjectDetailDto` 和配置镜像写入警告。
 - `project_remove`：只移除客户端登记，不删除仓库或历史输出。
 - `project_relocate`：重新绑定不可用项目，必须校验项目 ID 或仓库配置的一致性。
 

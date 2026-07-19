@@ -4,6 +4,7 @@ import type {
   ApiProfileSummaryDto,
   FileRecordSummaryDto,
   IpcError,
+  ProjectRunSettingsUpdateRequest,
   ProjectSummaryDto,
   RunPreviewRequest,
   RunPreviewResponse,
@@ -15,6 +16,7 @@ import {
   chooseProjectDirectory,
   getProject,
   listProjects,
+  updateProjectRunSettings,
 } from "../ipc/projects";
 import { checkBackendHealth } from "../ipc/health";
 import { listFiles, setFileIncluded } from "../ipc/files";
@@ -162,7 +164,12 @@ export function App() {
         setProjects((current) =>
           current.map((project) =>
             project.id === detail.id
-              ? { ...project, rootDirectory: detail.sourceDirectory }
+              ? {
+                  ...project,
+                  rootDirectory: detail.sourceDirectory,
+                  primaryProfileId: detail.apiRouting.primaryProfileId,
+                  defaultModel: detail.defaultModel,
+                }
               : project,
           ),
         );
@@ -364,6 +371,35 @@ export function App() {
     }
   };
 
+  const handleUpdateProjectRunSettings = async (
+    request: ProjectRunSettingsUpdateRequest,
+  ) => {
+    setApiProfileError(null);
+    try {
+      const response = await updateProjectRunSettings(request);
+      setProjects((current) =>
+        current.map((project) =>
+          project.id === response.project.id
+            ? {
+                ...project,
+                rootDirectory: response.project.sourceDirectory,
+                primaryProfileId: response.project.apiRouting.primaryProfileId,
+                defaultModel: response.project.defaultModel,
+              }
+            : project,
+        ),
+      );
+      setRunPreview(null);
+      setRunError(null);
+      if (response.configMirrorWarning) {
+        setApiProfileError("设置已保存，但项目配置镜像暂时无法写入。");
+      }
+    } catch (error) {
+      setApiProfileError(safeApiProfileError(error));
+      throw error;
+    }
+  };
+
   const handleRunPreview = async (input: { prompt: string }) => {
     if (!selectedProjectId) return;
     setRunError(null);
@@ -435,6 +471,7 @@ export function App() {
       onPutApiProfileSecret={handlePutApiProfileSecret}
       onSaveApiProfile={handleSaveApiProfile}
       onTestApiProfile={handleTestApiProfile}
+      onUpdateProjectRunSettings={handleUpdateProjectRunSettings}
       projectError={projectError}
       projects={projects}
       fileRecords={

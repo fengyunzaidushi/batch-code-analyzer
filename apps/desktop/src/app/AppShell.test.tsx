@@ -85,9 +85,44 @@ describe("AppShell", () => {
     render(<AppShell apiProfiles={[profile]} projects={[project()]} />);
 
     await user.click(screen.getByRole("tab", { name: "API 配置" }));
-    expect(screen.getByDisplayValue("Local API")).toBeInTheDocument();
+    expect(screen.getByLabelText("名称")).toHaveValue("Local API");
     expect(screen.getByText("已配置密钥")).toBeInTheDocument();
     expect(screen.queryByDisplayValue(/sk-|api-key/i)).not.toBeInTheDocument();
+  });
+
+  it("saves the selected project API route and default model", async () => {
+    const user = userEvent.setup();
+    const profile: ApiProfileSummaryDto = {
+      baseUrl: "https://example.test/v1",
+      defaultModel: "gpt-5",
+      hasSecret: true,
+      id: "profile-1",
+      lastConnectionStatus: "unknown",
+      lastErrorCode: null,
+      lastTestedAt: null,
+      modelCache: [],
+      modelCacheUpdatedAt: null,
+      name: "Local API",
+      protocol: "openai-responses",
+      schemaVersion: 1,
+    };
+    const onUpdateProjectRunSettings = vi.fn().mockResolvedValue(undefined);
+    render(
+      <AppShell
+        apiProfiles={[profile]}
+        onUpdateProjectRunSettings={onUpdateProjectRunSettings}
+        projects={[project()]}
+      />,
+    );
+
+    await user.click(screen.getByRole("tab", { name: "API 配置" }));
+    await user.click(screen.getByRole("button", { name: "保存项目运行设置" }));
+
+    expect(onUpdateProjectRunSettings).toHaveBeenCalledWith({
+      defaultModel: "gpt-5",
+      primaryProfileId: "profile-1",
+      projectId: "project-1",
+    });
   });
 
   it("saves profile metadata and writes a key through the dedicated handler", async () => {

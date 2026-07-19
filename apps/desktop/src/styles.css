@@ -739,6 +739,53 @@ button:disabled {
 .api-error {
   margin: 18px 0 0;
 }
+.project-run-settings {
+  display: grid;
+  grid-template-columns:
+    minmax(160px, 0.75fr) minmax(180px, 1fr) minmax(180px, 1fr)
+    auto;
+  align-items: end;
+  gap: 16px;
+  margin-top: 22px;
+  padding: 17px 20px;
+  background: #f7f9fb;
+  border: 1px solid #e0e5ea;
+  border-radius: 6px;
+}
+.project-run-settings h3 {
+  margin: 4px 0 0;
+  color: #344454;
+  font-size: 14px;
+}
+.project-run-settings label {
+  min-width: 0;
+  color: #6f7f8e;
+  font-size: 10px;
+  font-weight: 650;
+}
+.project-run-settings input,
+.project-run-settings select {
+  display: block;
+  width: 100%;
+  min-height: 36px;
+  margin-top: 7px;
+  padding: 8px 10px;
+  color: #344454;
+  background: #fff;
+  border: 1px solid #d4dce4;
+  border-radius: 4px;
+  outline: none;
+  font-size: 12px;
+}
+.project-run-settings input:focus,
+.project-run-settings select:focus {
+  border-color: #5d94c2;
+  box-shadow: 0 0 0 2px rgba(35, 99, 155, 0.1);
+}
+.project-run-settings .primary-button {
+  min-height: 36px;
+  white-space: nowrap;
+}
 .api-config-band {
   display: grid;
   min-height: 420px;
@@ -1001,6 +1048,13 @@ button:disabled {
   .scan-summary-note {
     grid-column: 1 / -1;
   }
+  .project-run-settings {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .project-run-settings > div,
+  .project-run-settings .primary-button {
+    grid-column: 1 / -1;
+  }
 }
 @media (max-width: 620px) {
   .shell-body {
@@ -1052,6 +1106,13 @@ button:disabled {
   }
   .api-config-band {
     display: block;
+  }
+  .project-run-settings {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .project-run-settings > div,
+  .project-run-settings .primary-button {
+    grid-column: auto;
   }
   .api-profile-list {
     border-right: 0;

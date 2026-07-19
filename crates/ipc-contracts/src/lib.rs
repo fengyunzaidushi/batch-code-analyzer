@@ -257,6 +257,21 @@ pub struct ProjectAddResponse {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
+pub struct ProjectRunSettingsUpdateRequest {
+    pub project_id: ProjectId,
+    pub primary_profile_id: Option<ApiProfileId>,
+    pub default_model: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectRunSettingsUpdateResponse {
+    pub project: ProjectDetailDto,
+    pub config_mirror_warning: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
 pub struct FileListRequest {
     pub project_id: ProjectId,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -741,6 +756,8 @@ pub fn export_types(out_dir: &Path) -> Result<(), ExportError> {
     ProjectAddRequest::export_all(&config)?;
     ProjectDetailDto::export_all(&config)?;
     ProjectAddResponse::export_all(&config)?;
+    ProjectRunSettingsUpdateRequest::export_all(&config)?;
+    ProjectRunSettingsUpdateResponse::export_all(&config)?;
     ScanStartRequest::export_all(&config)?;
     ScanStartResponse::export_all(&config)?;
     ScanCancelRequest::export_all(&config)?;

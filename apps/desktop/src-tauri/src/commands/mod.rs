@@ -18,11 +18,12 @@ use batch_code_analyzer_ipc_contracts::{
     ApiProfileSaveResponse, ApiProfileSummaryDto, ApiProfileTestRequest, ApiProfileTestResponse,
     DatabaseStatus, ErrorCategory, FileListRequest, FileRecordSummaryDto, FileSetIncludedRequest,
     FileSetIncludedResponse, HealthCheckResponse, HealthStatus, IpcError, PageResponse,
-    ProjectAddRequest, ProjectAddResponse, ProjectDetailDto, ProjectSummaryDto,
-    RunBlockingReasonDto, RunCreateRequest, RunCreateResponse, RunExecuteRequest,
-    RunExecuteResponse, RunPreviewRequest, RunPreviewResponse, RunPreviewTaskDto, RunSummaryDto,
-    ScanCancelRequest, ScanCancelResponse, ScanOperationStatus, ScanReportDto, ScanStartRequest,
-    ScanStartResponse, DTO_SCHEMA_VERSION, HEALTH_CHECK_SCHEMA_VERSION,
+    ProjectAddRequest, ProjectAddResponse, ProjectDetailDto, ProjectRunSettingsUpdateRequest,
+    ProjectRunSettingsUpdateResponse, ProjectSummaryDto, RunBlockingReasonDto, RunCreateRequest,
+    RunCreateResponse, RunExecuteRequest, RunExecuteResponse, RunPreviewRequest,
+    RunPreviewResponse, RunPreviewTaskDto, RunSummaryDto, ScanCancelRequest, ScanCancelResponse,
+    ScanOperationStatus, ScanReportDto, ScanStartRequest, ScanStartResponse, DTO_SCHEMA_VERSION,
+    HEALTH_CHECK_SCHEMA_VERSION,
 };
 use batch_code_analyzer_model_providers::{ModelProvider, OpenAiResponsesProvider, ProviderError};
 use batch_code_analyzer_persistence::DatabaseHealth;
@@ -90,6 +91,26 @@ pub(crate) async fn project_get(
         .map_err(|error| persistence_error(&error))?
         .ok_or_else(|| project_not_found(project_id.as_str()))?;
     Ok(ProjectDetailDto::from(&project))
+}
+
+#[tauri::command]
+pub(crate) async fn project_update_run_settings(
+    request: ProjectRunSettingsUpdateRequest,
+    state: State<'_, PersistenceState>,
+) -> Result<ProjectRunSettingsUpdateResponse, IpcError> {
+    let database = state.database.as_ref().ok_or_else(database_unavailable)?;
+    let result = ProjectService::new(database)
+        .update_run_settings(
+            &request.project_id,
+            request.primary_profile_id,
+            request.default_model,
+        )
+        .await
+        .map_err(project_service_error)?;
+    Ok(ProjectRunSettingsUpdateResponse {
+        project: ProjectDetailDto::from(&result.project),
+        config_mirror_warning: result.config_mirror_warning,
+    })
 }
 
 #[tauri::command]
@@ -736,6 +757,13 @@ fn database_unavailable() -> IpcError {
 
 fn project_service_error(error: ProjectServiceError) -> IpcError {
     match error {
+        ProjectServiceError::NotFound => project_not_found(""),
+        ProjectServiceError::ApiProfileNotFound => ipc_error(
+            "validation_invalid_value",
+            ErrorCategory::Validation,
+            "主 API Profile 不存在",
+            false,
+        ),
         ProjectServiceError::PathUnavailable => ipc_error(
             "project_path_unavailable",
             ErrorCategory::Project,

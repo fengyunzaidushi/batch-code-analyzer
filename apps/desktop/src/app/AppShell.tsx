@@ -18,6 +18,7 @@ import type {
   ApiProfileSummaryDto,
   FileRecordSummaryDto,
   ProjectPathStatus,
+  ProjectRunSettingsUpdateRequest,
   ProjectSummaryDto,
   RunPreviewResponse,
   ScanReportDto,
@@ -27,6 +28,8 @@ import { FileTreeTable } from "../features/tasks/FileTreeTable";
 
 export type ShellProject = ProjectSummaryDto & {
   rootDirectory?: string;
+  primaryProfileId?: string | null;
+  defaultModel?: string | null;
   runningTaskCount?: number;
   failedTaskCount?: number;
 };
@@ -68,6 +71,9 @@ interface AppShellProps {
     request: ApiProfileSaveRequest,
   ) => Promise<ApiProfileSummaryDto>;
   onTestApiProfile?: (id: string) => Promise<void>;
+  onUpdateProjectRunSettings?: (
+    request: ProjectRunSettingsUpdateRequest,
+  ) => Promise<void>;
   onSelectProject?: (id: string) => void;
   onStartScan?: () => void;
   projectError?: string | null;
@@ -108,6 +114,7 @@ export function AppShell({
     throw new Error("API Profile save handler is unavailable");
   },
   onTestApiProfile = async () => undefined,
+  onUpdateProjectRunSettings = async () => undefined,
   onSelectProject,
   onStartScan = () => undefined,
   projectError = null,
@@ -183,6 +190,7 @@ export function AppShell({
           onPutApiProfileSecret={onPutApiProfileSecret}
           onSaveApiProfile={onSaveApiProfile}
           onTestApiProfile={onTestApiProfile}
+          onUpdateProjectRunSettings={onUpdateProjectRunSettings}
         />
       </div>
       <RunPreviewPanel
@@ -448,6 +456,7 @@ function ProjectWorkspace({
   onPutApiProfileSecret,
   onSaveApiProfile,
   onTestApiProfile,
+  onUpdateProjectRunSettings,
 }: {
   apiProfileError: string | null;
   apiProfiles: readonly ApiProfileSummaryDto[];
@@ -474,6 +483,9 @@ function ProjectWorkspace({
     request: ApiProfileSaveRequest,
   ) => Promise<ApiProfileSummaryDto>;
   onTestApiProfile: (id: string) => Promise<void>;
+  onUpdateProjectRunSettings: (
+    request: ProjectRunSettingsUpdateRequest,
+  ) => Promise<void>;
 }) {
   return (
     <main className="project-workspace">
@@ -514,6 +526,8 @@ function ProjectWorkspace({
           onSave={onSaveApiProfile}
           onTest={onTestApiProfile}
           profiles={apiProfiles}
+          project={project}
+          onUpdateProjectRunSettings={onUpdateProjectRunSettings}
         />
       )}
     </main>
@@ -870,6 +884,8 @@ function ApiWorkspace({
   onSave,
   onTest,
   profiles,
+  project,
+  onUpdateProjectRunSettings,
 }: {
   error: string | null;
   onDelete: (id: string) => Promise<void>;
@@ -881,6 +897,10 @@ function ApiWorkspace({
   onSave: (request: ApiProfileSaveRequest) => Promise<ApiProfileSummaryDto>;
   onTest: (id: string) => Promise<void>;
   profiles: readonly ApiProfileSummaryDto[];
+  project: ShellProject | null;
+  onUpdateProjectRunSettings: (
+    request: ProjectRunSettingsUpdateRequest,
+  ) => Promise<void>;
 }) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [creatingNew, setCreatingNew] = useState(false);
@@ -912,6 +932,12 @@ function ApiWorkspace({
           {error}
         </div>
       ) : null}
+      <ProjectRunSettings
+        key={`${project?.id ?? "none"}:${project?.primaryProfileId ?? "none"}:${project?.defaultModel ?? "none"}:${profiles.map((profile) => `${profile.id}:${profile.defaultModel ?? "none"}:${profile.modelCache.length}`).join(",")}`}
+        onUpdate={onUpdateProjectRunSettings}
+        profiles={profiles}
+        project={project}
+      />
       <section className="api-config-band">
         <aside className="api-profile-list" aria-label="API Profile 列表">
           {profiles.length === 0 ? (
@@ -953,6 +979,105 @@ function ApiWorkspace({
         />
       </section>
     </div>
+  );
+}
+
+function ProjectRunSettings({
+  onUpdate,
+  profiles,
+  project,
+}: {
+  onUpdate: (request: ProjectRunSettingsUpdateRequest) => Promise<void>;
+  profiles: readonly ApiProfileSummaryDto[];
+  project: ShellProject | null;
+}) {
+  const initialProfileId = project?.primaryProfileId ?? profiles[0]?.id ?? "";
+  const initialProfile = profiles.find(
+    (profile) => profile.id === initialProfileId,
+  );
+  const [primaryProfileId, setPrimaryProfileId] = useState(initialProfileId);
+  const [defaultModel, setDefaultModel] = useState(
+    project?.defaultModel ?? initialProfile?.defaultModel ?? "",
+  );
+  const [busy, setBusy] = useState(false);
+
+  const selectedProfile = profiles.find(
+    (profile) => profile.id === primaryProfileId,
+  );
+  const modelOptions = Array.from(
+    new Set([
+      ...(selectedProfile?.defaultModel ? [selectedProfile.defaultModel] : []),
+      ...(selectedProfile?.modelCache.map((model) => model.id) ?? []),
+    ]),
+  );
+  const save = async () => {
+    if (!project || !primaryProfileId || !defaultModel.trim()) return;
+    setBusy(true);
+    try {
+      await onUpdate({
+        projectId: project.id,
+        primaryProfileId,
+        defaultModel: defaultModel.trim(),
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="project-run-settings">
+      <div>
+        <p className="eyebrow">PROJECT ROUTING</p>
+        <h3>当前项目运行设置</h3>
+      </div>
+      <label>
+        主 API Profile
+        <select
+          disabled={!project || profiles.length === 0 || busy}
+          onChange={(event) => {
+            const profileId = event.target.value;
+            const profile = profiles.find((item) => item.id === profileId);
+            setPrimaryProfileId(profileId);
+            if (profile?.defaultModel) setDefaultModel(profile.defaultModel);
+          }}
+          value={primaryProfileId}
+        >
+          {profiles.length === 0 ? (
+            <option value="">尚无 API Profile</option>
+          ) : null}
+          {profiles.map((profile) => (
+            <option key={profile.id} value={profile.id}>
+              {profile.name}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label>
+        项目默认模型
+        <input
+          disabled={!project || !primaryProfileId || busy}
+          list={project ? `project-models-${project.id}` : undefined}
+          onChange={(event) => setDefaultModel(event.target.value)}
+          placeholder="例如 gpt-5"
+          value={defaultModel}
+        />
+        {project ? (
+          <datalist id={`project-models-${project.id}`}>
+            {modelOptions.map((model) => (
+              <option key={model} value={model} />
+            ))}
+          </datalist>
+        ) : null}
+      </label>
+      <button
+        className="primary-button"
+        disabled={!project || !primaryProfileId || !defaultModel.trim() || busy}
+        onClick={() => void save()}
+        type="button"
+      >
+        {busy ? "正在保存" : "保存项目运行设置"}
+      </button>
+    </section>
   );
 }
 

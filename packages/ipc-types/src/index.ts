@@ -43,6 +43,8 @@ export type { ProjectAddRequest } from "./generated/ProjectAddRequest";
 export type { ProjectAddResponse } from "./generated/ProjectAddResponse";
 export type { ProjectDetailDto } from "./generated/ProjectDetailDto";
 export type { ProjectPathStatus } from "./generated/ProjectPathStatus";
+export type { ProjectRunSettingsUpdateRequest } from "./generated/ProjectRunSettingsUpdateRequest";
+export type { ProjectRunSettingsUpdateResponse } from "./generated/ProjectRunSettingsUpdateResponse";
 export type { ProjectSummaryDto } from "./generated/ProjectSummaryDto";
 export type { Rfc3339Timestamp } from "./generated/Rfc3339Timestamp";
 export type { RunId } from "./generated/RunId";

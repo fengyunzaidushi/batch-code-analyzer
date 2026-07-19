@@ -47,6 +47,8 @@ static NEXT_ATTEMPT_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum ProjectServiceError {
+    NotFound,
+    ApiProfileNotFound,
     PathUnavailable,
     Persistence(PersistenceError),
 }
@@ -55,6 +57,8 @@ impl ProjectServiceError {
     #[must_use]
     pub const fn code(&self) -> &'static str {
         match self {
+            Self::NotFound => "project_not_found",
+            Self::ApiProfileNotFound => "validation_invalid_value",
             Self::PathUnavailable => "project_path_unavailable",
             Self::Persistence(error) => error.code(),
         }
@@ -155,6 +159,12 @@ impl From<PersistenceError> for ApiProfileServiceError {
 pub struct ProjectAddResult {
     pub project: Project,
     pub created: bool,
+    pub config_mirror_warning: bool,
+}
+
+#[derive(Debug)]
+pub struct ProjectRunSettingsResult {
+    pub project: Project,
     pub config_mirror_warning: bool,
 }
 
@@ -591,6 +601,60 @@ impl<'database> ProjectService<'database> {
         Ok(ProjectAddResult {
             project,
             created: true,
+            config_mirror_warning,
+        })
+    }
+
+    /// Updates the API routing and default model used by future Runs.
+    ///
+    /// `SQLite` remains authoritative. The portable project mirror is written
+    /// only after the database transaction commits and never contains secrets.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable not-found error for a missing Project or API Profile,
+    /// or a persistence error when the settings cannot be committed.
+    pub async fn update_run_settings(
+        &self,
+        project_id: &ProjectId,
+        primary_profile_id: Option<ApiProfileId>,
+        default_model: Option<String>,
+    ) -> Result<ProjectRunSettingsResult, ProjectServiceError> {
+        let mut project = self
+            .database
+            .repository()
+            .get_project(project_id)
+            .await?
+            .ok_or(ProjectServiceError::NotFound)?;
+        if let Some(profile_id) = primary_profile_id.as_ref() {
+            let profile_exists = self
+                .database
+                .repository()
+                .get_api_profile(profile_id)
+                .await?
+                .is_some();
+            if !profile_exists {
+                return Err(ProjectServiceError::ApiProfileNotFound);
+            }
+        }
+        project.api_routing.primary_profile_id = primary_profile_id;
+        project.default_model = default_model
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        self.database
+            .repository()
+            .update_project(
+                &project,
+                ProjectRowMetadata {
+                    canonical_source_directory: project.source_directory.clone(),
+                    created_at: project.last_opened_at.clone(),
+                    updated_at: timestamp_now(),
+                },
+            )
+            .await?;
+        let config_mirror_warning = write_project_mirror(&project).is_err();
+        Ok(ProjectRunSettingsResult {
+            project,
             config_mirror_warning,
         })
     }
@@ -1452,6 +1516,7 @@ struct ProjectConfigMirror<'project> {
     default_prompt: &'project str,
     default_model: &'project Option<String>,
     context_model: &'project Option<String>,
+    api_routing: &'project ApiRouting,
     output_root: &'project Option<String>,
 }
 
@@ -1468,6 +1533,7 @@ fn write_project_mirror(project: &Project) -> std::io::Result<()> {
         default_prompt: &project.default_prompt,
         default_model: &project.default_model,
         context_model: &project.context_model,
+        api_routing: &project.api_routing,
         output_root: &project.output_root,
     };
     let bytes = serde_json::to_vec_pretty(&mirror).map_err(std::io::Error::other)?;
@@ -1516,6 +1582,7 @@ pub fn timestamp_now() -> Rfc3339Timestamp {
 mod tests {
     use std::{fs, path::PathBuf, sync::Arc, time::Duration};
 
+    use batch_code_analyzer_domain::ApiProfileId;
     use batch_code_analyzer_model_providers::OpenAiResponsesProvider;
     use batch_code_analyzer_persistence::Database;
     use batch_code_analyzer_repository_scanner::ScanCancellation;
@@ -1815,6 +1882,66 @@ mod tests {
         assert!(result.config_mirror_warning);
         assert_eq!(service.list_projects().await.unwrap(), vec![result.project]);
 
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[tokio::test]
+    async fn updates_project_run_settings_and_rejects_unknown_profiles() {
+        let database = Database::open_in_memory()
+            .await
+            .expect("database should open");
+        let path = temporary_directory("run-settings");
+        let project = ProjectService::new(&database)
+            .add_project(&path)
+            .await
+            .expect("project should add")
+            .project;
+        let profile = ApiProfileService::new(&database)
+            .save(
+                None,
+                "Local API".into(),
+                "https://example.test/v1".into(),
+                Some("gpt-5".into()),
+            )
+            .await
+            .expect("profile should save");
+        let service = ProjectService::new(&database);
+        let updated = service
+            .update_run_settings(
+                &project.id,
+                Some(profile.id.clone()),
+                Some("gpt-5-mini".into()),
+            )
+            .await
+            .expect("project settings should update");
+        assert_eq!(
+            updated.project.api_routing.primary_profile_id,
+            Some(profile.id.clone())
+        );
+        assert_eq!(updated.project.default_model.as_deref(), Some("gpt-5-mini"));
+        let persisted = database
+            .repository()
+            .get_project(&project.id)
+            .await
+            .unwrap()
+            .expect("project should remain persisted");
+        assert_eq!(persisted, updated.project);
+        let mirror = fs::read_to_string(path.join(".batch-analysis/project.json"))
+            .expect("project mirror should exist");
+        assert!(mirror.contains("apiRouting"));
+        assert!(!mirror.contains("sk-test"));
+        assert_eq!(
+            service
+                .update_run_settings(
+                    &project.id,
+                    Some(ApiProfileId::new("missing-profile")),
+                    Some("gpt-5".into()),
+                )
+                .await
+                .expect_err("unknown profile should be rejected")
+                .code(),
+            "validation_invalid_value"
+        );
         let _ = fs::remove_dir_all(path);
     }
 
