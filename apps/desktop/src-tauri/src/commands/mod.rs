@@ -9,7 +9,8 @@ use batch_code_analyzer_api_profiles::{
 use batch_code_analyzer_app_core::{
     domain::{ApiModelInfo, ApiProfile, ApiProfileConnectionStatus, ApiProfileId, ProjectId},
     timestamp_now, ApiProfileService, ApiProfileServiceError, FileServiceError, ProjectService,
-    ProjectServiceError, RunPreparationInput, RunService, RunServiceError, ScanService,
+    ProjectServiceError, RunExecutionService, RunPreparationInput, RunService, RunServiceError,
+    ScanService,
 };
 use batch_code_analyzer_ipc_contracts::{
     ApiModelsFetchRequest, ApiModelsFetchResponse, ApiProfileDeleteRequest,
@@ -18,10 +19,10 @@ use batch_code_analyzer_ipc_contracts::{
     DatabaseStatus, ErrorCategory, FileListRequest, FileRecordSummaryDto, FileSetIncludedRequest,
     FileSetIncludedResponse, HealthCheckResponse, HealthStatus, IpcError, PageResponse,
     ProjectAddRequest, ProjectAddResponse, ProjectDetailDto, ProjectSummaryDto,
-    RunBlockingReasonDto, RunCreateRequest, RunCreateResponse, RunPreviewRequest,
-    RunPreviewResponse, RunPreviewTaskDto, RunSummaryDto, ScanCancelRequest, ScanCancelResponse,
-    ScanOperationStatus, ScanReportDto, ScanStartRequest, ScanStartResponse, DTO_SCHEMA_VERSION,
-    HEALTH_CHECK_SCHEMA_VERSION,
+    RunBlockingReasonDto, RunCreateRequest, RunCreateResponse, RunExecuteRequest,
+    RunExecuteResponse, RunPreviewRequest, RunPreviewResponse, RunPreviewTaskDto, RunSummaryDto,
+    ScanCancelRequest, ScanCancelResponse, ScanOperationStatus, ScanReportDto, ScanStartRequest,
+    ScanStartResponse, DTO_SCHEMA_VERSION, HEALTH_CHECK_SCHEMA_VERSION,
 };
 use batch_code_analyzer_model_providers::{ModelProvider, OpenAiResponsesProvider, ProviderError};
 use batch_code_analyzer_persistence::DatabaseHealth;
@@ -155,6 +156,29 @@ pub(crate) async fn run_create(
         .map_err(run_service_error)?;
     Ok(RunCreateResponse {
         task_count: run.stats.total,
+        run: RunSummaryDto::from(&run),
+    })
+}
+
+#[tauri::command]
+pub(crate) async fn run_execute(
+    request: RunExecuteRequest,
+    state: State<'_, PersistenceState>,
+) -> Result<RunExecuteResponse, IpcError> {
+    let database = state.database.as_ref().ok_or_else(database_unavailable)?;
+    let provider = OpenAiResponsesProvider::new(state.secret_store.clone()).map_err(|_| {
+        ipc_error(
+            "provider_connection_failed",
+            ErrorCategory::Provider,
+            "模型 Provider 暂不可用",
+            true,
+        )
+    })?;
+    let run = RunExecutionService::new(database, provider)
+        .execute(&request.run_id)
+        .await
+        .map_err(run_execution_error)?;
+    Ok(RunExecuteResponse {
         run: RunSummaryDto::from(&run),
     })
 }
@@ -744,6 +768,38 @@ fn run_service_error(error: RunServiceError) -> IpcError {
             ipc_error(reason.code, category, reason.message, false)
         }
         RunServiceError::Persistence(error) => persistence_error(&error),
+    }
+}
+
+fn run_execution_error(error: batch_code_analyzer_app_core::RunExecutionError) -> IpcError {
+    match error {
+        batch_code_analyzer_app_core::RunExecutionError::NotFound => ipc_error(
+            "run_not_found",
+            ErrorCategory::Scheduler,
+            "Run 不存在",
+            false,
+        ),
+        batch_code_analyzer_app_core::RunExecutionError::NotRunning => ipc_error(
+            "run_not_active",
+            ErrorCategory::Scheduler,
+            "Run 当前不可执行",
+            false,
+        ),
+        batch_code_analyzer_app_core::RunExecutionError::PathUnavailable => ipc_error(
+            "project_path_unavailable",
+            ErrorCategory::Project,
+            "项目路径不可用",
+            true,
+        ),
+        batch_code_analyzer_app_core::RunExecutionError::OutputWriteFailed => ipc_error(
+            "output_write_failed",
+            ErrorCategory::Output,
+            "分析结果暂时无法写入",
+            true,
+        ),
+        batch_code_analyzer_app_core::RunExecutionError::Persistence(error) => {
+            persistence_error(&error)
+        }
     }
 }
 

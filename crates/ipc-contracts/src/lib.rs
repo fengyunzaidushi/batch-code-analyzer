@@ -526,6 +526,18 @@ pub struct RunCreateResponse {
     pub task_count: u32,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct RunExecuteRequest {
+    pub run_id: RunId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct RunExecuteResponse {
+    pub run: RunSummaryDto,
+}
+
 impl From<&DomainRun> for RunSummaryDto {
     fn from(run: &DomainRun) -> Self {
         Self {
@@ -743,6 +755,8 @@ pub fn export_types(out_dir: &Path) -> Result<(), ExportError> {
     RunPreviewResponse::export_all(&config)?;
     RunCreateRequest::export_all(&config)?;
     RunCreateResponse::export_all(&config)?;
+    RunExecuteRequest::export_all(&config)?;
+    RunExecuteResponse::export_all(&config)?;
     RunBlockingReasonDto::export_all(&config)?;
     RunPreviewTaskDto::export_all(&config)?;
     TaskSummaryDto::export_all(&config)?;

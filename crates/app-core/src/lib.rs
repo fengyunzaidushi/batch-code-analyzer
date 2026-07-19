@@ -8,26 +8,32 @@ use std::{
     hash::{Hash, Hasher},
     path::Path,
     sync::atomic::{AtomicU64, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use batch_code_analyzer_api_profiles::ApiProfile as ProviderApiProfile;
 use batch_code_analyzer_domain::{
     ApiModelInfo, ApiProfile, ApiProfileConnectionStatus, ApiProfileId, ApiProtocol, ApiRouting,
-    ContextStatus, ExecutionDefaults, FileRecord, FileRecordId, FileResultStatus, FileSnapshot,
-    FileSourceStatus, FilterRules, Project, ProjectContext, ProjectId, ProjectPathStatus,
-    RetryPolicy, Rfc3339Timestamp, Run, RunId, RunSnapshot, RunStateMachine, RunStatus,
-    RunTransition, SensitiveFinding, Task, TaskId, TaskStateMachine, TaskStatus, TaskTransition,
-    TaskValueSource,
+    Attempt, AttemptError, AttemptId, AttemptStatus, ContextStatus, ExecutionDefaults, FileRecord,
+    FileRecordId, FileResultStatus, FileSnapshot, FileSourceStatus, FilterRules, Project,
+    ProjectContext, ProjectId, ProjectPathStatus, RetryPolicy, Rfc3339Timestamp, Run, RunId,
+    RunSnapshot, RunStateMachine, RunStatus, RunTransition, SensitiveFinding, Task, TaskId,
+    TaskStateMachine, TaskStatus, TaskTransition, TaskValueSource,
+};
+use batch_code_analyzer_model_providers::{
+    ModelProvider, OpenAiResponsesProvider, ProviderRequest,
 };
 use batch_code_analyzer_persistence::{
-    Database, PersistenceError, ProjectRowMetadata, LATEST_SCHEMA_VERSION,
+    AttemptRowMetadata, Database, PersistenceError, ProjectRowMetadata, LATEST_SCHEMA_VERSION,
 };
 use batch_code_analyzer_repository_scanner::{
     FileDecision, ImportReport, ScanCancellation, ScanConfig, ScanError, ScanResult, Scanner,
 };
+use batch_code_analyzer_secret_store::SecretRef;
 use batch_code_analyzer_security_core::SafeRoot;
 use serde::Serialize;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
+use tokio_util::sync::CancellationToken;
 
 pub use batch_code_analyzer_domain as domain;
 
@@ -37,6 +43,7 @@ static NEXT_FILE_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_API_PROFILE_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_RUN_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_ATTEMPT_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum ProjectServiceError {
@@ -220,6 +227,47 @@ impl From<PersistenceError> for RunServiceError {
 
 pub struct RunService<'database> {
     database: &'database Database,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub enum RunExecutionError {
+    NotFound,
+    NotRunning,
+    PathUnavailable,
+    OutputWriteFailed,
+    Persistence(PersistenceError),
+}
+
+impl RunExecutionError {
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::NotFound => "run_not_found",
+            Self::NotRunning => "run_not_active",
+            Self::PathUnavailable => "project_path_unavailable",
+            Self::OutputWriteFailed => "output_write_failed",
+            Self::Persistence(error) => error.code(),
+        }
+    }
+}
+
+impl std::fmt::Display for RunExecutionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.code())
+    }
+}
+
+impl std::error::Error for RunExecutionError {}
+
+impl From<PersistenceError> for RunExecutionError {
+    fn from(error: PersistenceError) -> Self {
+        Self::Persistence(error)
+    }
+}
+
+pub struct RunExecutionService<'database> {
+    database: &'database Database,
+    provider: OpenAiResponsesProvider,
 }
 
 pub struct ProjectService<'database> {
@@ -888,6 +936,253 @@ impl<'database> RunService<'database> {
     }
 }
 
+impl<'database> RunExecutionService<'database> {
+    #[must_use]
+    pub fn new(database: &'database Database, provider: OpenAiResponsesProvider) -> Self {
+        Self { database, provider }
+    }
+
+    /// Executes queued Tasks sequentially and finalizes the Run.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable Run or persistence error. Provider and local input
+    /// failures are persisted on their Attempt and do not abort the batch.
+    #[allow(clippy::too_many_lines)]
+    pub async fn execute(&self, run_id: &RunId) -> Result<Run, RunExecutionError> {
+        let run = self
+            .database
+            .repository()
+            .get_run(run_id)
+            .await?
+            .ok_or(RunExecutionError::NotFound)?;
+        if run.status != RunStatus::Running {
+            return Err(RunExecutionError::NotRunning);
+        }
+        let project = self
+            .database
+            .repository()
+            .get_project(&run.project_id)
+            .await?
+            .ok_or(RunExecutionError::NotFound)?;
+        let root = SafeRoot::new(&project.source_directory)
+            .map_err(|_| RunExecutionError::PathUnavailable)?;
+
+        // Validate the immutable Run snapshot and resolve the provider before
+        // claiming a Task. A malformed or deleted profile must not leave a
+        // claimed Task stuck in `running`.
+        let profile_id = run
+            .snapshot
+            .api_routing
+            .primary_profile_id
+            .clone()
+            .ok_or(RunExecutionError::NotRunning)?;
+        let profile = self
+            .database
+            .repository()
+            .get_api_profile(&profile_id)
+            .await?
+            .ok_or(RunExecutionError::NotFound)?;
+        let secret_ref = profile
+            .secret_ref
+            .as_deref()
+            .map(SecretRef::new)
+            .ok_or(RunExecutionError::NotRunning)?;
+        let provider_profile = ProviderApiProfile::new(
+            batch_code_analyzer_api_profiles::ApiProfileId::new(profile.id.to_string()),
+            profile.name.clone(),
+            profile.base_url.clone(),
+            secret_ref,
+        )
+        .map_err(|_| RunExecutionError::NotRunning)?
+        .resolve();
+
+        while let Some(mut task) = self
+            .database
+            .repository()
+            .claim_next_task(run_id, &timestamp_now())
+            .await?
+        {
+            let created_at = timestamp_now();
+            let attempt_id = new_attempt_id();
+            let sequence = u32::try_from(
+                self.database
+                    .repository()
+                    .list_attempts(&task.id)
+                    .await?
+                    .len()
+                    .saturating_add(1),
+            )
+            .unwrap_or(u32::MAX);
+            let mut attempt = Attempt {
+                id: attempt_id,
+                task_id: task.id.clone(),
+                sequence,
+                api_profile_id: profile.id.clone(),
+                api_profile_name: profile.name.clone(),
+                actual_model: task.model_snapshot.clone(),
+                status: AttemptStatus::Created,
+                created_at: created_at.clone(),
+                started_at: None,
+                dispatched_at: None,
+                finished_at: None,
+                duration_ms: None,
+                http_status: None,
+                input_tokens: None,
+                output_tokens: None,
+                total_tokens: None,
+                retry_reason: None,
+                error: None,
+            };
+            self.database
+                .repository()
+                .append_attempt(&attempt, AttemptRowMetadata { response_id: None })
+                .await?;
+            task.latest_attempt_id = Some(attempt.id.clone());
+            attempt.status = AttemptStatus::Dispatched;
+            attempt.started_at = Some(created_at.clone());
+            attempt.dispatched_at = Some(created_at);
+            self.database
+                .repository()
+                .finalize_task_attempt(&attempt, AttemptRowMetadata { response_id: None }, &task)
+                .await?;
+            let started = Instant::now();
+            let source_path = root
+                .relative_path(&task.relative_path)
+                .map_err(|_| RunExecutionError::NotRunning)
+                .map(|relative| root.path().join(relative));
+            let source = match source_path {
+                Ok(path) => fs::read_to_string(path).map_err(|_| "scan_file_unreadable"),
+                Err(error) => Err(match error {
+                    RunExecutionError::NotRunning => "project_path_unavailable",
+                    _ => "scan_file_unreadable",
+                }),
+            };
+            let result = match source {
+                Ok(source) => {
+                    let request = ProviderRequest::new(
+                        provider_profile.clone(),
+                        task.model_snapshot.clone(),
+                        source,
+                    )
+                    .with_instructions(task.prompt_snapshot.clone())
+                    .with_max_output_tokens(run.snapshot.max_output_tokens)
+                    .with_timeout(Duration::from_secs(u64::from(run.snapshot.timeout_seconds)));
+                    self.provider
+                        .execute(request, CancellationToken::new())
+                        .await
+                        .map(|response| (response, started.elapsed()))
+                        .map_err(|error| (error.code().to_owned(), error.retryable()))
+                }
+                Err(code) => Err((code.to_owned(), false)),
+            };
+            match result {
+                Ok((response, elapsed)) => {
+                    let Ok(output_path) = write_result(
+                        &run.output_directory,
+                        &task.relative_path,
+                        &response.output_text,
+                    ) else {
+                        self.persist_task_failure(
+                            &mut attempt,
+                            &mut task,
+                            "output_write_failed".into(),
+                            true,
+                            started,
+                        )
+                        .await?;
+                        continue;
+                    };
+                    attempt.status = AttemptStatus::Succeeded;
+                    attempt.finished_at = Some(timestamp_now());
+                    attempt.duration_ms = Some(elapsed.as_millis().try_into().unwrap_or(u64::MAX));
+                    attempt.input_tokens = response.usage.input_tokens.map(saturating_u32);
+                    attempt.output_tokens = response.usage.output_tokens.map(saturating_u32);
+                    attempt.total_tokens = response.usage.total_tokens.map(saturating_u32);
+                    task.status =
+                        TaskStateMachine::transition(task.status, TaskTransition::Succeed)
+                            .map_err(|error| {
+                                RunExecutionError::Persistence(PersistenceError::StateTransition {
+                                    code: error.code(),
+                                })
+                            })?;
+                    task.current_result_path = Some(output_path);
+                    task.completed_at = attempt.finished_at.clone();
+                    self.database
+                        .repository()
+                        .finalize_task_attempt(
+                            &attempt,
+                            AttemptRowMetadata {
+                                response_id: response.response_id,
+                            },
+                            &task,
+                        )
+                        .await?;
+                }
+                Err((code, retryable)) => {
+                    self.persist_task_failure(&mut attempt, &mut task, code, retryable, started)
+                        .await?;
+                }
+            }
+        }
+
+        let stats = self
+            .database
+            .repository()
+            .recompute_run_stats(run_id)
+            .await?;
+        let transition = if stats.failed == 0
+            && stats.cancelled == 0
+            && stats.interrupted == 0
+            && stats.source_changed == 0
+        {
+            RunTransition::AllTasksSucceeded
+        } else {
+            RunTransition::AllTasksTerminalWithErrors
+        };
+        self.database
+            .repository()
+            .complete_run(run_id, transition, &timestamp_now())
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn persist_task_failure(
+        &self,
+        attempt: &mut Attempt,
+        task: &mut Task,
+        code: String,
+        retryable: bool,
+        started: Instant,
+    ) -> Result<(), RunExecutionError> {
+        attempt.status = if retryable {
+            AttemptStatus::FailedRetryable
+        } else {
+            AttemptStatus::FailedTerminal
+        };
+        attempt.finished_at = Some(timestamp_now());
+        attempt.duration_ms = Some(started.elapsed().as_millis().try_into().unwrap_or(u64::MAX));
+        attempt.error = Some(AttemptError {
+            code,
+            message: "模型请求未完成".into(),
+            retryable,
+            sanitized: true,
+        });
+        task.status =
+            TaskStateMachine::transition(task.status, TaskTransition::Fail).map_err(|error| {
+                RunExecutionError::Persistence(PersistenceError::StateTransition {
+                    code: error.code(),
+                })
+            })?;
+        task.completed_at = attempt.finished_at.clone();
+        self.database
+            .repository()
+            .finalize_task_attempt(attempt, AttemptRowMetadata { response_id: None }, task)
+            .await?;
+        Ok(())
+    }
+}
+
 fn resolve_prompt(input: &RunPreparationInput, project: &Project) -> String {
     input
         .prompt
@@ -909,6 +1204,30 @@ fn new_run_id() -> RunId {
 fn new_task_id() -> TaskId {
     let sequence = NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed);
     TaskId::new(format!("task-{sequence}"))
+}
+
+fn new_attempt_id() -> AttemptId {
+    let sequence = NEXT_ATTEMPT_ID.fetch_add(1, Ordering::Relaxed);
+    AttemptId::new(format!("attempt-{sequence}"))
+}
+
+fn saturating_u32(value: u64) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+fn write_result(
+    output_directory: &str,
+    relative_path: &str,
+    content: &str,
+) -> std::io::Result<String> {
+    let directory = Path::new(output_directory);
+    fs::create_dir_all(directory)?;
+    let file_name = relative_path.replace(['/', '\\'], "__") + ".md";
+    let target = directory.join(file_name);
+    let temporary = target.with_extension(format!("md.tmp-{}", std::process::id()));
+    fs::write(&temporary, content.as_bytes())?;
+    fs::rename(&temporary, &target)?;
+    Ok(target.to_string_lossy().into_owned())
 }
 
 const fn blocker(code: &'static str, message: &'static str) -> RunBlockingReason {
@@ -1195,14 +1514,17 @@ pub fn timestamp_now() -> Rfc3339Timestamp {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::PathBuf};
+    use std::{fs, path::PathBuf, sync::Arc, time::Duration};
 
+    use batch_code_analyzer_model_providers::OpenAiResponsesProvider;
     use batch_code_analyzer_persistence::Database;
     use batch_code_analyzer_repository_scanner::ScanCancellation;
+    use batch_code_analyzer_secret_store::{MemorySecretStore, SecretStore, SecretValue};
+    use tokio::{io::AsyncWriteExt, net::TcpListener};
 
     use super::{
         timestamp_now, ApiProfileService, ApiProfileServiceError, FileServiceError, ProjectService,
-        ProjectServiceError, RunPreparationInput, RunService, ScanService,
+        ProjectServiceError, RunExecutionService, RunPreparationInput, RunService, ScanService,
     };
 
     fn temporary_directory(name: &str) -> PathBuf {
@@ -1214,6 +1536,222 @@ mod tests {
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).expect("temporary directory should be created");
         path
+    }
+
+    async fn provider_server(status: &str, body: &str) -> String {
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("provider server should bind");
+        let address = listener.local_addr().expect("provider address");
+        let status = status.to_owned();
+        let body = body.to_owned();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("provider request");
+            let mut request = [0_u8; 4096];
+            let _ = tokio::io::AsyncReadExt::read(&mut stream, &mut request).await;
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nContent-Type: application/json\r\n\r\n{body}",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("provider response should be written");
+        });
+        format!("http://{address}/v1")
+    }
+
+    async fn execution_fixture(
+        status: &str,
+        body: &str,
+        output_blocked: bool,
+    ) -> (
+        Database,
+        batch_code_analyzer_domain::Run,
+        OpenAiResponsesProvider,
+        Arc<MemorySecretStore>,
+        PathBuf,
+    ) {
+        let database = Database::open_in_memory()
+            .await
+            .expect("database should open");
+        let path = temporary_directory(if status.starts_with("200") {
+            if output_blocked {
+                "run-execution-output-failure"
+            } else {
+                "run-execution-success"
+            }
+        } else {
+            "run-execution-failure"
+        });
+        fs::write(path.join("main.rs"), "fn main() {}\n").expect("source file should be created");
+        let mut project = ProjectService::new(&database)
+            .add_project(&path)
+            .await
+            .expect("project should add")
+            .project;
+        let output_path_file = path.join("output-blocker");
+        if output_blocked {
+            fs::write(
+                &output_path_file,
+                b"output path is intentionally unavailable",
+            )
+            .expect("output blocker should be created");
+            project.output_root = Some(output_path_file.to_string_lossy().into_owned());
+        }
+        let base_url = provider_server(status, body).await;
+        let profile = ApiProfileService::new(&database)
+            .save(None, "Test Profile".into(), base_url, Some("gpt-5".into()))
+            .await
+            .expect("profile should save");
+        let secrets = Arc::new(MemorySecretStore::new());
+        let secret_ref = secrets
+            .put(SecretValue::new("sk-test-key"))
+            .await
+            .expect("secret should be stored");
+        ApiProfileService::new(&database)
+            .set_secret_ref(&profile.id, Some(secret_ref.to_string()))
+            .await
+            .expect("profile secret should be linked");
+        project.api_routing.primary_profile_id = Some(profile.id);
+        database
+            .repository()
+            .update_project(
+                &project,
+                batch_code_analyzer_persistence::ProjectRowMetadata {
+                    canonical_source_directory: path.to_string_lossy().into_owned(),
+                    created_at: timestamp_now(),
+                    updated_at: timestamp_now(),
+                },
+            )
+            .await
+            .expect("project routing should save");
+        let scan = ScanService::scan_project(&project, ScanCancellation::new())
+            .expect("scan should complete");
+        ScanService::new(&database)
+            .persist_scan(&project.id, scan)
+            .await
+            .expect("scan should persist");
+        let run = RunService::new(&database)
+            .create(&project.id, &RunPreparationInput::default())
+            .await
+            .expect("run should create");
+        let provider = OpenAiResponsesProvider::with_client(
+            reqwest::Client::new(),
+            secrets.clone(),
+            Duration::from_secs(2),
+        );
+        (database, run, provider, secrets, path)
+    }
+
+    #[tokio::test]
+    async fn run_execution_persists_successful_attempt_and_result() {
+        let (database, run, provider, _secrets, path) = execution_fixture(
+            "200 OK",
+            r##"{"id":"resp-1","output_text":"# Result"}"##,
+            false,
+        )
+        .await;
+        let completed = RunExecutionService::new(&database, provider)
+            .execute(&run.id)
+            .await
+            .expect("run should execute");
+        assert_eq!(
+            completed.status,
+            batch_code_analyzer_domain::RunStatus::Completed
+        );
+        assert_eq!(completed.stats.succeeded, 1);
+        assert_eq!(completed.stats.failed, 0);
+        let tasks = database
+            .repository()
+            .unfinished_tasks(&run.id)
+            .await
+            .unwrap();
+        assert!(tasks.is_empty(), "successful task must not remain running");
+        let task_id = database.repository().list_tasks(&run.id).await.unwrap()[0]
+            .id
+            .clone();
+        let attempts = database.repository().list_attempts(&task_id).await.unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(
+            attempts[0].status,
+            batch_code_analyzer_domain::AttemptStatus::Succeeded
+        );
+        assert!(PathBuf::from(completed.output_directory)
+            .join("main.rs.md")
+            .is_file());
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[tokio::test]
+    async fn run_execution_persists_retryable_provider_failure() {
+        let (database, run, provider, _secrets, path) = execution_fixture(
+            "500 Internal Server Error",
+            r#"{"error":{"message":"temporary"}}"#,
+            false,
+        )
+        .await;
+        let completed = RunExecutionService::new(&database, provider)
+            .execute(&run.id)
+            .await
+            .expect("provider failure should be persisted");
+        assert_eq!(
+            completed.status,
+            batch_code_analyzer_domain::RunStatus::CompletedWithErrors
+        );
+        assert_eq!(completed.stats.failed, 1);
+        assert!(database
+            .repository()
+            .unfinished_tasks(&run.id)
+            .await
+            .unwrap()
+            .is_empty());
+        let task_id = database.repository().list_tasks(&run.id).await.unwrap()[0]
+            .id
+            .clone();
+        let attempts = database.repository().list_attempts(&task_id).await.unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(
+            attempts[0].status,
+            batch_code_analyzer_domain::AttemptStatus::FailedRetryable
+        );
+        assert_eq!(
+            attempts[0].error.as_ref().map(|error| error.code.as_str()),
+            Some("provider_server_error")
+        );
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[tokio::test]
+    async fn run_execution_persists_output_write_failure_without_success_state() {
+        let (database, run, provider, _secrets, path) = execution_fixture(
+            "200 OK",
+            r##"{"id":"resp-2","output_text":"# Result"}"##,
+            true,
+        )
+        .await;
+        let completed = RunExecutionService::new(&database, provider)
+            .execute(&run.id)
+            .await
+            .expect("output failure should be persisted");
+        assert_eq!(
+            completed.status,
+            batch_code_analyzer_domain::RunStatus::CompletedWithErrors
+        );
+        let task = database.repository().list_tasks(&run.id).await.unwrap()[0].clone();
+        assert_eq!(task.status, batch_code_analyzer_domain::TaskStatus::Failed);
+        assert_eq!(task.current_result_path, None);
+        let attempts = database.repository().list_attempts(&task.id).await.unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(
+            attempts[0].status,
+            batch_code_analyzer_domain::AttemptStatus::FailedRetryable
+        );
+        assert_eq!(
+            attempts[0].error.as_ref().map(|error| error.code.as_str()),
+            Some("output_write_failed")
+        );
+        let _ = fs::remove_dir_all(path);
     }
 
     #[tokio::test]

@@ -49,6 +49,8 @@ export type { RunId } from "./generated/RunId";
 export type { RunBlockingReasonDto } from "./generated/RunBlockingReasonDto";
 export type { RunCreateRequest } from "./generated/RunCreateRequest";
 export type { RunCreateResponse } from "./generated/RunCreateResponse";
+export type { RunExecuteRequest } from "./generated/RunExecuteRequest";
+export type { RunExecuteResponse } from "./generated/RunExecuteResponse";
 export type { RunPreviewRequest } from "./generated/RunPreviewRequest";
 export type { RunPreviewResponse } from "./generated/RunPreviewResponse";
 export type { RunPreviewTaskDto } from "./generated/RunPreviewTaskDto";

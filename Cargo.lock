@@ -151,14 +151,19 @@ dependencies = [
 name = "batch-code-analyzer-app-core"
 version = "0.1.0"
 dependencies = [
+ "batch-code-analyzer-api-profiles",
  "batch-code-analyzer-domain",
+ "batch-code-analyzer-model-providers",
  "batch-code-analyzer-persistence",
  "batch-code-analyzer-repository-scanner",
+ "batch-code-analyzer-secret-store",
  "batch-code-analyzer-security-core",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "time",
  "tokio",
+ "tokio-util",
  "url",
 ]
 

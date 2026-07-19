@@ -33,7 +33,7 @@ import {
   testApiProfile,
   type ApiProfileSecretPutRequest,
 } from "../ipc/apiProfiles";
-import { createRun, previewRun } from "../ipc/runs";
+import { createRun, executeRun, previewRun } from "../ipc/runs";
 import { AppShell, type ShellHealthState, type ShellProject } from "./AppShell";
 
 export function App() {
@@ -384,7 +384,10 @@ export function App() {
     setRunError(null);
     setIsCreatingRun(true);
     try {
-      await createRun({ projectId: selectedProjectId, ...runPreparation });
+      const created = await createRun({
+        projectId: selectedProjectId,
+        ...runPreparation,
+      });
       const project = projects.find((item) => item.id === selectedProjectId);
       setActiveRun({
         projectId: selectedProjectId,
@@ -392,9 +395,12 @@ export function App() {
         status: "running",
       });
       setRunPreview(null);
+      await executeRun({ runId: created.run.id });
+      setActiveRun(null);
     } catch (error) {
       setRunError(safeRunError(error));
     } finally {
+      setActiveRun(null);
       setIsCreatingRun(false);
     }
   };
@@ -503,6 +509,18 @@ function safeRunError(error: unknown): string {
       validation_invalid_value: "目标文件尚未完成有效扫描。",
       persistence_database_unavailable: "本地数据库暂不可用。",
       persistence_transaction_failed: "Run 暂时无法创建。",
+      run_not_found: "Run 不存在。",
+      run_not_active: "Run 当前不可执行。",
+      provider_connection_failed: "模型 Provider 暂不可用。",
+      provider_timeout: "模型请求超时，Task 已记录为可重试失败。",
+      provider_rate_limited: "模型服务限流，Task 已记录为可重试失败。",
+      provider_server_error: "模型服务暂时异常，Task 已记录为可重试失败。",
+      provider_authentication_failed: "模型认证失败，请检查 API Profile。",
+      provider_permission_denied: "模型服务拒绝了当前请求。",
+      provider_model_unavailable: "配置的模型不可用。",
+      provider_invalid_request: "模型请求参数无效。",
+      provider_invalid_response: "模型服务返回了无法识别的响应。",
+      output_write_failed: "分析结果无法写入本地磁盘。",
     };
     return messages[error.code] ?? "Run 操作失败。";
   }

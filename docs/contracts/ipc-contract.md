@@ -150,6 +150,7 @@ api_models_fetch
 ```text
 run_preview
 run_create
+run_execute
 run_pause
 run_resume
 run_cancel
@@ -165,6 +166,12 @@ run_list
 预览响应只包含相对路径、文件大小、内容哈希、解析后的模型和阻塞原因，不包含源文件内容。
 创建成功后返回 `RunSummaryDto` 和创建的 Task 数量；Run 初始状态为 `running`，Task 初始状态为
 `queued`，实际模型请求由后续调度器任务负责。
+
+`run_execute` 只接收已有的 `runId`，要求 Run 处于 `running` 状态。执行器按顺序领取
+queued Task，并在每次真实请求前追加 `created` Attempt。Provider 成功时先原子写入结果
+Markdown，再提交 Attempt、Task 和 Run 统计；Provider、源码读取或结果写入失败时保存脱敏
+错误摘要并将 Task 收敛为 `failed`。命令只返回最终 `RunSummaryDto`，不返回源码、密钥或
+完整 Provider 响应。
 
 ### 4.6 File
 
