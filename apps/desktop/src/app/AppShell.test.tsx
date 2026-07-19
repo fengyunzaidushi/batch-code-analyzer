@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import type {
   ApiProfileSummaryDto,
   ProjectSummaryDto,
+  RunPreviewResponse,
 } from "@batch-code-analyzer/ipc-types";
 
 import { AppShell, type ShellProject } from "./AppShell";
@@ -135,6 +136,43 @@ describe("AppShell", () => {
       profileId: "profile-1",
       secret: "session-secret",
     });
+  });
+
+  it("shows a run preview and delegates creation only when it is unblocked", async () => {
+    const user = userEvent.setup();
+    const onCreateRun = vi.fn();
+    const preview: RunPreviewResponse = {
+      blockers: [],
+      model: "gpt-5",
+      modelSource: "project",
+      outputDirectory: "/workspace/results",
+      projectId: "project-1",
+      promptSource: "project",
+      schemaVersion: 1,
+      tasks: [
+        {
+          contentHash: "blake3:file",
+          fileId: "file-1",
+          relativePath: "src/main.rs",
+          sizeBytes: 10n,
+        },
+      ],
+    };
+    render(
+      <AppShell
+        onCreateRun={onCreateRun}
+        onCloseRunPreview={() => undefined}
+        projects={[project()]}
+        runPreview={preview}
+      />,
+    );
+
+    expect(
+      screen.getByRole("dialog", { name: "确认本次分析" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("src/main.rs")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "创建 Run" }));
+    expect(onCreateRun).toHaveBeenCalledOnce();
   });
 
   it("does not render all rows for a 10,000 item task list", () => {

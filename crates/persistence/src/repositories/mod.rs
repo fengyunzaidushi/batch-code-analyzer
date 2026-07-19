@@ -608,6 +608,22 @@ impl Repository<'_> {
         let task_rows: Vec<TaskRow> = tasks.iter().map(TaskRow::from).collect();
         let mut transaction = self.database.begin_write().await?;
         let result = async {
+            let running = status_string(RunStatus::Running)?;
+            let pausing = status_string(RunStatus::Pausing)?;
+            let cancelling = status_string(RunStatus::Cancelling)?;
+            let active: Option<String> =
+                sqlx::query_scalar("SELECT id FROM runs WHERE status IN (?, ?, ?) LIMIT 1")
+                    .bind(running)
+                    .bind(pausing)
+                    .bind(cancelling)
+                    .fetch_optional(transaction.connection())
+                    .await
+                    .map_err(|_| PersistenceError::TransactionFailed)?;
+            if active.is_some() {
+                return Err(PersistenceError::StateTransition {
+                    code: "run_active_exists",
+                });
+            }
             insert_run(&mut transaction, &row).await?;
             for task in &task_rows {
                 insert_task(&mut transaction, task).await?;

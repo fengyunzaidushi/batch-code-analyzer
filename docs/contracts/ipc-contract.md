@@ -161,6 +161,11 @@ run_list
 - `run_create` 在事务内创建不可变快照与 Task。
 - 首期存在活动 Run 时，第二次 `run_create` 返回 `run_active_exists`。
 
+`run_preview` 和 `run_create` 接收 `projectId`，可选地接收当前提示词和模型覆盖。
+预览响应只包含相对路径、文件大小、内容哈希、解析后的模型和阻塞原因，不包含源文件内容。
+创建成功后返回 `RunSummaryDto` 和创建的 Task 数量；Run 初始状态为 `running`，Task 初始状态为
+`queued`，实际模型请求由后续调度器任务负责。
+
 ### 4.6 File
 
 ```text

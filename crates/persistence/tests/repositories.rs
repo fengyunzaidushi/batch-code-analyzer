@@ -180,12 +180,22 @@ async fn queued_tasks_are_claimed_once_and_stats_are_recomputed_from_tasks() {
         .await
         .unwrap();
 
-    let run = run("run-1", &project.id, RunStatus::Running);
-    let first = task("task-1", &run.id, file.id.as_str(), TaskStatus::Queued);
-    let second = task("task-2", &run.id, file.id.as_str(), TaskStatus::Pending);
+    let active_run = run("run-1", &project.id, RunStatus::Running);
+    let first = task(
+        "task-1",
+        &active_run.id,
+        file.id.as_str(),
+        TaskStatus::Queued,
+    );
+    let second = task(
+        "task-2",
+        &active_run.id,
+        file.id.as_str(),
+        TaskStatus::Pending,
+    );
     repository
         .create_run_with_tasks(
-            &run,
+            &active_run,
             RunRowMetadata {
                 interruption_reason: None,
             },
@@ -193,12 +203,33 @@ async fn queued_tasks_are_claimed_once_and_stats_are_recomputed_from_tasks() {
         )
         .await
         .unwrap();
+    let second_run = run("run-2", &project.id, RunStatus::Draft);
+    let second_task = task(
+        "task-3",
+        &second_run.id,
+        file.id.as_str(),
+        TaskStatus::Pending,
+    );
+    assert_eq!(
+        repository
+            .create_run_with_tasks(
+                &second_run,
+                RunRowMetadata {
+                    interruption_reason: None,
+                },
+                &[second_task],
+            )
+            .await
+            .expect_err("only one active run is allowed")
+            .code(),
+        "run_active_exists"
+    );
 
     let first_now = timestamp();
     let second_now = timestamp();
     let (first_claim, second_claim) = tokio::join!(
-        repository.claim_next_task(&run.id, &first_now),
-        repository.claim_next_task(&run.id, &second_now),
+        repository.claim_next_task(&active_run.id, &first_now),
+        repository.claim_next_task(&active_run.id, &second_now),
     );
     let claims = [first_claim.unwrap(), second_claim.unwrap()];
     assert_eq!(
@@ -211,12 +242,20 @@ async fn queued_tasks_are_claimed_once_and_stats_are_recomputed_from_tasks() {
         .filter_map(Option::as_ref)
         .all(|claim| claim.status == TaskStatus::Running));
 
-    let stats = repository.recompute_run_stats(&run.id).await.unwrap();
+    let stats = repository
+        .recompute_run_stats(&active_run.id)
+        .await
+        .unwrap();
     assert_eq!(stats.total, 2);
     assert_eq!(stats.running, 1);
     assert_eq!(stats.pending, 1);
     assert_eq!(
-        repository.get_run(&run.id).await.unwrap().unwrap().stats,
+        repository
+            .get_run(&active_run.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .stats,
         stats
     );
 }

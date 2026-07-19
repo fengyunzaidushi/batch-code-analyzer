@@ -9,7 +9,7 @@ use batch_code_analyzer_api_profiles::{
 use batch_code_analyzer_app_core::{
     domain::{ApiModelInfo, ApiProfile, ApiProfileConnectionStatus, ApiProfileId, ProjectId},
     timestamp_now, ApiProfileService, ApiProfileServiceError, FileServiceError, ProjectService,
-    ProjectServiceError, ScanService,
+    ProjectServiceError, RunPreparationInput, RunService, RunServiceError, ScanService,
 };
 use batch_code_analyzer_ipc_contracts::{
     ApiModelsFetchRequest, ApiModelsFetchResponse, ApiProfileDeleteRequest,
@@ -17,8 +17,10 @@ use batch_code_analyzer_ipc_contracts::{
     ApiProfileSaveResponse, ApiProfileSummaryDto, ApiProfileTestRequest, ApiProfileTestResponse,
     DatabaseStatus, ErrorCategory, FileListRequest, FileRecordSummaryDto, FileSetIncludedRequest,
     FileSetIncludedResponse, HealthCheckResponse, HealthStatus, IpcError, PageResponse,
-    ProjectAddRequest, ProjectAddResponse, ProjectDetailDto, ProjectSummaryDto, ScanCancelRequest,
-    ScanCancelResponse, ScanOperationStatus, ScanReportDto, ScanStartRequest, ScanStartResponse,
+    ProjectAddRequest, ProjectAddResponse, ProjectDetailDto, ProjectSummaryDto,
+    RunBlockingReasonDto, RunCreateRequest, RunCreateResponse, RunPreviewRequest,
+    RunPreviewResponse, RunPreviewTaskDto, RunSummaryDto, ScanCancelRequest, ScanCancelResponse,
+    ScanOperationStatus, ScanReportDto, ScanStartRequest, ScanStartResponse, DTO_SCHEMA_VERSION,
     HEALTH_CHECK_SCHEMA_VERSION,
 };
 use batch_code_analyzer_model_providers::{ModelProvider, OpenAiResponsesProvider, ProviderError};
@@ -87,6 +89,74 @@ pub(crate) async fn project_get(
         .map_err(|error| persistence_error(&error))?
         .ok_or_else(|| project_not_found(project_id.as_str()))?;
     Ok(ProjectDetailDto::from(&project))
+}
+
+#[tauri::command]
+pub(crate) async fn run_preview(
+    request: RunPreviewRequest,
+    state: State<'_, PersistenceState>,
+) -> Result<RunPreviewResponse, IpcError> {
+    let database = state.database.as_ref().ok_or_else(database_unavailable)?;
+    let preview = RunService::new(database)
+        .preview(
+            &request.project_id,
+            &RunPreparationInput {
+                prompt: request.prompt,
+                model: request.model,
+            },
+        )
+        .await
+        .map_err(run_service_error)?;
+    Ok(RunPreviewResponse {
+        schema_version: DTO_SCHEMA_VERSION,
+        project_id: preview.project_id,
+        tasks: preview
+            .tasks
+            .into_iter()
+            .map(|task| RunPreviewTaskDto {
+                file_id: task.file_id,
+                relative_path: task.relative_path,
+                size_bytes: task.size_bytes,
+                content_hash: task.content_hash,
+            })
+            .collect(),
+        blockers: preview
+            .blockers
+            .into_iter()
+            .map(|blocker| RunBlockingReasonDto {
+                code: blocker.code.to_owned(),
+                message: blocker.message.to_owned(),
+                file_id: blocker.file_id,
+                relative_path: blocker.relative_path,
+            })
+            .collect(),
+        model: preview.model,
+        prompt_source: preview.prompt_source,
+        model_source: preview.model_source,
+        output_directory: preview.output_directory,
+    })
+}
+
+#[tauri::command]
+pub(crate) async fn run_create(
+    request: RunCreateRequest,
+    state: State<'_, PersistenceState>,
+) -> Result<RunCreateResponse, IpcError> {
+    let database = state.database.as_ref().ok_or_else(database_unavailable)?;
+    let run = RunService::new(database)
+        .create(
+            &request.project_id,
+            &RunPreparationInput {
+                prompt: request.prompt,
+                model: request.model,
+            },
+        )
+        .await
+        .map_err(run_service_error)?;
+    Ok(RunCreateResponse {
+        task_count: run.stats.total,
+        run: RunSummaryDto::from(&run),
+    })
 }
 
 #[tauri::command]
@@ -652,6 +722,31 @@ fn project_service_error(error: ProjectServiceError) -> IpcError {
     }
 }
 
+fn run_service_error(error: RunServiceError) -> IpcError {
+    match error {
+        RunServiceError::NotFound => project_not_found(""),
+        RunServiceError::ActiveRun => ipc_error(
+            "run_active_exists",
+            ErrorCategory::Scheduler,
+            "当前已有活动 Run",
+            false,
+        ),
+        RunServiceError::Blocked(reason) => {
+            let category = if reason.code.starts_with("security_") {
+                ErrorCategory::Security
+            } else if reason.code.starts_with("project_") {
+                ErrorCategory::Project
+            } else if reason.code.starts_with("run_") || reason.code.starts_with("task_") {
+                ErrorCategory::Scheduler
+            } else {
+                ErrorCategory::Validation
+            };
+            ipc_error(reason.code, category, reason.message, false)
+        }
+        RunServiceError::Persistence(error) => persistence_error(&error),
+    }
+}
+
 fn file_service_error(error: FileServiceError) -> IpcError {
     match error {
         FileServiceError::NotFound | FileServiceError::Deleted => ipc_error(
@@ -779,8 +874,9 @@ fn health_check_response(database_health: DatabaseHealth) -> HealthCheckResponse
 mod tests {
     use super::{
         health_check_response, ApiProfileServiceError, FileServiceError, ProjectServiceError,
-        ProviderError,
+        ProviderError, RunServiceError,
     };
+    use batch_code_analyzer_app_core::RunBlockingReason;
     use batch_code_analyzer_persistence::DatabaseHealth;
 
     #[test]
@@ -874,5 +970,28 @@ mod tests {
         assert_eq!(provider.message, "API Profile 连接测试失败");
         assert!(provider.details.is_none());
         assert!(!provider.message.contains("401"));
+    }
+
+    #[test]
+    fn run_errors_use_scheduler_and_validation_categories() {
+        let active = super::run_service_error(RunServiceError::ActiveRun);
+        assert_eq!(active.code, "run_active_exists");
+        assert_eq!(
+            active.category,
+            batch_code_analyzer_ipc_contracts::ErrorCategory::Scheduler
+        );
+
+        let blocked = super::run_service_error(RunServiceError::Blocked(RunBlockingReason {
+            code: "validation_model_missing",
+            message: "无法解析任务实际模型",
+            file_id: None,
+            relative_path: None,
+        }));
+        assert_eq!(blocked.code, "validation_model_missing");
+        assert_eq!(
+            blocked.category,
+            batch_code_analyzer_ipc_contracts::ErrorCategory::Validation
+        );
+        assert!(blocked.details.is_none());
     }
 }

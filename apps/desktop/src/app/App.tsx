@@ -5,6 +5,8 @@ import type {
   FileRecordSummaryDto,
   IpcError,
   ProjectSummaryDto,
+  RunPreviewRequest,
+  RunPreviewResponse,
   ScanReportDto,
 } from "@batch-code-analyzer/ipc-types";
 
@@ -31,6 +33,7 @@ import {
   testApiProfile,
   type ApiProfileSecretPutRequest,
 } from "../ipc/apiProfiles";
+import { createRun, previewRun } from "../ipc/runs";
 import { AppShell, type ShellHealthState, type ShellProject } from "./AppShell";
 
 export function App() {
@@ -51,6 +54,17 @@ export function App() {
   const [fileTotals, setFileTotals] = useState<Record<string, number>>({});
   const [apiProfiles, setApiProfiles] = useState<ApiProfileSummaryDto[]>([]);
   const [apiProfileError, setApiProfileError] = useState<string | null>(null);
+  const [activeRun, setActiveRun] = useState<{
+    projectId: string;
+    projectName: string;
+    status: "running";
+  } | null>(null);
+  const [runPreview, setRunPreview] = useState<RunPreviewResponse | null>(null);
+  const [runPreparation, setRunPreparation] = useState<
+    Pick<RunPreviewRequest, "prompt" | "model">
+  >({});
+  const [runError, setRunError] = useState<string | null>(null);
+  const [isCreatingRun, setIsCreatingRun] = useState(false);
 
   const refreshProjects = useCallback(async () => {
     const items = await listProjects();
@@ -350,8 +364,44 @@ export function App() {
     }
   };
 
+  const handleRunPreview = async (input: { prompt: string }) => {
+    if (!selectedProjectId) return;
+    setRunError(null);
+    setRunPreparation(input);
+    try {
+      const response = await previewRun({
+        projectId: selectedProjectId,
+        ...input,
+      });
+      setRunPreview(response);
+    } catch (error) {
+      setRunError(safeRunError(error));
+    }
+  };
+
+  const handleRunCreate = async () => {
+    if (!selectedProjectId) return;
+    setRunError(null);
+    setIsCreatingRun(true);
+    try {
+      await createRun({ projectId: selectedProjectId, ...runPreparation });
+      const project = projects.find((item) => item.id === selectedProjectId);
+      setActiveRun({
+        projectId: selectedProjectId,
+        projectName: project?.name ?? "当前项目",
+        status: "running",
+      });
+      setRunPreview(null);
+    } catch (error) {
+      setRunError(safeRunError(error));
+    } finally {
+      setIsCreatingRun(false);
+    }
+  };
+
   return (
     <AppShell
+      activeRun={activeRun}
       healthState={healthState}
       isAddingProject={isAddingProject}
       onAddProject={handleAddProject}
@@ -363,6 +413,15 @@ export function App() {
         setRequestId((current) => current + 1);
       }}
       onSetFileIncluded={handleSetFileIncluded}
+      onPreviewRun={handleRunPreview}
+      onCreateRun={handleRunCreate}
+      onCloseRunPreview={() => {
+        setRunPreview(null);
+        setRunError(null);
+      }}
+      runPreview={runPreview}
+      runError={runError}
+      isCreatingRun={isCreatingRun}
       apiProfileError={apiProfileError}
       apiProfiles={apiProfiles}
       onDeleteApiProfile={handleDeleteApiProfile}
@@ -430,6 +489,24 @@ function safeApiProfileError(error: unknown): string {
     return messages[error.code] ?? "API Profile 操作失败。";
   }
   return "API Profile 操作失败。";
+}
+
+function safeRunError(error: unknown): string {
+  if (isIpcError(error)) {
+    const messages: Record<string, string> = {
+      project_not_found: "项目不存在。",
+      project_path_unavailable: "项目路径不可用。",
+      run_active_exists: "当前已有活动 Run。",
+      security_secret_not_found: "主 API Profile 尚未配置密钥。",
+      validation_model_missing: "无法解析任务实际模型。",
+      validation_required_field: "运行配置不完整或没有纳入文件。",
+      validation_invalid_value: "目标文件尚未完成有效扫描。",
+      persistence_database_unavailable: "本地数据库暂不可用。",
+      persistence_transaction_failed: "Run 暂时无法创建。",
+    };
+    return messages[error.code] ?? "Run 操作失败。";
+  }
+  return "Run 操作失败。";
 }
 
 function isIpcError(error: unknown): error is IpcError {

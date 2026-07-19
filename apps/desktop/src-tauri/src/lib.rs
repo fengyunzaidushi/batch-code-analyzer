@@ -54,6 +54,8 @@ pub fn run() {
             commands::project_list,
             commands::project_add,
             commands::project_get,
+            commands::run_preview,
+            commands::run_create,
             commands::api_profile_list,
             commands::api_profile_save,
             commands::api_profile_secret_put,
