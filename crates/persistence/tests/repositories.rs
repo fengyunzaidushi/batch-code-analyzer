@@ -1,9 +1,9 @@
 use batch_code_analyzer_domain::{
-    ApiProfileId, ApiRouting, Attempt, AttemptId, AttemptStatus, ContextStatus, ExecutionDefaults,
-    FileRecord, FileRecordId, FileResultStatus, FileSnapshot, FileSourceStatus, FilterRules,
-    Project, ProjectContext, ProjectId, ProjectPathStatus, RetryPolicy, Rfc3339Timestamp, Run,
-    RunId, RunSnapshot, RunStats, RunStatus, SensitiveFinding, Task, TaskId, TaskStatus,
-    TaskValueSource,
+    ApiProfile, ApiProfileConnectionStatus, ApiProfileId, ApiProtocol, ApiRouting, Attempt,
+    AttemptId, AttemptStatus, ContextStatus, ExecutionDefaults, FileRecord, FileRecordId,
+    FileResultStatus, FileSnapshot, FileSourceStatus, FilterRules, Project, ProjectContext,
+    ProjectId, ProjectPathStatus, RetryPolicy, Rfc3339Timestamp, Run, RunId, RunSnapshot, RunStats,
+    RunStatus, SensitiveFinding, Task, TaskId, TaskStatus, TaskValueSource,
 };
 use batch_code_analyzer_persistence::{
     AttemptRowMetadata, Database, FileRecordRowMetadata, PersistenceError, ProjectRowMetadata,
@@ -90,6 +90,48 @@ async fn file_inclusion_updates_are_scoped_and_round_trip() {
             .await
             .unwrap(),
         None
+    );
+}
+
+#[tokio::test]
+async fn api_profile_repository_round_trips_and_blocks_referenced_delete() {
+    let database = Database::open_in_memory()
+        .await
+        .expect("database should open");
+    let repository = database.repository();
+    let mut project = project("project-1", "/workspace/project");
+    project.api_routing.primary_profile_id = Some(ApiProfileId::new("profile-1"));
+    repository
+        .create_project(&project, project_metadata("/workspace/project"))
+        .await
+        .unwrap();
+    let profile = api_profile("profile-1");
+    repository.create_api_profile(&profile).await.unwrap();
+    assert_eq!(
+        repository.list_api_profiles().await.unwrap(),
+        vec![profile.clone()]
+    );
+
+    let mut updated = profile.clone();
+    updated.default_model = Some("gpt-5-mini".into());
+    updated.updated_at = timestamp();
+    repository.update_api_profile(&updated).await.unwrap();
+    assert_eq!(
+        repository
+            .get_api_profile(&updated.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .default_model,
+        Some("gpt-5-mini".into())
+    );
+    assert_eq!(
+        repository
+            .delete_api_profile(&updated.id)
+            .await
+            .expect_err("referenced profile must not be deleted")
+            .code(),
+        "api_profile_in_use"
     );
 }
 
@@ -333,6 +375,24 @@ fn file(id: &str, project_id: &ProjectId) -> FileRecord {
         }],
         latest_successful_run_id: None,
         result_status: FileResultStatus::None,
+    }
+}
+
+fn api_profile(id: &str) -> ApiProfile {
+    ApiProfile {
+        id: ApiProfileId::new(id),
+        name: "Test Profile".into(),
+        protocol: ApiProtocol::OpenAiResponses,
+        base_url: "https://example.test/v1".into(),
+        secret_ref: Some("session-secret-1".into()),
+        default_model: Some("gpt-5".into()),
+        model_cache: Vec::new(),
+        model_cache_updated_at: None,
+        last_connection_status: ApiProfileConnectionStatus::Unknown,
+        last_error_code: None,
+        last_tested_at: None,
+        created_at: timestamp(),
+        updated_at: timestamp(),
     }
 }
 

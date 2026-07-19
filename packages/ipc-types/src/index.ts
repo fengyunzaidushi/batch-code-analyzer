@@ -1,6 +1,19 @@
 // The declarations in generated/ are produced by `pnpm ipc:generate`.
 export type { ApiFallback } from "./generated/ApiFallback";
+export type { ApiModelInfo } from "./generated/ApiModelInfo";
+export type { ApiModelsFetchRequest } from "./generated/ApiModelsFetchRequest";
+export type { ApiModelsFetchResponse } from "./generated/ApiModelsFetchResponse";
+export type { ApiProfileConnectionStatus } from "./generated/ApiProfileConnectionStatus";
+export type { ApiProfileDeleteRequest } from "./generated/ApiProfileDeleteRequest";
+export type { ApiProfileDeleteResponse } from "./generated/ApiProfileDeleteResponse";
 export type { ApiProfileId } from "./generated/ApiProfileId";
+export type { ApiProfileListResponse } from "./generated/ApiProfileListResponse";
+export type { ApiProfileSaveRequest } from "./generated/ApiProfileSaveRequest";
+export type { ApiProfileSaveResponse } from "./generated/ApiProfileSaveResponse";
+export type { ApiProfileSummaryDto } from "./generated/ApiProfileSummaryDto";
+export type { ApiProfileTestRequest } from "./generated/ApiProfileTestRequest";
+export type { ApiProfileTestResponse } from "./generated/ApiProfileTestResponse";
+export type { ApiProtocol } from "./generated/ApiProtocol";
 export type { ApiRouting } from "./generated/ApiRouting";
 export type { AttemptDto } from "./generated/AttemptDto";
 export type { AttemptErrorDto } from "./generated/AttemptErrorDto";

@@ -1,7 +1,10 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import type { ProjectSummaryDto } from "@batch-code-analyzer/ipc-types";
+import type {
+  ApiProfileSummaryDto,
+  ProjectSummaryDto,
+} from "@batch-code-analyzer/ipc-types";
 
 import { AppShell, type ShellProject } from "./AppShell";
 import { MarkdownPreview } from "../features/markdown/MarkdownPreview";
@@ -60,6 +63,78 @@ describe("AppShell", () => {
     ]);
     await user.click(screen.getByRole("tab", { name: "API 配置" }));
     expect(screen.getByText("API 配置档案")).toBeInTheDocument();
+  });
+
+  it("renders API profile metadata without exposing a key", async () => {
+    const user = userEvent.setup();
+    const profile: ApiProfileSummaryDto = {
+      baseUrl: "https://example.test/v1",
+      defaultModel: "gpt-5",
+      hasSecret: true,
+      id: "profile-1",
+      lastConnectionStatus: "unknown",
+      lastErrorCode: null,
+      lastTestedAt: null,
+      modelCache: [],
+      modelCacheUpdatedAt: null,
+      name: "Local API",
+      protocol: "openai-responses",
+      schemaVersion: 1,
+    };
+    render(<AppShell apiProfiles={[profile]} projects={[project()]} />);
+
+    await user.click(screen.getByRole("tab", { name: "API 配置" }));
+    expect(screen.getByDisplayValue("Local API")).toBeInTheDocument();
+    expect(screen.getByText("已配置密钥")).toBeInTheDocument();
+    expect(screen.queryByDisplayValue(/sk-|api-key/i)).not.toBeInTheDocument();
+  });
+
+  it("saves profile metadata and writes a key through the dedicated handler", async () => {
+    const user = userEvent.setup();
+    const profile: ApiProfileSummaryDto = {
+      baseUrl: "https://example.test/v1",
+      defaultModel: "gpt-5",
+      hasSecret: false,
+      id: "profile-1",
+      lastConnectionStatus: "unknown",
+      lastErrorCode: null,
+      lastTestedAt: null,
+      modelCache: [],
+      modelCacheUpdatedAt: null,
+      name: "Local API",
+      protocol: "openai-responses",
+      schemaVersion: 1,
+    };
+    const onSaveApiProfile = vi.fn().mockResolvedValue(profile);
+    const onPutApiProfileSecret = vi.fn().mockResolvedValue({
+      ...profile,
+      hasSecret: true,
+    });
+    render(
+      <AppShell
+        apiProfiles={[profile]}
+        onPutApiProfileSecret={onPutApiProfileSecret}
+        onSaveApiProfile={onSaveApiProfile}
+        projects={[project()]}
+      />,
+    );
+
+    await user.click(screen.getByRole("tab", { name: "API 配置" }));
+    await user.clear(screen.getByLabelText("名称"));
+    await user.type(screen.getByLabelText("名称"), "Updated API");
+    await user.type(screen.getByLabelText("API Key"), "session-secret");
+    await user.click(screen.getByRole("button", { name: "保存配置" }));
+
+    expect(onSaveApiProfile).toHaveBeenCalledWith({
+      baseUrl: "https://example.test/v1",
+      defaultModel: "gpt-5",
+      id: "profile-1",
+      name: "Updated API",
+    });
+    expect(onPutApiProfileSecret).toHaveBeenCalledWith({
+      profileId: "profile-1",
+      secret: "session-secret",
+    });
   });
 
   it("does not render all rows for a 10,000 item task list", () => {

@@ -54,6 +54,7 @@ internal
 | `validation_invalid_value` | 否 | 否 | 字段格式或枚举非法 |
 | `validation_limit_exceeded` | 否 | 否 | 数量或长度超过应用限制 |
 | `validation_model_missing` | 否 | 否 | 无法解析任务实际模型 |
+| `api_profile_name_duplicate` | 否 | 否 | API Profile 名称已存在 |
 
 ### 4.2 Project
 
@@ -64,6 +65,7 @@ internal
 | `project_path_duplicate` | 否 | 否 | canonical path 已登记 |
 | `project_config_readonly` | 否 | 否 | 仓库不可写，已降级到应用配置 |
 | `project_relocation_mismatch` | 否 | 否 | 新路径与原项目身份不匹配 |
+| `api_profile_in_use` | 否 | 否 | API Profile 仍被项目主备路由引用 |
 
 ### 4.3 Scan
 
@@ -90,6 +92,9 @@ internal
 | `security_consent_required` | 否 | 否 | 尚未确认向该服务发送源码 |
 | `security_external_url_blocked` | 否 | 否 | 外部链接协议或目标不允许 |
 | `security_secret_store_unavailable` | 是 | 否 | 系统安全存储不可用 |
+| `security_invalid_secret_reference` | 否 | 否 | SecretRef 或包含凭据的 URL 无效 |
+| `security_secret_not_found` | 否 | 否 | SecretRef 不存在 |
+| `security_secret_store_failure` | 是 | 否 | 安全存储后端操作失败 |
 
 ### 4.5 Persistence
 

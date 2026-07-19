@@ -13,6 +13,8 @@ import {
 } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
 import type {
+  ApiProfileSaveRequest,
+  ApiProfileSummaryDto,
   FileRecordSummaryDto,
   ProjectPathStatus,
   ProjectSummaryDto,
@@ -38,6 +40,8 @@ export interface ActiveRunSummary {
 }
 
 interface AppShellProps {
+  apiProfileError?: string | null;
+  apiProfiles?: readonly ApiProfileSummaryDto[];
   fileRecords?: readonly FileRecordSummaryDto[];
   fileTotal?: number;
   projects?: readonly ShellProject[];
@@ -47,6 +51,16 @@ interface AppShellProps {
   onCancelScan?: () => void;
   onRetryHealth?: () => void;
   onSetFileIncluded?: (fileId: string, included: boolean) => Promise<void>;
+  onDeleteApiProfile?: (id: string) => Promise<void>;
+  onFetchApiModels?: (id: string) => Promise<void>;
+  onPutApiProfileSecret?: (request: {
+    profileId: string;
+    secret: string;
+  }) => Promise<ApiProfileSummaryDto>;
+  onSaveApiProfile?: (
+    request: ApiProfileSaveRequest,
+  ) => Promise<ApiProfileSummaryDto>;
+  onTestApiProfile?: (id: string) => Promise<void>;
   onSelectProject?: (id: string) => void;
   onStartScan?: () => void;
   projectError?: string | null;
@@ -58,6 +72,8 @@ interface AppShellProps {
 type WorkspaceTab = "prompt" | "api";
 
 export function AppShell({
+  apiProfileError = null,
+  apiProfiles = [],
   fileRecords = [],
   fileTotal = 0,
   projects = [],
@@ -67,6 +83,15 @@ export function AppShell({
   onCancelScan = () => undefined,
   onRetryHealth = () => undefined,
   onSetFileIncluded = async () => undefined,
+  onDeleteApiProfile = async () => undefined,
+  onFetchApiModels = async () => undefined,
+  onPutApiProfileSecret = async () => {
+    throw new Error("API Profile secret handler is unavailable");
+  },
+  onSaveApiProfile = async () => {
+    throw new Error("API Profile save handler is unavailable");
+  },
+  onTestApiProfile = async () => undefined,
   onSelectProject,
   onStartScan = () => undefined,
   projectError = null,
@@ -133,6 +158,13 @@ export function AppShell({
           scanReport={scanReport}
           tab={tab}
           setTab={setTab}
+          apiProfileError={apiProfileError}
+          apiProfiles={apiProfiles}
+          onDeleteApiProfile={onDeleteApiProfile}
+          onFetchApiModels={onFetchApiModels}
+          onPutApiProfileSecret={onPutApiProfileSecret}
+          onSaveApiProfile={onSaveApiProfile}
+          onTestApiProfile={onTestApiProfile}
         />
       </div>
       <MarkdownPreview
@@ -371,6 +403,8 @@ function PathStatus({ status }: { status: ProjectPathStatus }) {
 }
 
 function ProjectWorkspace({
+  apiProfileError,
+  apiProfiles,
   activeRun,
   fileRecords,
   fileTotal,
@@ -382,7 +416,14 @@ function ProjectWorkspace({
   scanReport,
   tab,
   setTab,
+  onDeleteApiProfile,
+  onFetchApiModels,
+  onPutApiProfileSecret,
+  onSaveApiProfile,
+  onTestApiProfile,
 }: {
+  apiProfileError: string | null;
+  apiProfiles: readonly ApiProfileSummaryDto[];
   activeRun: ActiveRunSummary | null;
   fileRecords: readonly FileRecordSummaryDto[];
   fileTotal: number;
@@ -394,6 +435,16 @@ function ProjectWorkspace({
   scanReport: ScanReportDto | null;
   tab: WorkspaceTab;
   setTab: (tab: WorkspaceTab) => void;
+  onDeleteApiProfile: (id: string) => Promise<void>;
+  onFetchApiModels: (id: string) => Promise<void>;
+  onPutApiProfileSecret: (request: {
+    profileId: string;
+    secret: string;
+  }) => Promise<ApiProfileSummaryDto>;
+  onSaveApiProfile: (
+    request: ApiProfileSaveRequest,
+  ) => Promise<ApiProfileSummaryDto>;
+  onTestApiProfile: (id: string) => Promise<void>;
 }) {
   return (
     <main className="project-workspace">
@@ -424,7 +475,15 @@ function ProjectWorkspace({
           scanReport={scanReport}
         />
       ) : (
-        <ApiWorkspace />
+        <ApiWorkspace
+          error={apiProfileError}
+          onDelete={onDeleteApiProfile}
+          onFetchModels={onFetchApiModels}
+          onPutSecret={onPutApiProfileSecret}
+          onSave={onSaveApiProfile}
+          onTest={onTestApiProfile}
+          profiles={apiProfiles}
+        />
       )}
     </main>
   );
@@ -660,7 +719,39 @@ function scanSummaryMessage(report: ScanReportDto | null): string {
   }
 }
 
-function ApiWorkspace() {
+function ApiWorkspace({
+  error,
+  onDelete,
+  onFetchModels,
+  onPutSecret,
+  onSave,
+  onTest,
+  profiles,
+}: {
+  error: string | null;
+  onDelete: (id: string) => Promise<void>;
+  onFetchModels: (id: string) => Promise<void>;
+  onPutSecret: (request: {
+    profileId: string;
+    secret: string;
+  }) => Promise<ApiProfileSummaryDto>;
+  onSave: (request: ApiProfileSaveRequest) => Promise<ApiProfileSummaryDto>;
+  onTest: (id: string) => Promise<void>;
+  profiles: readonly ApiProfileSummaryDto[];
+}) {
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [creatingNew, setCreatingNew] = useState(false);
+  const selected = creatingNew
+    ? null
+    : (profiles.find((profile) => profile.id === selectedId) ??
+      profiles[0] ??
+      null);
+
+  const startNew = () => {
+    setSelectedId(null);
+    setCreatingNew(true);
+  };
+
   return (
     <div className="workspace-content api-workspace">
       <div className="content-intro">
@@ -668,25 +759,254 @@ function ApiWorkspace() {
           <p className="eyebrow">CONNECTIONS</p>
           <h2>API 配置档案</h2>
         </div>
-        <button className="primary-button" disabled type="button">
+        <button className="primary-button" onClick={startNew} type="button">
           <Plus size={15} />
           添加 API 档案
         </button>
       </div>
-      <section className="empty-config-band">
-        <div className="empty-state-icon" aria-hidden="true">
-          <Settings2 size={20} />
+      {error ? (
+        <div className="project-error api-error" role="alert">
+          {error}
         </div>
-        <h3>还没有可用的 API 档案</h3>
-        <p>
-          连接配置将由 Rust 安全存储管理，API Key 不会进入普通配置或前端状态。
-        </p>
-        <button className="outline-button" disabled type="button">
-          配置连接
-        </button>
+      ) : null}
+      <section className="api-config-band">
+        <aside className="api-profile-list" aria-label="API Profile 列表">
+          {profiles.length === 0 ? (
+            <div className="api-profile-empty">
+              <Settings2 aria-hidden="true" size={19} />
+              <span>还没有 API Profile</span>
+            </div>
+          ) : (
+            profiles.map((profile) => (
+              <button
+                className={`api-profile-item${profile.id === selected?.id ? " is-selected" : ""}`}
+                key={profile.id}
+                onClick={() => {
+                  setCreatingNew(false);
+                  setSelectedId(profile.id);
+                }}
+                type="button"
+              >
+                <strong>{profile.name}</strong>
+                <span>{profile.baseUrl}</span>
+                <small>{profile.hasSecret ? "已配置密钥" : "未配置密钥"}</small>
+              </button>
+            ))
+          )}
+        </aside>
+        <ApiProfileEditor
+          key={creatingNew ? "new" : (selected?.id ?? "new")}
+          onDelete={onDelete}
+          onFetchModels={onFetchModels}
+          onPutSecret={onPutSecret}
+          onSave={async (request) => {
+            const profile = await onSave(request);
+            setCreatingNew(false);
+            setSelectedId(profile.id);
+            return profile;
+          }}
+          onTest={onTest}
+          profile={selected}
+        />
       </section>
     </div>
   );
+}
+
+function ApiProfileEditor({
+  onDelete,
+  onFetchModels,
+  onPutSecret,
+  onSave,
+  onTest,
+  profile,
+}: {
+  onDelete: (id: string) => Promise<void>;
+  onFetchModels: (id: string) => Promise<void>;
+  onPutSecret: (request: {
+    profileId: string;
+    secret: string;
+  }) => Promise<ApiProfileSummaryDto>;
+  onSave: (request: ApiProfileSaveRequest) => Promise<ApiProfileSummaryDto>;
+  onTest: (id: string) => Promise<void>;
+  profile: ApiProfileSummaryDto | null;
+}) {
+  const [name, setName] = useState(profile?.name ?? "");
+  const [baseUrl, setBaseUrl] = useState(
+    profile?.baseUrl ?? "https://api.openai.com/v1",
+  );
+  const [defaultModel, setDefaultModel] = useState(profile?.defaultModel ?? "");
+  const [secret, setSecret] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const save = async () => {
+    setBusy(true);
+    try {
+      const savedProfile = await onSave({
+        ...(profile ? { id: profile.id } : {}),
+        baseUrl,
+        defaultModel: defaultModel.trim() || null,
+        name,
+      });
+      if (secret.trim()) {
+        await onPutSecret({ profileId: savedProfile.id, secret });
+        setSecret("");
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const test = async () => {
+    if (!profile) return;
+    setBusy(true);
+    try {
+      await onTest(profile.id);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const fetchModels = async () => {
+    if (!profile) return;
+    setBusy(true);
+    try {
+      await onFetchModels(profile.id);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async () => {
+    if (!profile) return;
+    setBusy(true);
+    try {
+      await onDelete(profile.id);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="api-profile-form">
+      <div className="api-form-heading">
+        <div>
+          <p className="eyebrow">PROFILE SETTINGS</p>
+          <h3>{profile ? "编辑 API Profile" : "新建 API Profile"}</h3>
+        </div>
+        {profile ? (
+          <span
+            className={
+              "api-profile-status api-profile-status-" +
+              profile.lastConnectionStatus
+            }
+          >
+            {apiConnectionStatusLabel(profile.lastConnectionStatus)}
+          </span>
+        ) : null}
+      </div>
+      <label>
+        名称
+        <input onChange={(event) => setName(event.target.value)} value={name} />
+      </label>
+      <label>
+        Base URL
+        <input
+          onChange={(event) => setBaseUrl(event.target.value)}
+          value={baseUrl}
+        />
+      </label>
+      <label>
+        默认模型
+        <input
+          onChange={(event) => setDefaultModel(event.target.value)}
+          placeholder="例如 gpt-5"
+          value={defaultModel}
+        />
+      </label>
+      <label>
+        API Key
+        <input
+          autoComplete="new-password"
+          onChange={(event) => setSecret(event.target.value)}
+          placeholder={
+            profile?.hasSecret
+              ? "已配置，输入新值可替换"
+              : "只写入安全存储，不会回显"
+          }
+          type="password"
+          value={secret}
+        />
+      </label>
+      <div className="api-form-note">
+        <span>
+          {profile?.hasSecret ? "密钥已由会话安全存储托管" : "尚未配置密钥"}
+        </span>
+        <span>协议：openai-responses</span>
+      </div>
+      <div className="api-form-actions">
+        <button
+          className="primary-button"
+          disabled={busy}
+          onClick={() => void save()}
+          type="button"
+        >
+          保存配置
+        </button>
+        {profile ? (
+          <>
+            <button
+              className="outline-button"
+              disabled={busy}
+              onClick={() => void test()}
+              type="button"
+            >
+              测试连接
+            </button>
+            <button
+              className="outline-button"
+              disabled={busy}
+              onClick={() => void fetchModels()}
+              type="button"
+            >
+              刷新模型
+            </button>
+            <button
+              className="danger-button"
+              disabled={busy}
+              onClick={() => void remove()}
+              type="button"
+            >
+              删除
+            </button>
+          </>
+        ) : null}
+      </div>
+      {profile?.modelCache.length ? (
+        <div className="api-model-cache">
+          <span>模型缓存</span>
+          <div>
+            {profile.modelCache.slice(0, 8).map((model) => (
+              <span key={model.id}>{model.id}</span>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function apiConnectionStatusLabel(
+  status: ApiProfileSummaryDto["lastConnectionStatus"],
+): string {
+  switch (status) {
+    case "healthy":
+      return "连接正常";
+    case "failed":
+      return "连接失败";
+    default:
+      return "未测试";
+  }
 }
 
 function runStatusLabel(status: ActiveRunSummary["status"]) {

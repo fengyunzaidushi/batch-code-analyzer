@@ -1,8 +1,9 @@
 //! `SQLite` row representations and lossless conversions to domain entities.
 
 use batch_code_analyzer_domain::{
-    Attempt, AttemptError, AttemptId, ContextVersion, ContextVersionId, FileRecord, FileRecordId,
-    Project, ProjectContext, ProjectId, Rfc3339Timestamp, Run, RunId, Task, TaskId,
+    ApiProfile, ApiProfileId, Attempt, AttemptError, AttemptId, ContextVersion, ContextVersionId,
+    FileRecord, FileRecordId, Project, ProjectContext, ProjectId, Rfc3339Timestamp, Run, RunId,
+    Task, TaskId,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
@@ -100,6 +101,81 @@ impl TryFrom<ProjectRow> for Project {
             filter_rules: decode(&row.filter_rules_json)?,
             output_root: row.output_root,
             last_opened_at: Rfc3339Timestamp::new(row.last_opened_at),
+        })
+    }
+}
+
+#[derive(Debug)]
+pub struct ApiProfileRow {
+    pub id: String,
+    pub name: String,
+    pub protocol: String,
+    pub base_url: String,
+    pub key_reference_id: Option<String>,
+    pub default_model: Option<String>,
+    pub model_cache_json: String,
+    pub model_cache_updated_at: Option<String>,
+    pub last_connection_status: String,
+    pub last_error_code: Option<String>,
+    pub last_tested_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+pub struct ApiProfileRowMetadata {
+    pub created_at: Rfc3339Timestamp,
+    pub updated_at: Rfc3339Timestamp,
+}
+
+impl ApiProfileRow {
+    /// Converts API profile domain metadata to its `SQLite` row representation.
+    ///
+    /// # Errors
+    ///
+    /// Returns `internal_contract_violation` when cached metadata cannot be encoded.
+    pub fn from_domain(
+        profile: &ApiProfile,
+        metadata: &ApiProfileRowMetadata,
+    ) -> Result<Self, PersistenceError> {
+        Ok(Self {
+            id: profile.id.to_string(),
+            name: profile.name.clone(),
+            protocol: encode(profile.protocol)?,
+            base_url: profile.base_url.clone(),
+            key_reference_id: profile.secret_ref.clone(),
+            default_model: profile.default_model.clone(),
+            model_cache_json: encode(profile.model_cache.clone())?,
+            model_cache_updated_at: profile
+                .model_cache_updated_at
+                .as_ref()
+                .map(timestamp_string),
+            last_connection_status: encode(profile.last_connection_status)?,
+            last_error_code: profile.last_error_code.clone(),
+            last_tested_at: profile.last_tested_at.as_ref().map(timestamp_string),
+            created_at: timestamp_string(&metadata.created_at),
+            updated_at: timestamp_string(&metadata.updated_at),
+        })
+    }
+}
+
+impl TryFrom<ApiProfileRow> for ApiProfile {
+    type Error = PersistenceError;
+
+    fn try_from(row: ApiProfileRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            id: ApiProfileId::from(row.id),
+            name: row.name,
+            protocol: decode(&row.protocol)?,
+            base_url: row.base_url,
+            secret_ref: row.key_reference_id,
+            default_model: row.default_model,
+            model_cache: decode(&row.model_cache_json)?,
+            model_cache_updated_at: row.model_cache_updated_at.map(Rfc3339Timestamp::new),
+            last_connection_status: decode(&row.last_connection_status)?,
+            last_error_code: row.last_error_code,
+            last_tested_at: row.last_tested_at.map(Rfc3339Timestamp::new),
+            created_at: Rfc3339Timestamp::new(row.created_at),
+            updated_at: Rfc3339Timestamp::new(row.updated_at),
         })
     }
 }

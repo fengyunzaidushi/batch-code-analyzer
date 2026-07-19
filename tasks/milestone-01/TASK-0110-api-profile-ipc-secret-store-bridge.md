@@ -1,6 +1,6 @@
 # TASK-0110：API Profile IPC / SecretStore Bridge
 
-- Status: Ready
+- Status: Done
 - Owner: Unassigned
 - Branch: feat/m1-api-profile-bridge
 - Dependencies: TASK-0002, TASK-0003, TASK-0004, TASK-0103, TASK-0105
@@ -34,6 +34,9 @@ Cargo.lock
 apps/desktop/src-tauri/Cargo.toml
 apps/desktop/src-tauri/src/**
 crates/domain/**
+crates/api-profiles/**
+crates/secret-store/**
+crates/model-providers/**
 crates/persistence/src/repositories/**
 crates/persistence/src/rows.rs
 crates/persistence/tests/**
@@ -75,7 +78,7 @@ GitHub Actions、Tauri capabilities 以外的无关配置
 - `ApiProfileListResponse`：稳定分页或列表响应。
 - `ApiProfileTestRequest` / `ApiProfileTestResponse`：通过 Mock Provider/本地测试端点验证连接，返回脱敏状态和模型摘要。
 - `ApiProfileDeleteRequest` / `ApiProfileDeleteResponse`：删除未被项目引用的档案；被引用时返回稳定错误。
-- Tauri Commands：`api_profile_list`、`api_profile_save`、`api_profile_test`、`api_profile_delete`、`api_models_fetch`。
+- Tauri Commands：`api_profile_list`、`api_profile_save`、`api_profile_secret_put`、`api_profile_test`、`api_profile_delete`、`api_models_fetch`。
 
 ## 密钥边界与待确认契约
 
@@ -105,15 +108,15 @@ GitHub Actions、Tauri capabilities 以外的无关配置
 
 ## 验收标准
 
-- [ ] 根 Workspace 能编译 `api-profiles`、`secret-store` 和所需 Provider crate；
-- [ ] API Profile Repository 成功、更新、列表、删除和被引用阻止路径有测试；
-- [ ] SecretStore 不可用/会话模式有明确状态测试；
-- [ ] DTO 生成无漂移，且不存在 API Key 字段或明文快照；
-- [ ] Tauri Command 覆盖校验、数据库不可用、Provider 错误脱敏和删除阻止；
-- [ ] React 覆盖空状态、保存、测试、删除阻止和安全错误展示；
-- [ ] 使用 Mock Provider，不调用真实收费 API；
-- [ ] `pnpm format:check`、`pnpm lint`、`pnpm typecheck`、`pnpm test`、`cargo fmt --check`、`cargo clippy --workspace --all-targets -- -D warnings` 和 `cargo test --workspace` 通过；
-- [ ] 没有越界修改，文档契约已同步。
+- [x] 根 Workspace 能编译 `api-profiles`、`secret-store` 和所需 Provider crate；
+- [x] API Profile Repository 成功、更新、列表、删除和被引用阻止路径有测试；
+- [x] SecretStore 不可用/会话模式有明确状态测试；
+- [x] DTO 生成无漂移，且不存在 API Key 字段或明文快照；
+- [x] Tauri Command 覆盖校验、数据库不可用、Provider 错误脱敏和删除阻止；
+- [x] React 覆盖空状态、保存、测试、删除阻止和安全错误展示；
+- [x] 使用 Mock Provider，不调用真实收费 API；
+- [x] `pnpm format:check`、`pnpm lint`、`pnpm typecheck`、`pnpm test`、`cargo fmt --check`、`cargo clippy --workspace --all-targets -- -D warnings` 和 `cargo test --workspace` 通过；
+- [x] 没有越界修改，文档契约已同步。
 
 ## 交付格式
 

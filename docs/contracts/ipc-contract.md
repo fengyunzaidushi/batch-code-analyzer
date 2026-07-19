@@ -140,6 +140,11 @@ api_models_fetch
 - `api_profile_list` 只返回是否已配置密钥和脱敏摘要。
 - 删除仍被项目引用的档案必须失败并返回稳定错误码。
 
+`api_profile_save` 只保存名称、Base URL、协议和默认模型等非敏感元数据。
+`api_profile_secret_put` 是一次性写入命令：密钥只进入 SecretStore，命令不返回密钥，
+也不生成包含密钥字段的 TypeScript 公共 DTO。`api_profile_test` 与 `api_models_fetch`
+通过 Provider 的模型列表请求验证连接并缓存脱敏模型元数据。
+
 ### 4.5 Run
 
 ```text
