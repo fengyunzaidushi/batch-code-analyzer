@@ -50,6 +50,9 @@ export function App() {
   const [scanReports, setScanReports] = useState<Record<string, ScanReportDto>>(
     {},
   );
+  const [temporaryScanPatterns, setTemporaryScanPatterns] = useState<
+    Record<string, string[]>
+  >({});
   const [fileRecords, setFileRecords] = useState<
     Record<string, FileRecordSummaryDto[]>
   >({});
@@ -239,11 +242,39 @@ export function App() {
     }
   };
 
+  const handleAddTemporaryScanPattern = (pattern: string) => {
+    if (!selectedProjectId) return;
+    const normalized = pattern.trim();
+    if (!normalized) return;
+    setTemporaryScanPatterns((current) => {
+      const patterns = current[selectedProjectId] ?? [];
+      if (patterns.includes(normalized) || patterns.length >= 100)
+        return current;
+      return {
+        ...current,
+        [selectedProjectId]: [...patterns, normalized],
+      };
+    });
+  };
+
+  const handleRemoveTemporaryScanPattern = (pattern: string) => {
+    if (!selectedProjectId) return;
+    setTemporaryScanPatterns((current) => ({
+      ...current,
+      [selectedProjectId]: (current[selectedProjectId] ?? []).filter(
+        (value) => value !== pattern,
+      ),
+    }));
+  };
+
   const handleStartScan = async () => {
     if (!selectedProjectId) return;
     setProjectError(null);
     try {
-      const response = await startScan(selectedProjectId);
+      const response = await startScan(
+        selectedProjectId,
+        temporaryScanPatterns[selectedProjectId] ?? [],
+      );
       const report = await getScanReport(response.operationId);
       setScanReports((current) => ({
         ...current,
@@ -448,6 +479,8 @@ export function App() {
       isAddingProject={isAddingProject}
       onAddProject={handleAddProject}
       onCancelScan={handleCancelScan}
+      onAddTemporaryScanPattern={handleAddTemporaryScanPattern}
+      onRemoveTemporaryScanPattern={handleRemoveTemporaryScanPattern}
       onSelectProject={setSelectedProjectId}
       onStartScan={handleStartScan}
       onRetryHealth={() => {
@@ -480,6 +513,11 @@ export function App() {
       fileTotal={selectedProjectId ? (fileTotals[selectedProjectId] ?? 0) : 0}
       scanReport={
         selectedProjectId ? (scanReports[selectedProjectId] ?? null) : null
+      }
+      temporaryScanPatterns={
+        selectedProjectId
+          ? (temporaryScanPatterns[selectedProjectId] ?? [])
+          : []
       }
       selectedProjectId={selectedProjectId}
     />

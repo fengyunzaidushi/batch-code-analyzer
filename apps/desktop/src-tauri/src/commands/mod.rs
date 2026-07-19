@@ -22,8 +22,8 @@ use batch_code_analyzer_ipc_contracts::{
     ProjectRunSettingsUpdateResponse, ProjectSummaryDto, RunBlockingReasonDto, RunCreateRequest,
     RunCreateResponse, RunExecuteRequest, RunExecuteResponse, RunPreviewRequest,
     RunPreviewResponse, RunPreviewTaskDto, RunSummaryDto, ScanCancelRequest, ScanCancelResponse,
-    ScanOperationStatus, ScanReportDto, ScanStartRequest, ScanStartResponse, DTO_SCHEMA_VERSION,
-    HEALTH_CHECK_SCHEMA_VERSION,
+    ScanOperationStatus, ScanReportDto, ScanRuleSummaryDto, ScanStartRequest, ScanStartResponse,
+    DTO_SCHEMA_VERSION, HEALTH_CHECK_SCHEMA_VERSION,
 };
 use batch_code_analyzer_model_providers::{ModelProvider, OpenAiResponsesProvider, ProviderError};
 use batch_code_analyzer_persistence::DatabaseHealth;
@@ -565,6 +565,14 @@ pub(crate) async fn scan_start(
         .ok_or_else(|| project_not_found(request.project_id.as_str()))?;
     let operation_id = new_scan_operation_id();
     let cancellation = ScanCancellation::new();
+    let temporary_patterns = request
+        .temporary_excluded_patterns
+        .unwrap_or_default()
+        .into_iter()
+        .map(|pattern| pattern.trim().to_owned())
+        .filter(|pattern| !pattern.is_empty())
+        .take(100)
+        .collect::<Vec<_>>();
     let report = scan_report(
         &operation_id,
         &project.id,
@@ -593,8 +601,13 @@ pub(crate) async fn scan_start(
     tauri::async_runtime::spawn(async move {
         let project_for_scan = project.clone();
         let cancellation_for_scan = cancellation.clone();
+        let temporary_patterns_for_scan = temporary_patterns.clone();
         let scan_result = tauri::async_runtime::spawn_blocking(move || {
-            ScanService::scan_project(&project_for_scan, cancellation_for_scan)
+            ScanService::scan_project_with_patterns(
+                &project_for_scan,
+                cancellation_for_scan,
+                temporary_patterns_for_scan,
+            )
         })
         .await;
         let report = match scan_result {
@@ -713,6 +726,13 @@ fn scan_report(
         sensitive_files: report.sensitive_files.clone(),
         symlink_files: report.symlink_files.clone(),
         invalid_gitignore_rules: report.invalid_gitignore_rules.clone(),
+        rules: ScanRuleSummaryDto {
+            builtin_directories: report.builtin_directories.clone(),
+            builtin_extensions: report.builtin_extensions.clone(),
+            gitignore_rules: report.gitignore_rules.clone(),
+            temporary_excluded_patterns: report.temporary_excluded_patterns.clone(),
+            sensitive_detection_enabled: report.sensitive_detection_enabled,
+        },
         cancelled: report.cancelled,
         file_count,
         generation,

@@ -88,6 +88,7 @@ scan_get_report
 ```ts
 interface ScanStartRequest {
   projectId: ProjectId;
+  temporaryExcludedPatterns?: string[];
 }
 
 interface ScanStartResponse {
@@ -115,11 +116,21 @@ interface ScanReportDto {
   generation: number | null;
   errorCode: string | null;
   updatedAt: Rfc3339Timestamp;
+  rules: ScanRuleSummaryDto;
+}
+
+interface ScanRuleSummaryDto {
+  builtinDirectories: string[];
+  builtinExtensions: string[];
+  gitignoreRules: string[];
+  temporaryExcludedPatterns: string[];
+  sensitiveDetectionEnabled: boolean;
 }
 ```
 
 完成或取消前不会提交正式扫描代次；进度和最终报告通过
 `scan://progress` Event 发送，`scan_get_report` 可按 operation ID 查询最近状态。
+临时排除模式只在当前项目会话的扫描请求中生效，不会修改仓库 `.gitignore` 或持久化为项目规则。
 
 ### 4.3 Context
 

@@ -21,6 +21,7 @@ import type {
   ProjectRunSettingsUpdateRequest,
   ProjectSummaryDto,
   RunPreviewResponse,
+  ScanRuleSummaryDto,
   ScanReportDto,
 } from "@batch-code-analyzer/ipc-types";
 
@@ -53,6 +54,8 @@ interface AppShellProps {
   activeRun?: ActiveRunSummary | null;
   onAddProject?: () => void;
   onCancelScan?: () => void;
+  onAddTemporaryScanPattern?: (pattern: string) => void;
+  onRemoveTemporaryScanPattern?: (pattern: string) => void;
   onRetryHealth?: () => void;
   onSetFileIncluded?: (fileId: string, included: boolean) => Promise<void>;
   onPreviewRun?: (input: { prompt: string }) => void;
@@ -80,6 +83,7 @@ interface AppShellProps {
   scanReport?: ScanReportDto | null;
   selectedProjectId?: string | null;
   isAddingProject?: boolean;
+  temporaryScanPatterns?: readonly string[];
 }
 
 type WorkspaceTab = "prompt" | "api";
@@ -97,6 +101,8 @@ export function AppShell({
   activeRun = null,
   onAddProject = () => undefined,
   onCancelScan = () => undefined,
+  onAddTemporaryScanPattern = () => undefined,
+  onRemoveTemporaryScanPattern = () => undefined,
   onRetryHealth = () => undefined,
   onSetFileIncluded = async () => undefined,
   onPreviewRun = () => undefined,
@@ -121,6 +127,7 @@ export function AppShell({
   scanReport = null,
   selectedProjectId: controlledSelectedProjectId,
   isAddingProject = false,
+  temporaryScanPatterns = [],
 }: AppShellProps) {
   const [internalSelectedProjectId, setInternalSelectedProjectId] = useState<
     string | null
@@ -174,6 +181,8 @@ export function AppShell({
           fileRecords={fileRecords}
           fileTotal={fileTotal}
           onCancelScan={onCancelScan}
+          onAddTemporaryScanPattern={onAddTemporaryScanPattern}
+          onRemoveTemporaryScanPattern={onRemoveTemporaryScanPattern}
           onSetFileIncluded={onSetFileIncluded}
           onPreviewRun={() => onPreviewRun({ prompt })}
           onPromptChange={setPrompt}
@@ -181,6 +190,7 @@ export function AppShell({
           onStartScan={onStartScan}
           project={selectedProject}
           scanReport={scanReport}
+          temporaryScanPatterns={temporaryScanPatterns}
           tab={tab}
           setTab={setTab}
           apiProfileError={apiProfileError}
@@ -442,6 +452,8 @@ function ProjectWorkspace({
   fileRecords,
   fileTotal,
   onCancelScan,
+  onAddTemporaryScanPattern,
+  onRemoveTemporaryScanPattern,
   onPreviewRun,
   onPromptChange,
   prompt,
@@ -449,6 +461,7 @@ function ProjectWorkspace({
   onStartScan,
   project,
   scanReport,
+  temporaryScanPatterns,
   tab,
   setTab,
   onDeleteApiProfile,
@@ -464,6 +477,8 @@ function ProjectWorkspace({
   fileRecords: readonly FileRecordSummaryDto[];
   fileTotal: number;
   onCancelScan: () => void;
+  onAddTemporaryScanPattern: (pattern: string) => void;
+  onRemoveTemporaryScanPattern: (pattern: string) => void;
   onPreviewRun: () => void;
   onPromptChange: (value: string) => void;
   prompt: string;
@@ -471,6 +486,7 @@ function ProjectWorkspace({
   onStartScan: () => void;
   project: ShellProject | null;
   scanReport: ScanReportDto | null;
+  temporaryScanPatterns: readonly string[];
   tab: WorkspaceTab;
   setTab: (tab: WorkspaceTab) => void;
   onDeleteApiProfile: (id: string) => Promise<void>;
@@ -509,6 +525,8 @@ function ProjectWorkspace({
           fileRecords={fileRecords}
           fileTotal={fileTotal}
           onCancelScan={onCancelScan}
+          onAddTemporaryScanPattern={onAddTemporaryScanPattern}
+          onRemoveTemporaryScanPattern={onRemoveTemporaryScanPattern}
           onPreviewRun={onPreviewRun}
           onPromptChange={onPromptChange}
           prompt={prompt}
@@ -516,6 +534,7 @@ function ProjectWorkspace({
           onStartScan={onStartScan}
           project={project}
           scanReport={scanReport}
+          temporaryScanPatterns={temporaryScanPatterns}
         />
       ) : (
         <ApiWorkspace
@@ -613,6 +632,8 @@ function PromptWorkspace({
   fileRecords,
   fileTotal,
   onCancelScan,
+  onAddTemporaryScanPattern,
+  onRemoveTemporaryScanPattern,
   onPreviewRun,
   onPromptChange,
   onSetFileIncluded,
@@ -620,8 +641,11 @@ function PromptWorkspace({
   project,
   prompt,
   scanReport,
+  temporaryScanPatterns,
 }: {
   onCancelScan: () => void;
+  onAddTemporaryScanPattern: (pattern: string) => void;
+  onRemoveTemporaryScanPattern: (pattern: string) => void;
   fileRecords: readonly FileRecordSummaryDto[];
   fileTotal: number;
   onPreviewRun: () => void;
@@ -631,6 +655,7 @@ function PromptWorkspace({
   project: ShellProject | null;
   prompt: string;
   scanReport: ScanReportDto | null;
+  temporaryScanPatterns: readonly string[];
 }) {
   const hasProject = project !== null;
   const includedFileCount =
@@ -675,6 +700,12 @@ function PromptWorkspace({
           </div>
         </div>
       </section>
+      <ScanRuleEditor
+        onAddPattern={onAddTemporaryScanPattern}
+        onRemovePattern={onRemoveTemporaryScanPattern}
+        report={scanReport?.rules ?? null}
+        temporaryPatterns={temporaryScanPatterns}
+      />
       <section className="task-area-band">
         <div className="task-area-heading">
           <div>
@@ -859,6 +890,132 @@ function SummaryMetric({ label, value }: { label: string; value: string }) {
       <span>{label}</span>
       <strong>{value}</strong>
     </div>
+  );
+}
+
+function ScanRuleEditor({
+  onAddPattern,
+  onRemovePattern,
+  report,
+  temporaryPatterns,
+}: {
+  onAddPattern: (pattern: string) => void;
+  onRemovePattern: (pattern: string) => void;
+  report: ScanRuleSummaryDto | null;
+  temporaryPatterns: readonly string[];
+}) {
+  const [pattern, setPattern] = useState("");
+  const addPattern = () => {
+    const normalized = pattern.trim();
+    if (!normalized) return;
+    onAddPattern(normalized);
+    setPattern("");
+  };
+  const rules = report ?? {
+    builtinDirectories: [],
+    builtinExtensions: [],
+    gitignoreRules: [],
+    temporaryExcludedPatterns: [],
+    sensitiveDetectionEnabled: true,
+  };
+
+  return (
+    <section className="scan-rules-band">
+      <div className="scan-rules-heading">
+        <div>
+          <p className="eyebrow">SCAN RULES</p>
+          <h2>排除规则</h2>
+        </div>
+        <span className="scan-rules-status">
+          敏感检测：{rules.sensitiveDetectionEnabled ? "开启" : "关闭"}
+        </span>
+      </div>
+      <div className="scan-rule-grid">
+        <details open>
+          <summary>内置目录 ({rules.builtinDirectories.length})</summary>
+          <div className="scan-rule-values">
+            {rules.builtinDirectories.length ? (
+              rules.builtinDirectories.map((value) => (
+                <code key={value}>{value}</code>
+              ))
+            ) : (
+              <span className="scan-rule-empty">扫描后显示</span>
+            )}
+          </div>
+        </details>
+        <details>
+          <summary>内置扩展名 ({rules.builtinExtensions.length})</summary>
+          <div className="scan-rule-values">
+            {rules.builtinExtensions.length ? (
+              rules.builtinExtensions.map((value) => (
+                <code key={value}>.{value}</code>
+              ))
+            ) : (
+              <span className="scan-rule-empty">扫描后显示</span>
+            )}
+          </div>
+        </details>
+        <details>
+          <summary>项目 .gitignore ({rules.gitignoreRules.length})</summary>
+          <div className="scan-rule-values">
+            {rules.gitignoreRules.length ? (
+              rules.gitignoreRules.map((value, index) => (
+                <code key={`${value}-${index}`}>{value}</code>
+              ))
+            ) : (
+              <span className="scan-rule-empty">没有有效规则</span>
+            )}
+          </div>
+        </details>
+        <div className="scan-rule-temporary">
+          <label htmlFor="temporary-scan-pattern">临时排除模式</label>
+          <div className="scan-rule-input">
+            <input
+              id="temporary-scan-pattern"
+              onChange={(event) => setPattern(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  addPattern();
+                }
+              }}
+              placeholder="例如 docs/** 或 *.log"
+              value={pattern}
+            />
+            <button
+              aria-label="添加临时排除模式"
+              className="icon-button"
+              disabled={!pattern.trim()}
+              onClick={addPattern}
+              title="添加临时排除模式"
+              type="button"
+            >
+              <Plus aria-hidden="true" size={16} />
+            </button>
+          </div>
+          <div className="scan-rule-values scan-rule-temporary-values">
+            {temporaryPatterns.length ? (
+              temporaryPatterns.map((value) => (
+                <span className="scan-rule-chip" key={value}>
+                  <code>{value}</code>
+                  <button
+                    aria-label={`移除临时排除模式 ${value}`}
+                    className="icon-button"
+                    onClick={() => onRemovePattern(value)}
+                    title={`移除临时排除模式 ${value}`}
+                    type="button"
+                  >
+                    <X aria-hidden="true" size={12} />
+                  </button>
+                </span>
+              ))
+            ) : (
+              <span className="scan-rule-empty">本次会话未添加</span>
+            )}
+          </div>
+        </div>
+      </div>
+    </section>
   );
 }
 

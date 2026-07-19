@@ -66,6 +66,22 @@ describe("AppShell", () => {
     expect(screen.getByText("API 配置档案")).toBeInTheDocument();
   });
 
+  it("adds a temporary scan exclusion pattern for the current session", async () => {
+    const user = userEvent.setup();
+    const onAddTemporaryScanPattern = vi.fn();
+    render(
+      <AppShell
+        onAddTemporaryScanPattern={onAddTemporaryScanPattern}
+        projects={[project()]}
+      />,
+    );
+
+    await user.type(screen.getByLabelText("临时排除模式"), "docs/**");
+    await user.click(screen.getByRole("button", { name: "添加临时排除模式" }));
+
+    expect(onAddTemporaryScanPattern).toHaveBeenCalledWith("docs/**");
+  });
+
   it("renders API profile metadata without exposing a key", async () => {
     const user = userEvent.setup();
     const profile: ApiProfileSummaryDto = {

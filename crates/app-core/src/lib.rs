@@ -350,9 +350,25 @@ impl<'database> ScanService<'database> {
         project: &Project,
         cancellation: ScanCancellation,
     ) -> Result<ScanResult, ScanServiceError> {
+        Self::scan_project_with_patterns(project, cancellation, Vec::new())
+    }
+
+    /// Runs the scanner with temporary user patterns that apply only to this
+    /// scan session.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable scan error without exposing scanner paths or driver
+    /// diagnostics.
+    pub fn scan_project_with_patterns(
+        project: &Project,
+        cancellation: ScanCancellation,
+        temporary_excluded_patterns: Vec<String>,
+    ) -> Result<ScanResult, ScanServiceError> {
         Scanner::new(ScanConfig {
             root: project.source_directory.clone().into(),
             cancellation,
+            excluded_patterns: temporary_excluded_patterns,
             ..ScanConfig::new(project.source_directory.clone())
         })
         .scan()

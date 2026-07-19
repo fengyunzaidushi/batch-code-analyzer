@@ -113,6 +113,11 @@ pub struct ImportReport {
     pub sensitive_files: Vec<String>,
     pub symlink_files: Vec<String>,
     pub invalid_gitignore_rules: Vec<String>,
+    pub builtin_directories: Vec<String>,
+    pub builtin_extensions: Vec<String>,
+    pub gitignore_rules: Vec<String>,
+    pub temporary_excluded_patterns: Vec<String>,
+    pub sensitive_detection_enabled: bool,
     pub cancelled: bool,
 }
 
@@ -152,7 +157,13 @@ impl Scanner {
     pub fn scan(&self) -> Result<ScanResult, ScanError> {
         let root =
             SafeRoot::new(&self.config.root).map_err(|error| ScanError::Root(error.code()))?;
-        let mut report = ImportReport::default();
+        let mut report = ImportReport {
+            builtin_directories: self.config.excluded_directories.iter().cloned().collect(),
+            builtin_extensions: self.config.excluded_extensions.iter().cloned().collect(),
+            temporary_excluded_patterns: self.config.excluded_patterns.clone(),
+            sensitive_detection_enabled: self.config.detect_sensitive_content,
+            ..ImportReport::default()
+        };
         let mut files = Vec::new();
         let mut rules = Vec::new();
         if self.config.use_gitignore {
@@ -467,7 +478,12 @@ fn load_gitignore(
             continue;
         }
         match parse_rule(trimmed, base) {
-            Ok(rule) => rules.push(rule),
+            Ok(rule) => {
+                if !report.gitignore_rules.iter().any(|value| value == trimmed) {
+                    report.gitignore_rules.push(trimmed.into());
+                }
+                rules.push(rule);
+            }
             Err(()) => report.invalid_gitignore_rules.push(trimmed.into()),
         }
     }
@@ -633,6 +649,37 @@ mod tests {
             .report
             .excluded_by_reason
             .contains_key("gitignore_or_user_pattern"));
+        assert_eq!(
+            result.report.gitignore_rules,
+            vec!["ignored/".to_owned(), "!ignored/keep.rs".to_owned()]
+        );
+        assert!(result
+            .report
+            .builtin_directories
+            .contains(&"node_modules".to_owned()));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn temporary_patterns_are_reported_and_exclude_matching_files() {
+        let root = temp_root("temporary-patterns");
+        fs::create_dir_all(root.join("notes")).unwrap();
+        fs::write(root.join("notes/draft.rs"), "fn draft() {}\n").unwrap();
+        let mut config = ScanConfig::new(&root);
+        config.excluded_patterns = vec!["notes/**".into()];
+
+        let result = Scanner::new(config).scan().unwrap();
+        assert_eq!(
+            result.report.temporary_excluded_patterns,
+            vec!["notes/**".to_owned()]
+        );
+        assert!(result.files.iter().any(|file| {
+            file.relative_path == "notes/draft.rs"
+                && file.decision
+                    == FileDecision::Excluded {
+                        reason: "gitignore_or_user_pattern".into(),
+                    }
+        }));
         fs::remove_dir_all(root).unwrap();
     }
 

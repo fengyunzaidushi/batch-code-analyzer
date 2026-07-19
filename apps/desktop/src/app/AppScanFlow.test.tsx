@@ -68,7 +68,7 @@ describe("App scan flow", () => {
     render(<App />);
 
     await user.click(await screen.findByRole("button", { name: "扫描仓库" }));
-    expect(mocks.startScan).toHaveBeenCalledWith(detail.id);
+    expect(mocks.startScan).toHaveBeenCalledWith(detail.id, []);
     expect(
       await screen.findByRole("button", { name: "取消扫描" }),
     ).toBeInTheDocument();
@@ -181,6 +181,13 @@ function scanReport(status: ScanReportDto["status"]): ScanReportDto {
     invalidGitignoreRules: [],
     operationId: "scan-operation-1",
     projectId: "project-scan",
+    rules: {
+      builtinDirectories: [],
+      builtinExtensions: [],
+      gitignoreRules: [],
+      sensitiveDetectionEnabled: true,
+      temporaryExcludedPatterns: [],
+    },
     scannedFiles: status === "running" ? 1 : 2,
     sensitiveFiles: [],
     status,

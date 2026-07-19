@@ -301,6 +301,9 @@ pub enum ScanOperationStatus {
 #[serde(rename_all = "camelCase")]
 pub struct ScanStartRequest {
     pub project_id: ProjectId,
+    #[serde(default)]
+    #[ts(optional)]
+    pub temporary_excluded_patterns: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
@@ -350,11 +353,22 @@ pub struct ScanReportDto {
     pub sensitive_files: Vec<String>,
     pub symlink_files: Vec<String>,
     pub invalid_gitignore_rules: Vec<String>,
+    pub rules: ScanRuleSummaryDto,
     pub cancelled: bool,
     pub file_count: Option<u32>,
     pub generation: Option<u32>,
     pub error_code: Option<String>,
     pub updated_at: Rfc3339Timestamp,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanRuleSummaryDto {
+    pub builtin_directories: Vec<String>,
+    pub builtin_extensions: Vec<String>,
+    pub gitignore_rules: Vec<String>,
+    pub temporary_excluded_patterns: Vec<String>,
+    pub sensitive_detection_enabled: bool,
 }
 
 impl From<&DomainProject> for ProjectSummaryDto {
@@ -763,6 +777,7 @@ pub fn export_types(out_dir: &Path) -> Result<(), ExportError> {
     ScanCancelRequest::export_all(&config)?;
     ScanCancelResponse::export_all(&config)?;
     ScanReportDto::export_all(&config)?;
+    ScanRuleSummaryDto::export_all(&config)?;
     FileListRequest::export_all(&config)?;
     FileSetIncludedRequest::export_all(&config)?;
     FileSetIncludedResponse::export_all(&config)?;

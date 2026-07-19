@@ -64,6 +64,7 @@ export type { ScanCancelRequest } from "./generated/ScanCancelRequest";
 export type { ScanCancelResponse } from "./generated/ScanCancelResponse";
 export type { ScanOperationStatus } from "./generated/ScanOperationStatus";
 export type { ScanReportDto } from "./generated/ScanReportDto";
+export type { ScanRuleSummaryDto } from "./generated/ScanRuleSummaryDto";
 export type { ScanStartRequest } from "./generated/ScanStartRequest";
 export type { ScanStartResponse } from "./generated/ScanStartResponse";
 export type { TaskId } from "./generated/TaskId";
