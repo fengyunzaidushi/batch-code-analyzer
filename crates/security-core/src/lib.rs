@@ -214,19 +214,68 @@ fn looks_like_assignment_secret(line: &str) -> bool {
     let Some((key, value)) = line.split_once('=') else {
         return false;
     };
-    let key = key.trim();
-    let value = value.trim().trim_matches(['"', '\'']);
-    let sensitive_key = [
-        "api_key",
-        "apikey",
-        "secret",
-        "token",
-        "password",
-        "private_key",
-    ]
-    .iter()
-    .any(|candidate| key.to_ascii_lowercase().contains(candidate));
-    sensitive_key && value.len() >= 12 && !value.starts_with("${")
+    let raw_value = value.trim();
+    let value = raw_value.trim_matches(['"', '\'', ',', ';', ')', ']']);
+    if value.len() < 12 || value.starts_with("${") || is_placeholder_secret(value) {
+        return false;
+    }
+
+    let key_words = assignment_key_words(key);
+    let sensitive_key = key_words
+        .iter()
+        .any(|word| matches!(word.as_str(), "secret" | "token" | "password"))
+        || key_words
+            .windows(2)
+            .any(|words| matches!(words, [first, second] if (first == "api" || first == "private") && second == "key"));
+    if !sensitive_key {
+        return false;
+    }
+
+    // Expressions in source code are not credentials. Keep accepting compact
+    // unquoted env-file values, while ignoring property access and calls such
+    // as `config.apiKey`, `process.env.API_KEY`, and `chunk.usage.prompt_tokens`.
+    let quoted = raw_value.starts_with(['"', '\'']);
+    quoted
+        || (!value.chars().any(char::is_whitespace)
+            && !value.contains(['.', '(', ')', '?', ':', '+']))
+}
+
+fn assignment_key_words(key: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut previous_was_lowercase = false;
+    let flush = |current: &mut String, words: &mut Vec<String>| {
+        if !current.is_empty() {
+            words.push(std::mem::take(current));
+        }
+    };
+    for character in key.chars() {
+        if !character.is_ascii_alphanumeric() {
+            flush(&mut current, &mut words);
+            previous_was_lowercase = false;
+            continue;
+        }
+        if character.is_ascii_uppercase() && previous_was_lowercase {
+            flush(&mut current, &mut words);
+        }
+        current.push(character.to_ascii_lowercase());
+        previous_was_lowercase = character.is_ascii_lowercase();
+    }
+    flush(&mut current, &mut words);
+    words
+}
+
+fn is_placeholder_secret(value: &str) -> bool {
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "your-api-key-here"
+            | "your-api-key"
+            | "changeme"
+            | "change-me"
+            | "replace-me"
+            | "example"
+            | "dummy"
+    )
 }
 
 /// Masks a potentially sensitive value without retaining a usable secret.
@@ -360,6 +409,18 @@ mod tests {
         assert_eq!(findings.len(), 1);
         assert!(!findings[0].masked.contains("super-secret-value"));
         assert_eq!(findings[0].kind, "assignment_secret");
+    }
+
+    #[test]
+    fn assignment_detection_ignores_source_expressions_and_placeholders() {
+        let source = [
+            "config.llm.apiKey = key.slice(0, 8) + \"...\" + key.slice(-4);",
+            "promptTokens = chunk.usage.prompt_tokens ?? 0;",
+            "const apiKey = process.env.INKOS_LLM_API_KEY ?? \"\";",
+            "\"INKOS_LLM_API_KEY=your-api-key-here\",",
+        ]
+        .join("\n");
+        assert!(detect_secrets(&source).is_empty());
     }
 
     #[test]
