@@ -10,6 +10,7 @@ import {
   Search,
   Settings2,
   Sparkles,
+  X,
 } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
 import type {
@@ -18,10 +19,10 @@ import type {
   FileRecordSummaryDto,
   ProjectPathStatus,
   ProjectSummaryDto,
+  RunPreviewResponse,
   ScanReportDto,
 } from "@batch-code-analyzer/ipc-types";
 
-import { MarkdownPreview } from "../features/markdown/MarkdownPreview";
 import { FileTreeTable } from "../features/tasks/FileTreeTable";
 
 export type ShellProject = ProjectSummaryDto & {
@@ -51,6 +52,12 @@ interface AppShellProps {
   onCancelScan?: () => void;
   onRetryHealth?: () => void;
   onSetFileIncluded?: (fileId: string, included: boolean) => Promise<void>;
+  onPreviewRun?: (input: { prompt: string }) => void;
+  onCreateRun?: () => Promise<void> | void;
+  onCloseRunPreview?: () => void;
+  runPreview?: RunPreviewResponse | null;
+  runError?: string | null;
+  isCreatingRun?: boolean;
   onDeleteApiProfile?: (id: string) => Promise<void>;
   onFetchApiModels?: (id: string) => Promise<void>;
   onPutApiProfileSecret?: (request: {
@@ -71,6 +78,9 @@ interface AppShellProps {
 
 type WorkspaceTab = "prompt" | "api";
 
+const DEFAULT_PROMPT =
+  "请结合提供的项目上下文，用通俗但准确的语言解释当前代码文件。\n\n请说明核心职责、关键输入输出、协作模块和修改影响。";
+
 export function AppShell({
   apiProfileError = null,
   apiProfiles = [],
@@ -83,6 +93,12 @@ export function AppShell({
   onCancelScan = () => undefined,
   onRetryHealth = () => undefined,
   onSetFileIncluded = async () => undefined,
+  onPreviewRun = () => undefined,
+  onCreateRun = async () => undefined,
+  onCloseRunPreview = () => undefined,
+  runPreview = null,
+  runError = null,
+  isCreatingRun = false,
   onDeleteApiProfile = async () => undefined,
   onFetchApiModels = async () => undefined,
   onPutApiProfileSecret = async () => {
@@ -104,7 +120,7 @@ export function AppShell({
   >(projects[0]?.id ?? null);
   const [search, setSearch] = useState("");
   const [tab, setTab] = useState<WorkspaceTab>("prompt");
-  const [previewOpen, setPreviewOpen] = useState(false);
+  const [prompt, setPrompt] = useState(DEFAULT_PROMPT);
   const selectedProjectId =
     controlledSelectedProjectId === undefined
       ? (internalSelectedProjectId ?? projects[0]?.id ?? null)
@@ -151,8 +167,10 @@ export function AppShell({
           fileRecords={fileRecords}
           fileTotal={fileTotal}
           onCancelScan={onCancelScan}
-          onPreview={() => setPreviewOpen(true)}
           onSetFileIncluded={onSetFileIncluded}
+          onPreviewRun={() => onPreviewRun({ prompt })}
+          onPromptChange={setPrompt}
+          prompt={prompt}
           onStartScan={onStartScan}
           project={selectedProject}
           scanReport={scanReport}
@@ -167,11 +185,18 @@ export function AppShell({
           onTestApiProfile={onTestApiProfile}
         />
       </div>
-      <MarkdownPreview
-        content={"# 结果预览\n\n完成后，安全的 Markdown 结果会在这里打开。"}
-        onClose={() => setPreviewOpen(false)}
-        open={previewOpen}
+      <RunPreviewPanel
+        error={runError}
+        isCreating={isCreatingRun}
+        onClose={onCloseRunPreview}
+        onCreate={() => void onCreateRun()}
+        preview={runPreview}
       />
+      {runError && !runPreview ? (
+        <div className="run-error-toast" role="alert">
+          {runError}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -409,7 +434,9 @@ function ProjectWorkspace({
   fileRecords,
   fileTotal,
   onCancelScan,
-  onPreview,
+  onPreviewRun,
+  onPromptChange,
+  prompt,
   onSetFileIncluded,
   onStartScan,
   project,
@@ -428,7 +455,9 @@ function ProjectWorkspace({
   fileRecords: readonly FileRecordSummaryDto[];
   fileTotal: number;
   onCancelScan: () => void;
-  onPreview: () => void;
+  onPreviewRun: () => void;
+  onPromptChange: (value: string) => void;
+  prompt: string;
   onSetFileIncluded: (fileId: string, included: boolean) => Promise<void>;
   onStartScan: () => void;
   project: ShellProject | null;
@@ -468,7 +497,9 @@ function ProjectWorkspace({
           fileRecords={fileRecords}
           fileTotal={fileTotal}
           onCancelScan={onCancelScan}
-          onPreview={onPreview}
+          onPreviewRun={onPreviewRun}
+          onPromptChange={onPromptChange}
+          prompt={prompt}
           onSetFileIncluded={onSetFileIncluded}
           onStartScan={onStartScan}
           project={project}
@@ -568,24 +599,25 @@ function PromptWorkspace({
   fileRecords,
   fileTotal,
   onCancelScan,
-  onPreview,
+  onPreviewRun,
+  onPromptChange,
   onSetFileIncluded,
   onStartScan,
   project,
+  prompt,
   scanReport,
 }: {
   onCancelScan: () => void;
   fileRecords: readonly FileRecordSummaryDto[];
   fileTotal: number;
-  onPreview: () => void;
+  onPreviewRun: () => void;
+  onPromptChange: (value: string) => void;
   onSetFileIncluded: (fileId: string, included: boolean) => Promise<void>;
   onStartScan: () => void;
   project: ShellProject | null;
+  prompt: string;
   scanReport: ScanReportDto | null;
 }) {
-  const [prompt, setPrompt] = useState(
-    "请结合提供的项目上下文，用通俗但准确的语言解释当前代码文件。\n\n请说明核心职责、关键输入输出、协作模块和修改影响。",
-  );
   const hasProject = project !== null;
   const includedFileCount =
     scanReport?.status === "completed"
@@ -605,7 +637,7 @@ function PromptWorkspace({
         <textarea
           disabled={!hasProject}
           id="project-prompt"
-          onChange={(event) => setPrompt(event.target.value)}
+          onChange={(event) => onPromptChange(event.target.value)}
           value={prompt}
         />
         <div className="prompt-actions">
@@ -654,7 +686,7 @@ function PromptWorkspace({
             <button
               className="primary-button"
               disabled={!hasProject}
-              onClick={onPreview}
+              onClick={onPreviewRun}
               type="button"
             >
               <LayoutGrid size={15} />
@@ -694,6 +726,117 @@ function PromptWorkspace({
       </section>
     </div>
   );
+}
+
+function RunPreviewPanel({
+  error,
+  isCreating,
+  onClose,
+  onCreate,
+  preview,
+}: {
+  error: string | null;
+  isCreating: boolean;
+  onClose: () => void;
+  onCreate: () => void;
+  preview: RunPreviewResponse | null;
+}) {
+  if (!preview) return null;
+  const canCreate = preview.blockers.length === 0 && !isCreating;
+  return (
+    <div className="run-preview-backdrop">
+      <section
+        aria-labelledby="run-preview-title"
+        aria-modal="true"
+        className="run-preview-panel"
+        role="dialog"
+      >
+        <div className="run-preview-heading">
+          <div>
+            <p className="eyebrow">RUN PREVIEW</p>
+            <h2 id="run-preview-title">确认本次分析</h2>
+          </div>
+          <button
+            aria-label="关闭 Run 预览"
+            className="icon-button"
+            onClick={onClose}
+            title="关闭"
+            type="button"
+          >
+            <X aria-hidden="true" size={16} />
+          </button>
+        </div>
+        <div className="run-preview-summary">
+          <SummaryMetric
+            label="目标文件"
+            value={String(preview.tasks.length)}
+          />
+          <SummaryMetric label="模型" value={preview.model ?? "未配置"} />
+          <SummaryMetric
+            label="提示词"
+            value={
+              preview.promptSource === "override" ? "当前编辑" : "项目默认"
+            }
+          />
+        </div>
+        {preview.blockers.length ? (
+          <div className="run-preview-blockers" role="alert">
+            <strong>暂不能创建 Run</strong>
+            {preview.blockers.map((blocker, index) => (
+              <div key={blocker.code + (blocker.relativePath ?? "") + index}>
+                <span>{blocker.message}</span>
+                {blocker.relativePath ? (
+                  <code>{blocker.relativePath}</code>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="run-preview-ready" role="status">
+            将为每个目标文件创建一个 queued Task，暂不发送模型请求。
+          </div>
+        )}
+        {error ? (
+          <div className="project-error api-error" role="alert">
+            {error}
+          </div>
+        ) : null}
+        <div className="run-preview-files">
+          {preview.tasks.slice(0, 12).map((task) => (
+            <div className="run-preview-file" key={task.fileId}>
+              <span>{task.relativePath}</span>
+              <small>{formatBytes(task.sizeBytes)}</small>
+            </div>
+          ))}
+          {preview.tasks.length > 12 ? (
+            <small>还有 {preview.tasks.length - 12} 个文件</small>
+          ) : null}
+        </div>
+        <div className="run-preview-actions">
+          <button className="outline-button" onClick={onClose} type="button">
+            返回修改
+          </button>
+          <button
+            className="primary-button"
+            disabled={!canCreate}
+            onClick={onCreate}
+            type="button"
+          >
+            {isCreating ? "正在创建" : "创建 Run"}
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function formatBytes(value: number | bigint): string {
+  const bytes = Number(value);
+  if (bytes < 1024) return String(bytes) + " B";
+  if (bytes < 1024 * 1024) {
+    return String(Math.round(bytes / 1024)) + " KB";
+  }
+  return (bytes / (1024 * 1024)).toFixed(1) + " MB";
 }
 
 function SummaryMetric({ label, value }: { label: string; value: string }) {

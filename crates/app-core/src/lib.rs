@@ -5,6 +5,7 @@
 use std::{
     collections::BTreeMap,
     fs,
+    hash::{Hash, Hasher},
     path::Path,
     sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
@@ -12,9 +13,11 @@ use std::{
 
 use batch_code_analyzer_domain::{
     ApiModelInfo, ApiProfile, ApiProfileConnectionStatus, ApiProfileId, ApiProtocol, ApiRouting,
-    ContextStatus, ExecutionDefaults, FileRecord, FileRecordId, FileResultStatus, FileSourceStatus,
-    FilterRules, Project, ProjectContext, ProjectId, ProjectPathStatus, Rfc3339Timestamp,
-    SensitiveFinding,
+    ContextStatus, ExecutionDefaults, FileRecord, FileRecordId, FileResultStatus, FileSnapshot,
+    FileSourceStatus, FilterRules, Project, ProjectContext, ProjectId, ProjectPathStatus,
+    RetryPolicy, Rfc3339Timestamp, Run, RunId, RunSnapshot, RunStateMachine, RunStatus,
+    RunTransition, SensitiveFinding, Task, TaskId, TaskStateMachine, TaskStatus, TaskTransition,
+    TaskValueSource,
 };
 use batch_code_analyzer_persistence::{
     Database, PersistenceError, ProjectRowMetadata, LATEST_SCHEMA_VERSION,
@@ -32,6 +35,8 @@ const DEFAULT_PROMPT: &str = "请结合提供的项目上下文，用通俗但�
 static NEXT_PROJECT_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_FILE_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_API_PROFILE_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_RUN_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum ProjectServiceError {
@@ -144,6 +149,77 @@ pub struct ProjectAddResult {
     pub project: Project,
     pub created: bool,
     pub config_mirror_warning: bool,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RunPreparationInput {
+    pub prompt: Option<String>,
+    pub model: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunPreview {
+    pub project_id: ProjectId,
+    pub tasks: Vec<RunPreviewTask>,
+    pub blockers: Vec<RunBlockingReason>,
+    pub model: Option<String>,
+    pub prompt_source: TaskValueSource,
+    pub model_source: TaskValueSource,
+    pub output_directory: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunPreviewTask {
+    pub file_id: FileRecordId,
+    pub relative_path: String,
+    pub size_bytes: u64,
+    pub content_hash: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunBlockingReason {
+    pub code: &'static str,
+    pub message: &'static str,
+    pub file_id: Option<FileRecordId>,
+    pub relative_path: Option<String>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub enum RunServiceError {
+    NotFound,
+    ActiveRun,
+    Blocked(RunBlockingReason),
+    Persistence(PersistenceError),
+}
+
+impl RunServiceError {
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::NotFound => "project_not_found",
+            Self::ActiveRun => "run_active_exists",
+            Self::Blocked(reason) => reason.code,
+            Self::Persistence(error) => error.code(),
+        }
+    }
+}
+
+impl std::fmt::Display for RunServiceError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.code())
+    }
+}
+
+impl std::error::Error for RunServiceError {}
+
+impl From<PersistenceError> for RunServiceError {
+    fn from(error: PersistenceError) -> Self {
+        Self::Persistence(error)
+    }
+}
+
+pub struct RunService<'database> {
+    database: &'database Database,
 }
 
 pub struct ProjectService<'database> {
@@ -558,6 +634,328 @@ impl<'database> ProjectService<'database> {
     }
 }
 
+impl<'database> RunService<'database> {
+    #[must_use]
+    pub const fn new(database: &'database Database) -> Self {
+        Self { database }
+    }
+
+    /// Builds a read-only preview of the next immutable Run snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable project or persistence error when the project cannot
+    /// be loaded. Validation blockers are returned in the preview itself.
+    pub async fn preview(
+        &self,
+        project_id: &ProjectId,
+        input: &RunPreparationInput,
+    ) -> Result<RunPreview, RunServiceError> {
+        self.prepare(project_id, input).await
+    }
+
+    /// Creates a running Run and queued Tasks from one validated snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns `run_active_exists` when another Run is active, a validation
+    /// blocker when the snapshot is incomplete, or a persistence error when
+    /// the transaction cannot commit.
+    #[allow(clippy::too_many_lines)]
+    pub async fn create(
+        &self,
+        project_id: &ProjectId,
+        input: &RunPreparationInput,
+    ) -> Result<Run, RunServiceError> {
+        let prepared = self.prepare(project_id, input).await?;
+        if prepared
+            .blockers
+            .iter()
+            .any(|blocker| blocker.code == "run_active_exists")
+        {
+            return Err(RunServiceError::ActiveRun);
+        }
+        if let Some(blocker) = prepared.blockers.first().cloned() {
+            return Err(RunServiceError::Blocked(blocker));
+        }
+
+        let now = timestamp_now();
+        let run_id = new_run_id();
+        let run_status = RunStateMachine::transition(RunStatus::Draft, RunTransition::Start)
+            .map_err(|_| RunServiceError::Blocked(invalid_run_blocker()))?;
+        let task_status =
+            TaskStateMachine::transition(TaskStatus::Pending, TaskTransition::Enqueue)
+                .map_err(|_| RunServiceError::Blocked(invalid_task_blocker()))?;
+        let project = self
+            .database
+            .repository()
+            .get_project(project_id)
+            .await?
+            .ok_or(RunServiceError::NotFound)?;
+        let output_directory = Path::new(&prepared.output_directory)
+            .join(run_id.as_str())
+            .to_string_lossy()
+            .into_owned();
+        let run = Run {
+            id: run_id.clone(),
+            project_id: project_id.clone(),
+            status: run_status,
+            created_at: now.clone(),
+            started_at: Some(now.clone()),
+            completed_at: None,
+            context_version_id: project.project_context.current_version_id.clone(),
+            output_directory,
+            snapshot: RunSnapshot {
+                api_routing: project.api_routing.clone(),
+                concurrency: project.execution_defaults.concurrency,
+                timeout_seconds: project.execution_defaults.timeout_seconds,
+                max_output_tokens: project.execution_defaults.max_output_tokens,
+                retry_policy: RetryPolicy {
+                    retry_count_per_profile: project.execution_defaults.retry_count_per_profile,
+                },
+                app_version: env!("CARGO_PKG_VERSION").to_owned(),
+                schema_version: LATEST_SCHEMA_VERSION,
+            },
+            stats: batch_code_analyzer_domain::RunStats::default(),
+        };
+        let prompt = resolve_prompt(input, &project);
+        let prompt_source = if input.prompt.is_some() {
+            TaskValueSource::Override
+        } else {
+            TaskValueSource::Project
+        };
+        let model = prepared
+            .model
+            .clone()
+            .ok_or_else(|| RunServiceError::Blocked(model_missing_blocker()))?;
+        let model_source = if input.model.is_some() {
+            TaskValueSource::Override
+        } else {
+            TaskValueSource::Project
+        };
+        let tasks = prepared
+            .tasks
+            .iter()
+            .map(|file| Task {
+                id: new_task_id(),
+                run_id: run_id.clone(),
+                file_id: file.file_id.clone(),
+                relative_path: file.relative_path.clone(),
+                file_snapshot: FileSnapshot {
+                    content_hash: file.content_hash.clone().unwrap_or_default(),
+                    size_bytes: file.size_bytes,
+                },
+                prompt_snapshot: prompt.clone(),
+                prompt_hash: hash_prompt(&prompt),
+                prompt_source,
+                model_snapshot: model.clone(),
+                model_source,
+                context_version_id: run.context_version_id.clone(),
+                status: task_status,
+                current_result_path: None,
+                latest_attempt_id: None,
+                parent_task_id: None,
+                result_version: 1,
+                created_at: now.clone(),
+                started_at: None,
+                completed_at: None,
+            })
+            .collect::<Vec<_>>();
+        self.database
+            .repository()
+            .create_run_with_tasks(
+                &run,
+                batch_code_analyzer_persistence::RunRowMetadata {
+                    interruption_reason: None,
+                },
+                &tasks,
+            )
+            .await
+            .map_err(Into::into)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn prepare(
+        &self,
+        project_id: &ProjectId,
+        input: &RunPreparationInput,
+    ) -> Result<RunPreview, RunServiceError> {
+        let project = self
+            .database
+            .repository()
+            .get_project(project_id)
+            .await?
+            .ok_or(RunServiceError::NotFound)?;
+        let mut blockers = Vec::new();
+        if project.path_status != ProjectPathStatus::Available {
+            blockers.push(path_unavailable_blocker());
+        }
+        let active_runs = self.database.repository().unfinished_runs().await?;
+        if !active_runs.is_empty() {
+            blockers.push(active_run_blocker());
+        }
+
+        let profile = match project.api_routing.primary_profile_id.as_ref() {
+            Some(profile_id) => {
+                self.database
+                    .repository()
+                    .get_api_profile(profile_id)
+                    .await?
+            }
+            None => None,
+        };
+        if project.api_routing.primary_profile_id.is_none() || profile.is_none() {
+            blockers.push(api_profile_missing_blocker());
+        } else if profile
+            .as_ref()
+            .is_some_and(|value| value.secret_ref.is_none())
+        {
+            blockers.push(secret_missing_blocker());
+        }
+
+        let model = input
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .or_else(|| {
+                profile
+                    .as_ref()
+                    .and_then(|value| value.default_model.clone())
+            })
+            .or_else(|| project.default_model.clone());
+        if model.is_none() {
+            blockers.push(model_missing_blocker());
+        }
+        let prompt = resolve_prompt(input, &project);
+        if prompt.trim().is_empty() {
+            blockers.push(prompt_missing_blocker());
+        }
+
+        let files = self
+            .database
+            .repository()
+            .list_file_records(project_id)
+            .await?;
+        let tasks = files
+            .into_iter()
+            .filter(|file| file.included)
+            .map(|file| {
+                if file.content_hash.is_none() {
+                    blockers.push(RunBlockingReason {
+                        code: "validation_invalid_value",
+                        message: "目标文件缺少最新内容哈希",
+                        file_id: Some(file.id.clone()),
+                        relative_path: Some(file.relative_path.clone()),
+                    });
+                }
+                RunPreviewTask {
+                    file_id: file.id,
+                    relative_path: file.relative_path,
+                    size_bytes: file.size_bytes,
+                    content_hash: file.content_hash,
+                }
+            })
+            .collect::<Vec<_>>();
+        if tasks.is_empty() {
+            blockers.push(no_target_files_blocker());
+        }
+
+        Ok(RunPreview {
+            project_id: project_id.clone(),
+            tasks,
+            blockers,
+            model,
+            prompt_source: if input.prompt.is_some() {
+                TaskValueSource::Override
+            } else {
+                TaskValueSource::Project
+            },
+            model_source: if input.model.is_some() {
+                TaskValueSource::Override
+            } else {
+                TaskValueSource::Project
+            },
+            output_directory: project.output_root.unwrap_or_else(|| {
+                Path::new(&project.source_directory)
+                    .join(".batch-analysis")
+                    .join("results")
+                    .to_string_lossy()
+                    .into_owned()
+            }),
+        })
+    }
+}
+
+fn resolve_prompt(input: &RunPreparationInput, project: &Project) -> String {
+    input
+        .prompt
+        .clone()
+        .unwrap_or_else(|| project.default_prompt.clone())
+}
+
+fn hash_prompt(prompt: &str) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    prompt.hash(&mut hasher);
+    format!("stable:{:016x}", hasher.finish())
+}
+
+fn new_run_id() -> RunId {
+    let sequence = NEXT_RUN_ID.fetch_add(1, Ordering::Relaxed);
+    RunId::new(format!("run-{sequence}"))
+}
+
+fn new_task_id() -> TaskId {
+    let sequence = NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed);
+    TaskId::new(format!("task-{sequence}"))
+}
+
+const fn blocker(code: &'static str, message: &'static str) -> RunBlockingReason {
+    RunBlockingReason {
+        code,
+        message,
+        file_id: None,
+        relative_path: None,
+    }
+}
+
+const fn active_run_blocker() -> RunBlockingReason {
+    blocker("run_active_exists", "当前已有活动 Run")
+}
+
+const fn api_profile_missing_blocker() -> RunBlockingReason {
+    blocker("validation_required_field", "尚未配置主 API Profile")
+}
+
+const fn secret_missing_blocker() -> RunBlockingReason {
+    blocker("security_secret_not_found", "主 API Profile 尚未配置密钥")
+}
+
+const fn model_missing_blocker() -> RunBlockingReason {
+    blocker("validation_model_missing", "无法解析任务实际模型")
+}
+
+const fn prompt_missing_blocker() -> RunBlockingReason {
+    blocker("validation_required_field", "提示词不能为空")
+}
+
+const fn no_target_files_blocker() -> RunBlockingReason {
+    blocker("validation_required_field", "没有纳入本次 Run 的文件")
+}
+
+const fn path_unavailable_blocker() -> RunBlockingReason {
+    blocker("project_path_unavailable", "项目路径不可用")
+}
+
+const fn invalid_run_blocker() -> RunBlockingReason {
+    blocker("run_invalid_transition", "Run 状态转换无效")
+}
+
+const fn invalid_task_blocker() -> RunBlockingReason {
+    blocker("task_invalid_transition", "Task 状态转换无效")
+}
+
 impl<'database> ApiProfileService<'database> {
     #[must_use]
     pub const fn new(database: &'database Database) -> Self {
@@ -803,8 +1201,8 @@ mod tests {
     use batch_code_analyzer_repository_scanner::ScanCancellation;
 
     use super::{
-        ApiProfileService, ApiProfileServiceError, FileServiceError, ProjectService,
-        ProjectServiceError, ScanService,
+        timestamp_now, ApiProfileService, ApiProfileServiceError, FileServiceError, ProjectService,
+        ProjectServiceError, RunPreparationInput, RunService, ScanService,
     };
 
     fn temporary_directory(name: &str) -> PathBuf {
@@ -897,6 +1295,78 @@ mod tests {
         assert_ne!(first.created, second.created);
         assert_eq!(first.project.id, second.project.id);
         assert_eq!(service.list_projects().await.unwrap().len(), 1);
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[tokio::test]
+    async fn run_preview_and_create_freeze_scanned_files_and_reject_an_active_run() {
+        let database = Database::open_in_memory()
+            .await
+            .expect("database should open");
+        let path = temporary_directory("run-preview");
+        fs::write(path.join("main.rs"), "fn main() {}\n").expect("source file should be created");
+        let mut project = ProjectService::new(&database)
+            .add_project(&path)
+            .await
+            .expect("project should add")
+            .project;
+        let profile = ApiProfileService::new(&database)
+            .save(
+                None,
+                "Test Profile".into(),
+                "https://example.test/v1".into(),
+                Some("gpt-5".into()),
+            )
+            .await
+            .expect("profile should save");
+        ApiProfileService::new(&database)
+            .set_secret_ref(&profile.id, Some("session-secret-1".into()))
+            .await
+            .expect("secret reference should save");
+        project.api_routing.primary_profile_id = Some(profile.id);
+        database
+            .repository()
+            .update_project(
+                &project,
+                batch_code_analyzer_persistence::ProjectRowMetadata {
+                    canonical_source_directory: path.to_string_lossy().into_owned(),
+                    created_at: timestamp_now(),
+                    updated_at: timestamp_now(),
+                },
+            )
+            .await
+            .expect("project routing should save");
+        let scan = ScanService::scan_project(&project, ScanCancellation::new())
+            .expect("scan should complete");
+        ScanService::new(&database)
+            .persist_scan(&project.id, scan)
+            .await
+            .expect("scan should persist");
+
+        let service = RunService::new(&database);
+        let preview = service
+            .preview(&project.id, &RunPreparationInput::default())
+            .await
+            .expect("preview should build");
+        assert_eq!(preview.tasks.len(), 1);
+        assert!(preview.blockers.is_empty());
+        assert_eq!(preview.model.as_deref(), Some("gpt-5"));
+
+        let run = service
+            .create(&project.id, &RunPreparationInput::default())
+            .await
+            .expect("run should create");
+        assert_eq!(run.status, batch_code_analyzer_domain::RunStatus::Running);
+        assert_eq!(run.stats.queued, 1);
+        assert_eq!(
+            service
+                .create(&project.id, &RunPreparationInput::default())
+                .await
+                .expect_err("second active run must be rejected")
+                .code(),
+            "run_active_exists"
+        );
 
         let _ = fs::remove_dir_all(path);
     }

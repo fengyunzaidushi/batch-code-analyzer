@@ -459,6 +459,73 @@ pub struct RunSummaryDto {
     pub stats: RunStatsDto,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct RunPreviewRequest {
+    pub project_id: ProjectId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub prompt: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct RunCreateRequest {
+    pub project_id: ProjectId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub prompt: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct RunBlockingReasonDto {
+    pub code: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub file_id: Option<FileRecordId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub relative_path: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct RunPreviewTaskDto {
+    pub file_id: FileRecordId,
+    pub relative_path: String,
+    pub size_bytes: u64,
+    pub content_hash: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct RunPreviewResponse {
+    #[ts(type = "1")]
+    pub schema_version: u32,
+    pub project_id: ProjectId,
+    pub tasks: Vec<RunPreviewTaskDto>,
+    pub blockers: Vec<RunBlockingReasonDto>,
+    pub model: Option<String>,
+    pub prompt_source: TaskValueSource,
+    pub model_source: TaskValueSource,
+    pub output_directory: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct RunCreateResponse {
+    pub run: RunSummaryDto,
+    pub task_count: u32,
+}
+
 impl From<&DomainRun> for RunSummaryDto {
     fn from(run: &DomainRun) -> Self {
         Self {
@@ -672,6 +739,12 @@ pub fn export_types(out_dir: &Path) -> Result<(), ExportError> {
     FileSetIncludedResponse::export_all(&config)?;
     FileRecordSummaryDto::export_all(&config)?;
     RunSummaryDto::export_all(&config)?;
+    RunPreviewRequest::export_all(&config)?;
+    RunPreviewResponse::export_all(&config)?;
+    RunCreateRequest::export_all(&config)?;
+    RunCreateResponse::export_all(&config)?;
+    RunBlockingReasonDto::export_all(&config)?;
+    RunPreviewTaskDto::export_all(&config)?;
     TaskSummaryDto::export_all(&config)?;
     AttemptDto::export_all(&config)?;
     ContextVersionDto::export_all(&config)?;
