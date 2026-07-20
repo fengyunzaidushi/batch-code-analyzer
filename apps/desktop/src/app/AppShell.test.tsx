@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type {
   ApiProfileSummaryDto,
+  ContextVersionDto,
   ProjectSummaryDto,
   RunPreviewResponse,
 } from "@batch-code-analyzer/ipc-types";
@@ -80,6 +81,41 @@ describe("AppShell", () => {
     await user.click(screen.getByRole("button", { name: "添加临时排除模式" }));
 
     expect(onAddTemporaryScanPattern).toHaveBeenCalledWith("docs/**");
+  });
+
+  it("renders context sources and delegates local discovery", async () => {
+    const user = userEvent.setup();
+    const onGenerateContext = vi.fn().mockResolvedValue(undefined);
+    const context: ContextVersionDto = {
+      createdAt: "2026-07-20T10:00:00Z",
+      id: "context-1",
+      manuallyEdited: false,
+      model: null,
+      projectId: "project-1",
+      schemaVersion: 1,
+      sourceFiles: [
+        {
+          contentHash: "blake3:readme",
+          included: true,
+          relativePath: "README.md",
+          truncated: false,
+        },
+      ],
+      status: "ready",
+      summary: "本地发现 1 个项目上下文文件。",
+      summaryHash: "blake3:summary",
+    };
+    render(
+      <AppShell
+        contextVersion={context}
+        onGenerateContext={onGenerateContext}
+        projects={[project()]}
+      />,
+    );
+
+    expect(screen.getByText("README.md")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "重新发现" }));
+    expect(onGenerateContext).toHaveBeenCalledOnce();
   });
 
   it("renders API profile metadata without exposing a key", async () => {

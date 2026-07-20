@@ -140,7 +140,10 @@ context_update_manual
 context_get
 ```
 
-上下文生成是独立辅助请求，不计入文件任务成功/失败统计。
+`context_generate` 接收 `projectId`，在仓库根目录发现 `README*` 与 `AGENTS.md`，生成
+不可变 `ContextVersion` 并更新项目当前版本引用。当前阶段只生成本地发现摘要，不调用
+模型，也不返回源码原文。`context_get` 返回当前项目版本或 `null`。上下文生成是独立
+辅助请求，不计入文件任务成功/失败统计。
 
 ### 4.4 API Profile
 

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import type {
   ApiProfileSaveRequest,
   ApiProfileSummaryDto,
+  ContextVersionDto,
   FileRecordSummaryDto,
   IpcError,
   ProjectRunSettingsUpdateRequest,
@@ -19,6 +20,7 @@ import {
   updateProjectRunSettings,
 } from "../ipc/projects";
 import { checkBackendHealth } from "../ipc/health";
+import { generateContext, getContext } from "../ipc/context";
 import {
   authorizeSensitiveFile,
   listFiles,
@@ -61,6 +63,10 @@ export function App() {
     Record<string, FileRecordSummaryDto[]>
   >({});
   const [fileTotals, setFileTotals] = useState<Record<string, number>>({});
+  const [contexts, setContexts] = useState<
+    Record<string, ContextVersionDto | null>
+  >({});
+  const [isGeneratingContext, setIsGeneratingContext] = useState(false);
   const [apiProfiles, setApiProfiles] = useState<ApiProfileSummaryDto[]>([]);
   const [apiProfileError, setApiProfileError] = useState<string | null>(null);
   const [activeRun, setActiveRun] = useState<{
@@ -213,6 +219,27 @@ export function App() {
   }, [refreshFiles, selectedProjectId]);
 
   useEffect(() => {
+    if (!selectedProjectId) return;
+    let active = true;
+    void getContext(selectedProjectId).then(
+      (response) => {
+        if (active) {
+          setContexts((current) => ({
+            ...current,
+            [selectedProjectId]: response.context,
+          }));
+        }
+      },
+      (error) => {
+        if (active) setProjectError(safeProjectError(error));
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, [selectedProjectId]);
+
+  useEffect(() => {
     let active = true;
     void listApiProfiles().then(
       (response) => {
@@ -344,6 +371,23 @@ export function App() {
       await cancelScan(report.operationId);
     } catch (error) {
       setProjectError(safeProjectError(error));
+    }
+  };
+
+  const handleGenerateContext = async () => {
+    if (!selectedProjectId) return;
+    setProjectError(null);
+    setIsGeneratingContext(true);
+    try {
+      const response = await generateContext(selectedProjectId);
+      setContexts((current) => ({
+        ...current,
+        [selectedProjectId]: response.context,
+      }));
+    } catch (error) {
+      setProjectError(safeProjectError(error));
+    } finally {
+      setIsGeneratingContext(false);
     }
   };
 
@@ -504,8 +548,13 @@ export function App() {
       activeRun={activeRun}
       healthState={healthState}
       isAddingProject={isAddingProject}
+      contextVersion={
+        selectedProjectId ? (contexts[selectedProjectId] ?? null) : null
+      }
+      isGeneratingContext={isGeneratingContext}
       onAddProject={handleAddProject}
       onAuthorizeSensitiveFile={handleAuthorizeSensitiveFile}
+      onGenerateContext={handleGenerateContext}
       onCancelScan={handleCancelScan}
       onAddTemporaryScanPattern={handleAddTemporaryScanPattern}
       onRemoveTemporaryScanPattern={handleRemoveTemporaryScanPattern}
@@ -564,6 +613,7 @@ function safeProjectError(error: unknown): string {
       scan_cancelled: "扫描已取消，本次结果未提交。",
       scan_failed: "扫描失败，请检查项目路径和权限。",
       scan_not_found: "扫描操作不存在。",
+      context_discovery_failed: "项目上下文文件无法读取。",
       security_sensitive_confirmation_required: "请先确认敏感文件授权。",
       security_sensitive_file_blocked: "敏感文件需要单独确认后才能纳入。",
       scan_file_unreadable: "文件不可读取，暂时不能纳入。",

@@ -55,6 +55,8 @@ pub fn run() {
             commands::project_add,
             commands::project_get,
             commands::project_update_run_settings,
+            commands::context_generate,
+            commands::context_get,
             commands::run_preview,
             commands::run_create,
             commands::run_execute,

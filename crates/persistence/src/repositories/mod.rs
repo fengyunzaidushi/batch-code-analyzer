@@ -1,9 +1,9 @@
 //! Transactional repositories for persisted domain entities.
 
 use batch_code_analyzer_domain::{
-    ApiProfile, ApiProfileId, ApiRouting, Attempt, AttemptId, ContextVersion, ContextVersionId,
-    FileRecord, FileRecordId, FileResultStatus, FileSourceStatus, Project, ProjectId,
-    Rfc3339Timestamp, Run, RunId, RunStateMachine, RunStats, RunStatus, RunTransition,
+    ApiProfile, ApiProfileId, ApiRouting, Attempt, AttemptId, ContextStatus, ContextVersion,
+    ContextVersionId, FileRecord, FileRecordId, FileResultStatus, FileSourceStatus, Project,
+    ProjectId, Rfc3339Timestamp, Run, RunId, RunStateMachine, RunStats, RunStatus, RunTransition,
     SensitiveFinding, Task, TaskId, TaskStateMachine, TaskStatus, TaskTransition,
 };
 use serde::{de::DeserializeOwned, Serialize};
@@ -386,6 +386,46 @@ impl Repository<'_> {
         finish_write(transaction, result).await
     }
 
+    /// Updates the current immutable `ContextVersion` reference for a Project.
+    ///
+    /// # Errors
+    ///
+    /// Returns a persistence error when the project is missing or the update
+    /// transaction fails.
+    pub async fn update_project_context(
+        &self,
+        project_id: &ProjectId,
+        context_version_id: Option<&ContextVersionId>,
+        enabled: bool,
+        status: ContextStatus,
+        updated_at: &Rfc3339Timestamp,
+    ) -> Result<(), PersistenceError> {
+        let mut transaction = self.database.begin_write().await?;
+        let result = sqlx::query(
+            "UPDATE projects SET current_context_version_id = ?, context_enabled = ?,
+                context_status = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(context_version_id.map(ToString::to_string))
+        .bind(enabled)
+        .bind(serde_json::to_string(&status).map_err(|_| PersistenceError::InvalidStoredState)?)
+        .bind(updated_at.as_str())
+        .bind(project_id.as_str())
+        .execute(transaction.connection())
+        .await
+        .map_err(|_| PersistenceError::TransactionFailed)
+        .and_then(|result| {
+            if result.rows_affected() == 0 {
+                Err(PersistenceError::RecordNotFound {
+                    kind: "project",
+                    id: project_id.to_string(),
+                })
+            } else {
+                Ok(())
+            }
+        });
+        finish_write(transaction, result).await
+    }
+
     /// Inserts a scanner-produced `FileRecord`.
     ///
     /// # Errors
@@ -631,6 +671,49 @@ impl Repository<'_> {
         let row = ContextVersionRow::from(context_version);
         let mut transaction = self.database.begin_write().await?;
         let result = insert_context_version(&mut transaction, &row).await;
+        finish_write(transaction, result).await
+    }
+
+    /// Creates an immutable `ContextVersion` and updates the Project reference
+    /// atomically.
+    ///
+    /// # Errors
+    ///
+    /// Returns a persistence error when either write fails or the project is
+    /// missing.
+    pub async fn create_context_version_and_update_project(
+        &self,
+        context_version: &ContextVersion,
+        enabled: bool,
+        status: ContextStatus,
+        updated_at: &Rfc3339Timestamp,
+    ) -> Result<(), PersistenceError> {
+        let row = ContextVersionRow::from(context_version);
+        let mut transaction = self.database.begin_write().await?;
+        let result = async {
+            insert_context_version(&mut transaction, &row).await?;
+            let affected = sqlx::query(
+                "UPDATE projects SET current_context_version_id = ?, context_enabled = ?,
+                    context_status = ?, updated_at = ? WHERE id = ?",
+            )
+            .bind(context_version.id.to_string())
+            .bind(enabled)
+            .bind(serde_json::to_string(&status).map_err(|_| PersistenceError::InvalidStoredState)?)
+            .bind(updated_at.as_str())
+            .bind(context_version.project_id.as_str())
+            .execute(transaction.connection())
+            .await
+            .map_err(|_| PersistenceError::TransactionFailed)?
+            .rows_affected();
+            if affected == 0 {
+                return Err(PersistenceError::RecordNotFound {
+                    kind: "project",
+                    id: context_version.project_id.to_string(),
+                });
+            }
+            Ok(())
+        }
+        .await;
         finish_write(transaction, result).await
     }
 

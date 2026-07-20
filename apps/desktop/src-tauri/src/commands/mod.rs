@@ -8,14 +8,15 @@ use batch_code_analyzer_api_profiles::{
 };
 use batch_code_analyzer_app_core::{
     domain::{ApiModelInfo, ApiProfile, ApiProfileConnectionStatus, ApiProfileId, ProjectId},
-    timestamp_now, ApiProfileService, ApiProfileServiceError, FileServiceError, ProjectService,
-    ProjectServiceError, RunExecutionService, RunPreparationInput, RunService, RunServiceError,
-    ScanService,
+    timestamp_now, ApiProfileService, ApiProfileServiceError, ContextService, ContextServiceError,
+    FileServiceError, ProjectService, ProjectServiceError, RunExecutionService,
+    RunPreparationInput, RunService, RunServiceError, ScanService,
 };
 use batch_code_analyzer_ipc_contracts::{
     ApiModelsFetchRequest, ApiModelsFetchResponse, ApiProfileDeleteRequest,
     ApiProfileDeleteResponse, ApiProfileListResponse, ApiProfileSaveRequest,
     ApiProfileSaveResponse, ApiProfileSummaryDto, ApiProfileTestRequest, ApiProfileTestResponse,
+    ContextGenerateRequest, ContextGenerateResponse, ContextGetRequest, ContextGetResponse,
     DatabaseStatus, ErrorCategory, FileAuthorizeSensitiveRequest, FileAuthorizeSensitiveResponse,
     FileListRequest, FileRecordSummaryDto, FileSetIncludedRequest, FileSetIncludedResponse,
     HealthCheckResponse, HealthStatus, IpcError, PageResponse, ProjectAddRequest,
@@ -92,6 +93,38 @@ pub(crate) async fn project_get(
         .map_err(|error| persistence_error(&error))?
         .ok_or_else(|| project_not_found(project_id.as_str()))?;
     Ok(ProjectDetailDto::from(&project))
+}
+
+#[tauri::command]
+pub(crate) async fn context_generate(
+    request: ContextGenerateRequest,
+    state: State<'_, PersistenceState>,
+) -> Result<ContextGenerateResponse, IpcError> {
+    let database = state.database.as_ref().ok_or_else(database_unavailable)?;
+    let context = ContextService::new(database)
+        .generate(&request.project_id)
+        .await
+        .map_err(context_service_error)?;
+    Ok(ContextGenerateResponse {
+        context: batch_code_analyzer_ipc_contracts::ContextVersionDto::from(&context),
+    })
+}
+
+#[tauri::command]
+pub(crate) async fn context_get(
+    request: ContextGetRequest,
+    state: State<'_, PersistenceState>,
+) -> Result<ContextGetResponse, IpcError> {
+    let database = state.database.as_ref().ok_or_else(database_unavailable)?;
+    let context = ContextService::new(database)
+        .get(&request.project_id)
+        .await
+        .map_err(context_service_error)?;
+    Ok(ContextGetResponse {
+        context: context
+            .as_ref()
+            .map(batch_code_analyzer_ipc_contracts::ContextVersionDto::from),
+    })
 }
 
 #[tauri::command]
@@ -810,6 +843,25 @@ fn project_service_error(error: ProjectServiceError) -> IpcError {
     }
 }
 
+fn context_service_error(error: ContextServiceError) -> IpcError {
+    match error {
+        ContextServiceError::NotFound => project_not_found(""),
+        ContextServiceError::PathUnavailable => ipc_error(
+            "project_path_unavailable",
+            ErrorCategory::Project,
+            "项目路径不可用",
+            true,
+        ),
+        ContextServiceError::DiscoveryFailed => ipc_error(
+            "context_discovery_failed",
+            ErrorCategory::Scan,
+            "项目上下文文件无法读取",
+            true,
+        ),
+        ContextServiceError::Persistence(error) => persistence_error(&error),
+    }
+}
+
 fn run_service_error(error: RunServiceError) -> IpcError {
     match error {
         RunServiceError::NotFound => project_not_found(""),
@@ -999,8 +1051,8 @@ fn health_check_response(database_health: DatabaseHealth) -> HealthCheckResponse
 #[cfg(test)]
 mod tests {
     use super::{
-        health_check_response, ApiProfileServiceError, FileServiceError, ProjectServiceError,
-        ProviderError, RunServiceError,
+        health_check_response, ApiProfileServiceError, ContextServiceError, FileServiceError,
+        ProjectServiceError, ProviderError, RunServiceError,
     };
     use batch_code_analyzer_app_core::RunBlockingReason;
     use batch_code_analyzer_persistence::DatabaseHealth;
@@ -1068,6 +1120,14 @@ mod tests {
         let unavailable = super::database_unavailable();
         assert_eq!(unavailable.code, "persistence_database_unavailable");
         assert_eq!(unavailable.message, "本地数据库暂不可用");
+    }
+
+    #[test]
+    fn context_errors_use_stable_codes_and_safe_messages() {
+        let error = super::context_service_error(ContextServiceError::DiscoveryFailed);
+        assert_eq!(error.code, "context_discovery_failed");
+        assert_eq!(error.message, "项目上下文文件无法读取");
+        assert!(error.details.is_none());
     }
 
     #[test]

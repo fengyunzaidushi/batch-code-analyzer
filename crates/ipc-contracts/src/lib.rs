@@ -757,6 +757,30 @@ impl From<&DomainContextVersion> for ContextVersionDto {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextGenerateRequest {
+    pub project_id: ProjectId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextGenerateResponse {
+    pub context: ContextVersionDto,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextGetRequest {
+    pub project_id: ProjectId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextGetResponse {
+    pub context: Option<ContextVersionDto>,
+}
+
 /// Exports all currently stable Rust DTOs to individual TypeScript modules.
 ///
 /// # Errors
@@ -810,6 +834,10 @@ pub fn export_types(out_dir: &Path) -> Result<(), ExportError> {
     TaskSummaryDto::export_all(&config)?;
     AttemptDto::export_all(&config)?;
     ContextVersionDto::export_all(&config)?;
+    ContextGenerateRequest::export_all(&config)?;
+    ContextGenerateResponse::export_all(&config)?;
+    ContextGetRequest::export_all(&config)?;
+    ContextGetResponse::export_all(&config)?;
     ProjectId::export_all(&config)?;
     FileRecordId::export_all(&config)?;
     RunId::export_all(&config)?;

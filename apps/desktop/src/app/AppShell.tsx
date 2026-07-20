@@ -16,6 +16,7 @@ import { useMemo, useState, type ReactNode } from "react";
 import type {
   ApiProfileSaveRequest,
   ApiProfileSummaryDto,
+  ContextVersionDto,
   FileRecordSummaryDto,
   ProjectPathStatus,
   ProjectRunSettingsUpdateRequest,
@@ -54,6 +55,7 @@ interface AppShellProps {
   activeRun?: ActiveRunSummary | null;
   onAddProject?: () => void;
   onAuthorizeSensitiveFile?: (fileId: string) => Promise<void>;
+  onGenerateContext?: () => Promise<void> | void;
   onCancelScan?: () => void;
   onAddTemporaryScanPattern?: (pattern: string) => void;
   onRemoveTemporaryScanPattern?: (pattern: string) => void;
@@ -84,6 +86,8 @@ interface AppShellProps {
   scanReport?: ScanReportDto | null;
   selectedProjectId?: string | null;
   isAddingProject?: boolean;
+  isGeneratingContext?: boolean;
+  contextVersion?: ContextVersionDto | null;
   temporaryScanPatterns?: readonly string[];
 }
 
@@ -102,6 +106,7 @@ export function AppShell({
   activeRun = null,
   onAddProject = () => undefined,
   onAuthorizeSensitiveFile = async () => undefined,
+  onGenerateContext = async () => undefined,
   onCancelScan = () => undefined,
   onAddTemporaryScanPattern = () => undefined,
   onRemoveTemporaryScanPattern = () => undefined,
@@ -129,6 +134,8 @@ export function AppShell({
   scanReport = null,
   selectedProjectId: controlledSelectedProjectId,
   isAddingProject = false,
+  isGeneratingContext = false,
+  contextVersion = null,
   temporaryScanPatterns = [],
 }: AppShellProps) {
   const [internalSelectedProjectId, setInternalSelectedProjectId] = useState<
@@ -182,7 +189,10 @@ export function AppShell({
           activeRun={activeRun}
           fileRecords={fileRecords}
           fileTotal={fileTotal}
+          contextVersion={contextVersion}
           onAuthorizeSensitiveFile={onAuthorizeSensitiveFile}
+          onGenerateContext={onGenerateContext}
+          isGeneratingContext={isGeneratingContext}
           onCancelScan={onCancelScan}
           onAddTemporaryScanPattern={onAddTemporaryScanPattern}
           onRemoveTemporaryScanPattern={onRemoveTemporaryScanPattern}
@@ -454,7 +464,10 @@ function ProjectWorkspace({
   activeRun,
   fileRecords,
   fileTotal,
+  contextVersion,
   onAuthorizeSensitiveFile,
+  onGenerateContext,
+  isGeneratingContext,
   onCancelScan,
   onAddTemporaryScanPattern,
   onRemoveTemporaryScanPattern,
@@ -480,7 +493,10 @@ function ProjectWorkspace({
   activeRun: ActiveRunSummary | null;
   fileRecords: readonly FileRecordSummaryDto[];
   fileTotal: number;
+  contextVersion: ContextVersionDto | null;
   onAuthorizeSensitiveFile: (fileId: string) => Promise<void>;
+  onGenerateContext: () => Promise<void> | void;
+  isGeneratingContext: boolean;
   onCancelScan: () => void;
   onAddTemporaryScanPattern: (pattern: string) => void;
   onRemoveTemporaryScanPattern: (pattern: string) => void;
@@ -529,7 +545,10 @@ function ProjectWorkspace({
         <PromptWorkspace
           fileRecords={fileRecords}
           fileTotal={fileTotal}
+          contextVersion={contextVersion}
           onAuthorizeSensitiveFile={onAuthorizeSensitiveFile}
+          onGenerateContext={onGenerateContext}
+          isGeneratingContext={isGeneratingContext}
           onCancelScan={onCancelScan}
           onAddTemporaryScanPattern={onAddTemporaryScanPattern}
           onRemoveTemporaryScanPattern={onRemoveTemporaryScanPattern}
@@ -635,9 +654,12 @@ function TabButton({
 }
 
 function PromptWorkspace({
+  contextVersion,
   fileRecords,
   fileTotal,
   onAuthorizeSensitiveFile,
+  onGenerateContext,
+  isGeneratingContext,
   onCancelScan,
   onAddTemporaryScanPattern,
   onRemoveTemporaryScanPattern,
@@ -650,8 +672,11 @@ function PromptWorkspace({
   scanReport,
   temporaryScanPatterns,
 }: {
+  contextVersion: ContextVersionDto | null;
   onCancelScan: () => void;
   onAuthorizeSensitiveFile: (fileId: string) => Promise<void>;
+  onGenerateContext: () => Promise<void> | void;
+  isGeneratingContext: boolean;
   onAddTemporaryScanPattern: (pattern: string) => void;
   onRemoveTemporaryScanPattern: (pattern: string) => void;
   fileRecords: readonly FileRecordSummaryDto[];
@@ -707,6 +732,11 @@ function PromptWorkspace({
           </div>
         </div>
       </section>
+      <ContextPanel
+        contextVersion={contextVersion}
+        isGenerating={isGeneratingContext}
+        onGenerate={() => void onGenerateContext()}
+      />
       <ScanRuleEditor
         onAddPattern={onAddTemporaryScanPattern}
         onRemovePattern={onRemoveTemporaryScanPattern}
@@ -898,6 +928,65 @@ function SummaryMetric({ label, value }: { label: string; value: string }) {
       <span>{label}</span>
       <strong>{value}</strong>
     </div>
+  );
+}
+
+function ContextPanel({
+  contextVersion,
+  isGenerating,
+  onGenerate,
+}: {
+  contextVersion: ContextVersionDto | null;
+  isGenerating: boolean;
+  onGenerate: () => void;
+}) {
+  return (
+    <section className="context-panel">
+      <div className="context-panel-heading">
+        <div>
+          <p className="eyebrow">PROJECT CONTEXT</p>
+          <h2>项目上下文</h2>
+        </div>
+        <button
+          className="outline-button"
+          disabled={isGenerating}
+          onClick={onGenerate}
+          type="button"
+        >
+          <RefreshCw size={14} />
+          {isGenerating ? "正在发现" : contextVersion ? "重新发现" : "发现资料"}
+        </button>
+      </div>
+      {contextVersion ? (
+        <>
+          <div className="context-panel-meta">
+            <span>{contextVersion.sourceFiles.length} 个来源文件</span>
+            <span>
+              {contextVersion.status === "ready" ? "已就绪" : "需要处理"}
+            </span>
+            <code>{contextVersion.id}</code>
+          </div>
+          <div className="context-source-list">
+            {contextVersion.sourceFiles.length ? (
+              contextVersion.sourceFiles.map((source) => (
+                <div className="context-source-item" key={source.relativePath}>
+                  <span>{source.relativePath}</span>
+                  <code>{source.contentHash.slice(0, 15)}...</code>
+                </div>
+              ))
+            ) : (
+              <span className="context-empty">未发现 README 或 AGENTS.md</span>
+            )}
+          </div>
+          <p className="context-summary">{contextVersion.summary}</p>
+        </>
+      ) : (
+        <p className="context-empty">
+          尚未建立上下文版本。发现根目录 README 和 AGENTS.md 后，Run
+          可以固定该版本。
+        </p>
+      )}
+    </section>
   );
 }
 

@@ -80,6 +80,7 @@ internal
 | `scan_file_too_large` | 否 | 否 | 文件超过大小限制 |
 | `scan_binary_file` | 否 | 否 | 检测为二进制文件 |
 | `scan_encoding_unsupported` | 否 | 否 | 不支持或无法安全识别编码 |
+| `context_discovery_failed` | 是 | 否 | 项目上下文资料无法安全读取 |
 
 ### 4.4 Security
 

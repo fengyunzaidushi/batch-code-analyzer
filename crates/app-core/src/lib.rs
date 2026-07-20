@@ -4,6 +4,7 @@
 
 use std::{
     collections::BTreeMap,
+    fmt::Write as _,
     fs,
     hash::{Hash, Hasher},
     path::Path,
@@ -14,11 +15,12 @@ use std::{
 use batch_code_analyzer_api_profiles::ApiProfile as ProviderApiProfile;
 use batch_code_analyzer_domain::{
     ApiModelInfo, ApiProfile, ApiProfileConnectionStatus, ApiProfileId, ApiProtocol, ApiRouting,
-    Attempt, AttemptError, AttemptId, AttemptStatus, ContextStatus, ExecutionDefaults, FileRecord,
-    FileRecordId, FileResultStatus, FileSnapshot, FileSourceStatus, FilterRules, Project,
-    ProjectContext, ProjectId, ProjectPathStatus, RetryPolicy, Rfc3339Timestamp, Run, RunId,
-    RunSnapshot, RunStateMachine, RunStatus, RunTransition, SensitiveFinding, Task, TaskId,
-    TaskStateMachine, TaskStatus, TaskTransition, TaskValueSource,
+    Attempt, AttemptError, AttemptId, AttemptStatus, ContextStatus, ContextVersion,
+    ContextVersionId, ContextVersionSourceFile, ExecutionDefaults, FileRecord, FileRecordId,
+    FileResultStatus, FileSnapshot, FileSourceStatus, FilterRules, Project, ProjectContext,
+    ProjectId, ProjectPathStatus, RetryPolicy, Rfc3339Timestamp, Run, RunId, RunSnapshot,
+    RunStateMachine, RunStatus, RunTransition, SensitiveFinding, Task, TaskId, TaskStateMachine,
+    TaskStatus, TaskTransition, TaskValueSource,
 };
 use batch_code_analyzer_model_providers::{
     ModelProvider, OpenAiResponsesProvider, ProviderRequest,
@@ -46,6 +48,7 @@ static NEXT_API_PROFILE_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_RUN_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_ATTEMPT_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_CONTEXT_VERSION_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum ProjectServiceError {
@@ -286,6 +289,44 @@ pub struct RunExecutionService<'database> {
 
 pub struct ProjectService<'database> {
     database: &'database Database,
+}
+
+pub struct ContextService<'database> {
+    database: &'database Database,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub enum ContextServiceError {
+    NotFound,
+    PathUnavailable,
+    DiscoveryFailed,
+    Persistence(PersistenceError),
+}
+
+impl ContextServiceError {
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::NotFound => "project_not_found",
+            Self::PathUnavailable => "project_path_unavailable",
+            Self::DiscoveryFailed => "context_discovery_failed",
+            Self::Persistence(error) => error.code(),
+        }
+    }
+}
+
+impl std::fmt::Display for ContextServiceError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.code())
+    }
+}
+
+impl std::error::Error for ContextServiceError {}
+
+impl From<PersistenceError> for ContextServiceError {
+    fn from(error: PersistenceError) -> Self {
+        Self::Persistence(error)
+    }
 }
 
 pub struct ApiProfileService<'database> {
@@ -1382,6 +1423,14 @@ fn new_attempt_id() -> AttemptId {
     AttemptId::new(format!("attempt-{sequence}"))
 }
 
+fn new_context_version_id() -> ContextVersionId {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    let sequence = NEXT_CONTEXT_VERSION_ID.fetch_add(1, Ordering::Relaxed);
+    ContextVersionId::new(format!("context-{timestamp}-{sequence}"))
+}
+
 fn saturating_u32(value: u64) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
@@ -1444,6 +1493,135 @@ const fn invalid_run_blocker() -> RunBlockingReason {
 
 const fn invalid_task_blocker() -> RunBlockingReason {
     blocker("task_invalid_transition", "Task 状态转换无效")
+}
+
+impl<'database> ContextService<'database> {
+    #[must_use]
+    pub const fn new(database: &'database Database) -> Self {
+        Self { database }
+    }
+
+    /// Discovers root-level README/AGENTS files and stores a new immutable
+    /// local `ContextVersion` without sending source content to a provider.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable context error without exposing absolute paths or file
+    /// contents.
+    pub async fn generate(
+        &self,
+        project_id: &ProjectId,
+    ) -> Result<ContextVersion, ContextServiceError> {
+        let project = self
+            .database
+            .repository()
+            .get_project(project_id)
+            .await?
+            .ok_or(ContextServiceError::NotFound)?;
+        if project.path_status != ProjectPathStatus::Available {
+            return Err(ContextServiceError::PathUnavailable);
+        }
+        let root = SafeRoot::new(&project.source_directory)
+            .map_err(|_| ContextServiceError::PathUnavailable)?;
+        let mut discovered = Vec::new();
+        let entries =
+            fs::read_dir(root.path()).map_err(|_| ContextServiceError::DiscoveryFailed)?;
+        for entry in entries {
+            let entry = entry.map_err(|_| ContextServiceError::DiscoveryFailed)?;
+            let metadata = fs::symlink_metadata(entry.path())
+                .map_err(|_| ContextServiceError::DiscoveryFailed)?;
+            if !metadata.is_file() || metadata.file_type().is_symlink() {
+                continue;
+            }
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let lower = name.to_ascii_lowercase();
+            if !(lower == "agents.md" || lower.starts_with("readme")) {
+                continue;
+            }
+            if metadata.len() > DEFAULT_MAX_FILE_SIZE {
+                continue;
+            }
+            let bytes = fs::read(entry.path()).map_err(|_| ContextServiceError::DiscoveryFailed)?;
+            if bytes.contains(&0) {
+                continue;
+            }
+            if std::str::from_utf8(bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&bytes))
+                .is_err()
+            {
+                continue;
+            }
+            discovered.push((name, metadata.len(), content_hash(&bytes)));
+        }
+        discovered.sort_by(|left, right| left.0.cmp(&right.0));
+        let source_files = discovered
+            .iter()
+            .map(
+                |(relative_path, _, content_hash)| ContextVersionSourceFile {
+                    relative_path: relative_path.clone(),
+                    content_hash: content_hash.clone(),
+                    included: true,
+                    truncated: false,
+                },
+            )
+            .collect::<Vec<_>>();
+        let mut summary = format!("本地发现 {} 个项目上下文文件。\n\n", source_files.len());
+        for (relative_path, size_bytes, _) in &discovered {
+            let _ = writeln!(summary, "- {relative_path} ({size_bytes} bytes)");
+        }
+        summary.push_str("\n当前摘要由本地发现生成，尚未调用模型。\n");
+        let context_version = ContextVersion {
+            id: new_context_version_id(),
+            project_id: project_id.clone(),
+            status: ContextStatus::Ready,
+            source_files,
+            model: project
+                .context_model
+                .clone()
+                .or(project.default_model.clone()),
+            summary_hash: content_hash(summary.as_bytes()),
+            summary,
+            manually_edited: false,
+            created_at: timestamp_now(),
+        };
+        self.database
+            .repository()
+            .create_context_version_and_update_project(
+                &context_version,
+                true,
+                ContextStatus::Ready,
+                &timestamp_now(),
+            )
+            .await?;
+        Ok(context_version)
+    }
+
+    /// Gets the current `ContextVersion` referenced by a project.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable persistence error when the project or version cannot
+    /// be read.
+    pub async fn get(
+        &self,
+        project_id: &ProjectId,
+    ) -> Result<Option<ContextVersion>, ContextServiceError> {
+        let project = self
+            .database
+            .repository()
+            .get_project(project_id)
+            .await?
+            .ok_or(ContextServiceError::NotFound)?;
+        let Some(version_id) = project.project_context.current_version_id else {
+            return Ok(None);
+        };
+        self.database
+            .repository()
+            .get_context_version(&version_id)
+            .await
+            .map_err(Into::into)
+    }
 }
 
 impl<'database> ApiProfileService<'database> {
@@ -1697,8 +1875,9 @@ mod tests {
     use tokio::{io::AsyncWriteExt, net::TcpListener};
 
     use super::{
-        timestamp_now, ApiProfileService, ApiProfileServiceError, FileServiceError, ProjectService,
-        ProjectServiceError, RunExecutionService, RunPreparationInput, RunService, ScanService,
+        timestamp_now, ApiProfileService, ApiProfileServiceError, ContextService, FileServiceError,
+        ProjectService, ProjectServiceError, RunExecutionService, RunPreparationInput, RunService,
+        ScanService,
     };
 
     fn temporary_directory(name: &str) -> PathBuf {
@@ -2206,6 +2385,53 @@ mod tests {
                 .expect_err("cancelled scan must not be persisted")
                 .to_string(),
             "scan_cancelled"
+        );
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[tokio::test]
+    async fn context_generation_discovers_root_documents_and_updates_current_version() {
+        let database = Database::open_in_memory()
+            .await
+            .expect("database should open");
+        let path = temporary_directory("context");
+        fs::write(path.join("README.md"), "# InkOS\n\nProject overview\n")
+            .expect("README should be created");
+        fs::write(path.join("AGENTS.md"), "# Rules\nKeep source local.\n")
+            .expect("AGENTS should be created");
+        fs::write(path.join("README.tmp"), [0, 1, 2]).expect("binary fixture should be created");
+        let project = ProjectService::new(&database)
+            .add_project(&path)
+            .await
+            .expect("project should add")
+            .project;
+
+        let service = ContextService::new(&database);
+        let context = service
+            .generate(&project.id)
+            .await
+            .expect("context should generate");
+        assert_eq!(context.source_files.len(), 2);
+        assert_eq!(context.source_files[0].relative_path, "AGENTS.md");
+        assert_eq!(context.source_files[1].relative_path, "README.md");
+        assert!(!context.summary.contains("Project overview"));
+
+        let current = service
+            .get(&project.id)
+            .await
+            .expect("context should load")
+            .expect("current context should exist");
+        assert_eq!(current.id, context.id);
+        let updated_project = database
+            .repository()
+            .get_project(&project.id)
+            .await
+            .unwrap()
+            .expect("project should load");
+        assert_eq!(
+            updated_project.project_context.current_version_id.as_ref(),
+            Some(&context.id)
         );
 
         let _ = fs::remove_dir_all(path);
