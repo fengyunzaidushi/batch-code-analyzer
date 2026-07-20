@@ -1,5 +1,7 @@
 use batch_code_analyzer_persistence::{Database, DatabaseHealth, DatabaseStartup};
-use batch_code_analyzer_secret_store::{MemorySecretStore, SecretStoreAvailability};
+use batch_code_analyzer_secret_store::{
+    KeyringSecretStore, MemorySecretStore, SecretStore, SecretStoreAvailability,
+};
 use std::sync::Arc;
 use tauri::Manager;
 
@@ -12,7 +14,16 @@ pub(crate) struct PersistenceState {
     pub(crate) database: Option<Database>,
     pub(crate) health: DatabaseHealth,
     pub(crate) scans: ScanState,
-    pub(crate) secret_store: Arc<MemorySecretStore>,
+    pub(crate) secret_store: Arc<dyn SecretStore>,
+}
+
+fn secret_store() -> Arc<dyn SecretStore> {
+    match KeyringSecretStore::new() {
+        Ok(store) => Arc::new(store),
+        Err(_) => Arc::new(MemorySecretStore::with_availability(
+            SecretStoreAvailability::Unavailable,
+        )),
+    }
 }
 
 /// Starts the desktop application and registers its IPC commands.
@@ -31,17 +42,13 @@ pub fn run() {
                     health: database.health(),
                     database: Some(database),
                     scans: ScanState::default(),
-                    secret_store: Arc::new(MemorySecretStore::with_availability(
-                        SecretStoreAvailability::SessionOnly,
-                    )),
+                    secret_store: secret_store(),
                 },
                 DatabaseStartup::Recovery(recovery) => PersistenceState {
                     health: recovery.health(),
                     database: None,
                     scans: ScanState::default(),
-                    secret_store: Arc::new(MemorySecretStore::with_availability(
-                        SecretStoreAvailability::SessionOnly,
-                    )),
+                    secret_store: secret_store(),
                 },
             };
 

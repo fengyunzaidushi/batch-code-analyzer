@@ -1,17 +1,21 @@
-//! Secret storage interfaces and a process-local implementation for tests.
+//! Secret storage interfaces, an OS keyring backend, and a process-local test
+//! implementation.
 //!
-//! Production keychain backends can implement [`SecretStore`] without changing
-//! API profile or provider code. The secret value intentionally has no `Debug`
-//! or `Serialize` implementation, so it cannot accidentally cross a logging or
-//! DTO boundary.
+//! The secret value intentionally has no `Debug` or `Serialize` implementation,
+//! so it cannot accidentally cross a logging or DTO boundary.
 
 #![forbid(unsafe_code)]
 
-use std::{collections::HashMap, fmt, sync::Arc};
+use std::{
+    collections::HashMap,
+    fmt,
+    sync::{atomic::AtomicU64, Arc},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use tokio::sync::RwLock;
 
 /// Opaque reference stored in ordinary configuration instead of a secret.
@@ -205,10 +209,88 @@ impl SecretStore for MemorySecretStore {
     }
 }
 
+/// Persistent `SecretStore` backed by the operating system credential manager.
+///
+/// The keyring entry username is the opaque `SecretRef`; the API key itself is
+/// never represented by a serializable application type or persisted in `SQLite`.
+pub struct KeyringSecretStore {
+    service: String,
+}
+
+static NEXT_KEYRING_SECRET_ID: AtomicU64 = AtomicU64::new(1);
+
+impl KeyringSecretStore {
+    pub const DEFAULT_SERVICE: &'static str = "com.batchcodeanalyzer.desktop";
+
+    /// Initializes the platform credential backend without creating a secret.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SecretError::Unavailable` when the operating system has no
+    /// usable credential backend, or `SecretError::BackendFailure` when the
+    /// backend cannot be initialized.
+    pub fn new() -> Result<Self, SecretError> {
+        let service = Self::DEFAULT_SERVICE.to_owned();
+        keyring::Entry::new(&service, "__backend_probe__")
+            .map_err(|error| map_keyring_error(&error))?;
+        Ok(Self { service })
+    }
+
+    fn entry(&self, reference: &SecretRef) -> Result<keyring::Entry, SecretError> {
+        if reference.as_str().is_empty() {
+            return Err(SecretError::InvalidReference);
+        }
+        keyring::Entry::new(&self.service, reference.as_str())
+            .map_err(|error| map_keyring_error(&error))
+    }
+}
+
+#[async_trait]
+impl SecretStore for KeyringSecretStore {
+    fn availability(&self) -> SecretStoreAvailability {
+        SecretStoreAvailability::Available
+    }
+
+    async fn put(&self, secret: SecretValue) -> Result<SecretRef, SecretError> {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos());
+        let sequence = NEXT_KEYRING_SECRET_ID.fetch_add(1, Ordering::Relaxed);
+        let reference = SecretRef::new(format!("key-{timestamp}-{sequence}"));
+        self.entry(&reference)?
+            .set_password(secret.as_str())
+            .map_err(|error| map_keyring_error(&error))?;
+        Ok(reference)
+    }
+
+    async fn get(&self, reference: &SecretRef) -> Result<SecretValue, SecretError> {
+        let value = self
+            .entry(reference)?
+            .get_password()
+            .map_err(|error| map_keyring_error(&error))?;
+        Ok(SecretValue::new(value))
+    }
+
+    async fn delete(&self, reference: &SecretRef) -> Result<(), SecretError> {
+        self.entry(reference)?
+            .delete_credential()
+            .map_err(|error| map_keyring_error(&error))
+    }
+}
+
+fn map_keyring_error(error: &keyring::Error) -> SecretError {
+    match error {
+        keyring::Error::NoEntry => SecretError::NotFound,
+        keyring::Error::NoDefaultStore => SecretError::Unavailable,
+        _ => SecretError::BackendFailure,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        MemorySecretStore, SecretError, SecretStore, SecretStoreAvailability, SecretValue,
+        KeyringSecretStore, MemorySecretStore, SecretError, SecretStore, SecretStoreAvailability,
+        SecretValue,
     };
 
     #[tokio::test]
@@ -240,6 +322,26 @@ mod tests {
         assert_eq!(
             store.put(SecretValue::new("secret")).await,
             Err(SecretError::Unavailable)
+        );
+    }
+
+    #[test]
+    fn keyring_store_uses_a_stable_application_service_name() {
+        assert_eq!(
+            KeyringSecretStore::DEFAULT_SERVICE,
+            "com.batchcodeanalyzer.desktop"
+        );
+    }
+
+    #[test]
+    fn keyring_errors_map_to_stable_secret_store_codes() {
+        assert_eq!(
+            super::map_keyring_error(&keyring::Error::NoEntry),
+            SecretError::NotFound
+        );
+        assert_eq!(
+            super::map_keyring_error(&keyring::Error::NoDefaultStore),
+            SecretError::Unavailable
         );
     }
 }

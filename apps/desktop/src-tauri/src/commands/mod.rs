@@ -33,7 +33,7 @@ use batch_code_analyzer_ipc_contracts::{
 use batch_code_analyzer_model_providers::{ModelProvider, OpenAiResponsesProvider, ProviderError};
 use batch_code_analyzer_persistence::DatabaseHealth;
 use batch_code_analyzer_repository_scanner::{ImportReport, ScanCancellation};
-use batch_code_analyzer_secret_store::{SecretRef, SecretStore, SecretValue};
+use batch_code_analyzer_secret_store::{SecretRef, SecretValue};
 use serde::Deserialize;
 use tauri::{AppHandle, Emitter, State};
 
