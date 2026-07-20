@@ -1,10 +1,10 @@
 //! Transactional repositories for persisted domain entities.
 
 use batch_code_analyzer_domain::{
-    ApiProfile, ApiProfileId, ApiRouting, Attempt, AttemptId, ContextVersion, ContextVersionId,
-    FileRecord, FileRecordId, FileResultStatus, FileSourceStatus, Project, ProjectId,
-    Rfc3339Timestamp, Run, RunId, RunStats, RunStatus, Task, TaskId, TaskStateMachine, TaskStatus,
-    TaskTransition,
+    ApiProfile, ApiProfileId, ApiRouting, Attempt, AttemptId, ContextStatus, ContextVersion,
+    ContextVersionId, FileRecord, FileRecordId, FileResultStatus, FileSourceStatus, Project,
+    ProjectId, Rfc3339Timestamp, Run, RunId, RunStateMachine, RunStats, RunStatus, RunTransition,
+    SensitiveFinding, Task, TaskId, TaskStateMachine, TaskStatus, TaskTransition,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
@@ -24,6 +24,15 @@ use crate::{
 #[derive(Clone, Copy, Debug)]
 pub struct Repository<'database> {
     database: &'database Database,
+}
+
+pub struct SensitiveFileAuthorizationMetadata {
+    pub size_bytes: u64,
+    pub modified_at: Option<Rfc3339Timestamp>,
+    pub content_hash: String,
+    pub encoding: String,
+    pub sensitive_findings: Vec<SensitiveFinding>,
+    pub updated_at: Rfc3339Timestamp,
 }
 
 impl Database {
@@ -377,6 +386,46 @@ impl Repository<'_> {
         finish_write(transaction, result).await
     }
 
+    /// Updates the current immutable `ContextVersion` reference for a Project.
+    ///
+    /// # Errors
+    ///
+    /// Returns a persistence error when the project is missing or the update
+    /// transaction fails.
+    pub async fn update_project_context(
+        &self,
+        project_id: &ProjectId,
+        context_version_id: Option<&ContextVersionId>,
+        enabled: bool,
+        status: ContextStatus,
+        updated_at: &Rfc3339Timestamp,
+    ) -> Result<(), PersistenceError> {
+        let mut transaction = self.database.begin_write().await?;
+        let result = sqlx::query(
+            "UPDATE projects SET current_context_version_id = ?, context_enabled = ?,
+                context_status = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(context_version_id.map(ToString::to_string))
+        .bind(enabled)
+        .bind(serde_json::to_string(&status).map_err(|_| PersistenceError::InvalidStoredState)?)
+        .bind(updated_at.as_str())
+        .bind(project_id.as_str())
+        .execute(transaction.connection())
+        .await
+        .map_err(|_| PersistenceError::TransactionFailed)
+        .and_then(|result| {
+            if result.rows_affected() == 0 {
+                Err(PersistenceError::RecordNotFound {
+                    kind: "project",
+                    id: project_id.to_string(),
+                })
+            } else {
+                Ok(())
+            }
+        });
+        finish_write(transaction, result).await
+    }
+
     /// Inserts a scanner-produced `FileRecord`.
     ///
     /// # Errors
@@ -437,6 +486,57 @@ impl Repository<'_> {
             .bind(included)
             .bind(included)
             .bind(now.as_str())
+            .bind(file_id.as_str())
+            .bind(project_id.as_str())
+            .execute(transaction.connection())
+            .await
+            .map_err(|_| PersistenceError::TransactionFailed)?
+            .rows_affected();
+
+            if affected == 0 {
+                return Ok(None);
+            }
+            load_file_record(&mut transaction, file_id.as_str()).await
+        }
+        .await;
+        finish_write(transaction, result).await
+    }
+
+    /// Records explicit user authorization for a sensitive file after the
+    /// application layer has revalidated and hashed its current contents.
+    ///
+    /// The source status remains `sensitive`; only the inclusion decision and
+    /// safe scan metadata change. The matched secret values are never stored.
+    ///
+    /// # Errors
+    ///
+    /// Returns a persistence error when the transaction or findings encoding
+    /// fails.
+    pub async fn authorize_sensitive_file(
+        &self,
+        project_id: &ProjectId,
+        file_id: &FileRecordId,
+        metadata: SensitiveFileAuthorizationMetadata,
+    ) -> Result<Option<FileRecord>, PersistenceError> {
+        let size_bytes =
+            i64::try_from(metadata.size_bytes).map_err(|_| PersistenceError::InvalidStoredState)?;
+        let findings_json = serde_json::to_string(&metadata.sensitive_findings)
+            .map_err(|_| PersistenceError::InvalidStoredState)?;
+        let mut transaction = self.database.begin_write().await?;
+        let result = async {
+            let affected = sqlx::query(
+                "UPDATE file_records
+                 SET size_bytes = ?, modified_at = ?, content_hash = ?, encoding = ?,
+                     included = 1, exclusion_reason = 'user_authorized_sensitive',
+                     sensitive_findings_json = ?, updated_at = ?
+                 WHERE id = ? AND project_id = ?",
+            )
+            .bind(size_bytes)
+            .bind(metadata.modified_at.as_ref().map(Rfc3339Timestamp::as_str))
+            .bind(metadata.content_hash)
+            .bind(metadata.encoding)
+            .bind(findings_json)
+            .bind(metadata.updated_at.as_str())
             .bind(file_id.as_str())
             .bind(project_id.as_str())
             .execute(transaction.connection())
@@ -571,6 +671,49 @@ impl Repository<'_> {
         let row = ContextVersionRow::from(context_version);
         let mut transaction = self.database.begin_write().await?;
         let result = insert_context_version(&mut transaction, &row).await;
+        finish_write(transaction, result).await
+    }
+
+    /// Creates an immutable `ContextVersion` and updates the Project reference
+    /// atomically.
+    ///
+    /// # Errors
+    ///
+    /// Returns a persistence error when either write fails or the project is
+    /// missing.
+    pub async fn create_context_version_and_update_project(
+        &self,
+        context_version: &ContextVersion,
+        enabled: bool,
+        status: ContextStatus,
+        updated_at: &Rfc3339Timestamp,
+    ) -> Result<(), PersistenceError> {
+        let row = ContextVersionRow::from(context_version);
+        let mut transaction = self.database.begin_write().await?;
+        let result = async {
+            insert_context_version(&mut transaction, &row).await?;
+            let affected = sqlx::query(
+                "UPDATE projects SET current_context_version_id = ?, context_enabled = ?,
+                    context_status = ?, updated_at = ? WHERE id = ?",
+            )
+            .bind(context_version.id.to_string())
+            .bind(enabled)
+            .bind(serde_json::to_string(&status).map_err(|_| PersistenceError::InvalidStoredState)?)
+            .bind(updated_at.as_str())
+            .bind(context_version.project_id.as_str())
+            .execute(transaction.connection())
+            .await
+            .map_err(|_| PersistenceError::TransactionFailed)?
+            .rows_affected();
+            if affected == 0 {
+                return Err(PersistenceError::RecordNotFound {
+                    kind: "project",
+                    id: context_version.project_id.to_string(),
+                });
+            }
+            Ok(())
+        }
+        .await;
         finish_write(transaction, result).await
     }
 
@@ -812,6 +955,86 @@ impl Repository<'_> {
         finish_write(transaction, result).await
     }
 
+    /// Atomically records a completed Attempt and its Task snapshot.
+    ///
+    /// The Attempt row is created before dispatch; this method only updates
+    /// its terminal state together with the Task and authoritative Run stats.
+    ///
+    /// # Errors
+    ///
+    /// Returns a persistence error when either row is missing, the state cannot
+    /// be encoded, or the atomic transaction fails.
+    pub async fn finalize_task_attempt(
+        &self,
+        attempt: &Attempt,
+        metadata: AttemptRowMetadata,
+        task: &Task,
+    ) -> Result<(), PersistenceError> {
+        if attempt.task_id != task.id || task.run_id.as_str().is_empty() {
+            return Err(PersistenceError::InvalidStoredState);
+        }
+        let attempt_row = AttemptRow::from_domain(attempt, metadata)?;
+        let task_row = TaskRow::from(task);
+        let mut transaction = self.database.begin_write().await?;
+        let result = async {
+            let affected = update_attempt_row(&mut transaction, &attempt_row).await?;
+            if affected == 0 {
+                return Err(PersistenceError::RecordNotFound {
+                    kind: "attempt",
+                    id: attempt.id.to_string(),
+                });
+            }
+            let affected = update_task_row(&mut transaction, &task_row).await?;
+            if affected == 0 {
+                return Err(task_not_found(task.id.as_str()));
+            }
+            let stats =
+                recompute_run_stats_in_transaction(&mut transaction, task.run_id.as_str()).await?;
+            update_run_stats(&mut transaction, task.run_id.as_str(), &stats).await
+        }
+        .await;
+        finish_write(transaction, result).await
+    }
+
+    /// Completes a Run through the documented Domain state machine.
+    ///
+    /// # Errors
+    ///
+    /// Returns a persistence error when the Run is missing, the transition is
+    /// invalid, or the transaction cannot commit.
+    pub async fn complete_run(
+        &self,
+        run_id: &RunId,
+        transition: RunTransition,
+        completed_at: &Rfc3339Timestamp,
+    ) -> Result<Run, PersistenceError> {
+        let mut transaction = self.database.begin_write().await?;
+        let result = async {
+            let mut run = load_run(&mut transaction, run_id.as_str())
+                .await?
+                .ok_or_else(|| run_not_found(run_id.as_str()))?;
+            run.status = RunStateMachine::transition(run.status, transition)
+                .map_err(|error| PersistenceError::StateTransition { code: error.code() })?;
+            run.completed_at = Some(completed_at.clone());
+            let stats =
+                recompute_run_stats_in_transaction(&mut transaction, run_id.as_str()).await?;
+            run.stats = stats.clone();
+            sqlx::query(
+                "UPDATE runs SET status = ?, completed_at = ?, stats_json = ? WHERE id = ?",
+            )
+            .bind(status_string(run.status)?)
+            .bind(completed_at.as_str())
+            .bind(serde_json::to_string(&stats).map_err(|_| PersistenceError::InvalidStoredState)?)
+            .bind(run_id.as_str())
+            .execute(transaction.connection())
+            .await
+            .map_err(|_| PersistenceError::TransactionFailed)?;
+            Ok(run)
+        }
+        .await;
+        finish_write(transaction, result).await
+    }
+
     /// Loads an Attempt by ID.
     ///
     /// # Errors
@@ -883,6 +1106,21 @@ impl Repository<'_> {
         let mut transaction = self.database.begin_write().await?;
         let result =
             load_tasks_by_status(&mut transaction, run_id.as_str(), &[TaskStatus::Running]).await;
+        finish_read(transaction, result).await
+    }
+
+    /// Lists all Tasks for a Run in creation order.
+    ///
+    /// The repository returns Domain entities so callers cannot accidentally
+    /// expose `SQLite` rows across the application or IPC boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns a persistence error when the query or stored rows cannot be
+    /// decoded.
+    pub async fn list_tasks(&self, run_id: &RunId) -> Result<Vec<Task>, PersistenceError> {
+        let mut transaction = self.database.begin_write().await?;
+        let result = load_all_tasks(&mut transaction, run_id.as_str()).await;
         finish_read(transaction, result).await
     }
 
@@ -1206,6 +1444,61 @@ async fn insert_attempt(
     Ok(())
 }
 
+async fn update_attempt_row(
+    transaction: &mut WriteTransaction<'_>,
+    row: &AttemptRow,
+) -> Result<u64, PersistenceError> {
+    let result = sqlx::query(
+        "UPDATE attempts SET status = ?, request_started_at = ?, request_dispatched_at = ?,
+            finished_at = ?, duration_ms = ?, http_status = ?, input_tokens = ?,
+            output_tokens = ?, total_tokens = ?, retry_reason = ?, error_code = ?,
+            sanitized_error_message = ?, error_retryable = ?, error_sanitized = ?,
+            response_id = ? WHERE id = ?",
+    )
+    .bind(&row.status)
+    .bind(&row.request_started_at)
+    .bind(&row.request_dispatched_at)
+    .bind(&row.finished_at)
+    .bind(row.duration_ms)
+    .bind(row.http_status)
+    .bind(row.input_tokens)
+    .bind(row.output_tokens)
+    .bind(row.total_tokens)
+    .bind(&row.retry_reason)
+    .bind(&row.error_code)
+    .bind(&row.sanitized_error_message)
+    .bind(row.error_retryable)
+    .bind(row.error_sanitized)
+    .bind(&row.response_id)
+    .bind(&row.id)
+    .execute(transaction.connection())
+    .await
+    .map_err(|_| PersistenceError::TransactionFailed)?;
+    Ok(result.rows_affected())
+}
+
+async fn update_task_row(
+    transaction: &mut WriteTransaction<'_>,
+    row: &TaskRow,
+) -> Result<u64, PersistenceError> {
+    let result = sqlx::query(
+        "UPDATE tasks SET status = ?, current_result_path = ?,
+            latest_attempt_id = ?, result_version = ?, started_at = ?,
+            completed_at = ? WHERE id = ?",
+    )
+    .bind(&row.status)
+    .bind(&row.current_result_path)
+    .bind(&row.latest_attempt_id)
+    .bind(row.result_version)
+    .bind(&row.started_at)
+    .bind(&row.completed_at)
+    .bind(&row.id)
+    .execute(transaction.connection())
+    .await
+    .map_err(|_| PersistenceError::TransactionFailed)?;
+    Ok(result.rows_affected())
+}
+
 async fn load_project(
     transaction: &mut WriteTransaction<'_>,
     id: &str,
@@ -1360,6 +1653,25 @@ async fn load_tasks_by_status(
     )
     .bind(run_id)
     .bind(values.first())
+    .fetch_all(transaction.connection())
+    .await
+    .map_err(|_| PersistenceError::TransactionFailed)?;
+    rows.into_iter().map(|row| task_from_row(&row)).collect()
+}
+
+async fn load_all_tasks(
+    transaction: &mut WriteTransaction<'_>,
+    run_id: &str,
+) -> Result<Vec<Task>, PersistenceError> {
+    let rows = sqlx::query(
+        "SELECT id, run_id, file_id, relative_path, file_snapshot_json,
+            prompt_snapshot, prompt_hash, prompt_source, model_snapshot,
+            model_source, context_version_id, status, current_result_path,
+            latest_attempt_id, parent_task_id, result_version, created_at,
+            started_at, completed_at
+         FROM tasks WHERE run_id = ? ORDER BY created_at ASC, id ASC",
+    )
+    .bind(run_id)
     .fetch_all(transaction.connection())
     .await
     .map_err(|_| PersistenceError::TransactionFailed)?;

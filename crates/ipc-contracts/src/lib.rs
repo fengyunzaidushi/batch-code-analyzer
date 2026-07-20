@@ -257,6 +257,21 @@ pub struct ProjectAddResponse {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
+pub struct ProjectRunSettingsUpdateRequest {
+    pub project_id: ProjectId,
+    pub primary_profile_id: Option<ApiProfileId>,
+    pub default_model: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectRunSettingsUpdateResponse {
+    pub project: ProjectDetailDto,
+    pub config_mirror_warning: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
 pub struct FileListRequest {
     pub project_id: ProjectId,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -273,6 +288,14 @@ pub struct FileSetIncludedRequest {
     pub included: bool,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct FileAuthorizeSensitiveRequest {
+    pub project_id: ProjectId,
+    pub file_id: FileRecordId,
+    pub confirmed: bool,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum ScanOperationStatus {
@@ -286,6 +309,9 @@ pub enum ScanOperationStatus {
 #[serde(rename_all = "camelCase")]
 pub struct ScanStartRequest {
     pub project_id: ProjectId,
+    #[serde(default)]
+    #[ts(optional)]
+    pub temporary_excluded_patterns: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
@@ -335,11 +361,22 @@ pub struct ScanReportDto {
     pub sensitive_files: Vec<String>,
     pub symlink_files: Vec<String>,
     pub invalid_gitignore_rules: Vec<String>,
+    pub rules: ScanRuleSummaryDto,
     pub cancelled: bool,
     pub file_count: Option<u32>,
     pub generation: Option<u32>,
     pub error_code: Option<String>,
     pub updated_at: Rfc3339Timestamp,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanRuleSummaryDto {
+    pub builtin_directories: Vec<String>,
+    pub builtin_extensions: Vec<String>,
+    pub gitignore_rules: Vec<String>,
+    pub temporary_excluded_patterns: Vec<String>,
+    pub sensitive_detection_enabled: bool,
 }
 
 impl From<&DomainProject> for ProjectSummaryDto {
@@ -411,6 +448,12 @@ impl From<&DomainFileRecord> for FileRecordSummaryDto {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct FileSetIncludedResponse {
+    pub file: FileRecordSummaryDto,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct FileAuthorizeSensitiveResponse {
     pub file: FileRecordSummaryDto,
 }
 
@@ -524,6 +567,18 @@ pub struct RunPreviewResponse {
 pub struct RunCreateResponse {
     pub run: RunSummaryDto,
     pub task_count: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct RunExecuteRequest {
+    pub run_id: RunId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct RunExecuteResponse {
+    pub run: RunSummaryDto,
 }
 
 impl From<&DomainRun> for RunSummaryDto {
@@ -702,6 +757,30 @@ impl From<&DomainContextVersion> for ContextVersionDto {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextGenerateRequest {
+    pub project_id: ProjectId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextGenerateResponse {
+    pub context: ContextVersionDto,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextGetRequest {
+    pub project_id: ProjectId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextGetResponse {
+    pub context: Option<ContextVersionDto>,
+}
+
 /// Exports all currently stable Rust DTOs to individual TypeScript modules.
 ///
 /// # Errors
@@ -729,25 +808,36 @@ pub fn export_types(out_dir: &Path) -> Result<(), ExportError> {
     ProjectAddRequest::export_all(&config)?;
     ProjectDetailDto::export_all(&config)?;
     ProjectAddResponse::export_all(&config)?;
+    ProjectRunSettingsUpdateRequest::export_all(&config)?;
+    ProjectRunSettingsUpdateResponse::export_all(&config)?;
     ScanStartRequest::export_all(&config)?;
     ScanStartResponse::export_all(&config)?;
     ScanCancelRequest::export_all(&config)?;
     ScanCancelResponse::export_all(&config)?;
     ScanReportDto::export_all(&config)?;
+    ScanRuleSummaryDto::export_all(&config)?;
     FileListRequest::export_all(&config)?;
     FileSetIncludedRequest::export_all(&config)?;
     FileSetIncludedResponse::export_all(&config)?;
+    FileAuthorizeSensitiveRequest::export_all(&config)?;
+    FileAuthorizeSensitiveResponse::export_all(&config)?;
     FileRecordSummaryDto::export_all(&config)?;
     RunSummaryDto::export_all(&config)?;
     RunPreviewRequest::export_all(&config)?;
     RunPreviewResponse::export_all(&config)?;
     RunCreateRequest::export_all(&config)?;
     RunCreateResponse::export_all(&config)?;
+    RunExecuteRequest::export_all(&config)?;
+    RunExecuteResponse::export_all(&config)?;
     RunBlockingReasonDto::export_all(&config)?;
     RunPreviewTaskDto::export_all(&config)?;
     TaskSummaryDto::export_all(&config)?;
     AttemptDto::export_all(&config)?;
     ContextVersionDto::export_all(&config)?;
+    ContextGenerateRequest::export_all(&config)?;
+    ContextGenerateResponse::export_all(&config)?;
+    ContextGetRequest::export_all(&config)?;
+    ContextGetResponse::export_all(&config)?;
     ProjectId::export_all(&config)?;
     FileRecordId::export_all(&config)?;
     RunId::export_all(&config)?;

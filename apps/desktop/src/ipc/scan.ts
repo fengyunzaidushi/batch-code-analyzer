@@ -9,8 +9,14 @@ import type {
   ScanStartResponse,
 } from "@batch-code-analyzer/ipc-types";
 
-export function startScan(projectId: ProjectId): Promise<ScanStartResponse> {
-  const request: ScanStartRequest = { projectId };
+export function startScan(
+  projectId: ProjectId,
+  temporaryExcludedPatterns: readonly string[] = [],
+): Promise<ScanStartResponse> {
+  const request: ScanStartRequest = {
+    projectId,
+    temporaryExcludedPatterns: [...temporaryExcludedPatterns],
+  };
   return invoke<ScanStartResponse>("scan_start", { request });
 }
 

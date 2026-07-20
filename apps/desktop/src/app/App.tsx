@@ -2,8 +2,10 @@ import { useCallback, useEffect, useState } from "react";
 import type {
   ApiProfileSaveRequest,
   ApiProfileSummaryDto,
+  ContextVersionDto,
   FileRecordSummaryDto,
   IpcError,
+  ProjectRunSettingsUpdateRequest,
   ProjectSummaryDto,
   RunPreviewRequest,
   RunPreviewResponse,
@@ -15,9 +17,15 @@ import {
   chooseProjectDirectory,
   getProject,
   listProjects,
+  updateProjectRunSettings,
 } from "../ipc/projects";
 import { checkBackendHealth } from "../ipc/health";
-import { listFiles, setFileIncluded } from "../ipc/files";
+import { generateContext, getContext } from "../ipc/context";
+import {
+  authorizeSensitiveFile,
+  listFiles,
+  setFileIncluded,
+} from "../ipc/files";
 import {
   cancelScan,
   getScanReport,
@@ -33,7 +41,7 @@ import {
   testApiProfile,
   type ApiProfileSecretPutRequest,
 } from "../ipc/apiProfiles";
-import { createRun, previewRun } from "../ipc/runs";
+import { createRun, executeRun, previewRun } from "../ipc/runs";
 import { AppShell, type ShellHealthState, type ShellProject } from "./AppShell";
 
 export function App() {
@@ -48,10 +56,17 @@ export function App() {
   const [scanReports, setScanReports] = useState<Record<string, ScanReportDto>>(
     {},
   );
+  const [temporaryScanPatterns, setTemporaryScanPatterns] = useState<
+    Record<string, string[]>
+  >({});
   const [fileRecords, setFileRecords] = useState<
     Record<string, FileRecordSummaryDto[]>
   >({});
   const [fileTotals, setFileTotals] = useState<Record<string, number>>({});
+  const [contexts, setContexts] = useState<
+    Record<string, ContextVersionDto | null>
+  >({});
+  const [isGeneratingContext, setIsGeneratingContext] = useState(false);
   const [apiProfiles, setApiProfiles] = useState<ApiProfileSummaryDto[]>([]);
   const [apiProfileError, setApiProfileError] = useState<string | null>(null);
   const [activeRun, setActiveRun] = useState<{
@@ -162,7 +177,12 @@ export function App() {
         setProjects((current) =>
           current.map((project) =>
             project.id === detail.id
-              ? { ...project, rootDirectory: detail.sourceDirectory }
+              ? {
+                  ...project,
+                  rootDirectory: detail.sourceDirectory,
+                  primaryProfileId: detail.apiRouting.primaryProfileId,
+                  defaultModel: detail.defaultModel,
+                }
               : project,
           ),
         );
@@ -199,6 +219,27 @@ export function App() {
   }, [refreshFiles, selectedProjectId]);
 
   useEffect(() => {
+    if (!selectedProjectId) return;
+    let active = true;
+    void getContext(selectedProjectId).then(
+      (response) => {
+        if (active) {
+          setContexts((current) => ({
+            ...current,
+            [selectedProjectId]: response.context,
+          }));
+        }
+      },
+      (error) => {
+        if (active) setProjectError(safeProjectError(error));
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, [selectedProjectId]);
+
+  useEffect(() => {
     let active = true;
     void listApiProfiles().then(
       (response) => {
@@ -232,11 +273,39 @@ export function App() {
     }
   };
 
+  const handleAddTemporaryScanPattern = (pattern: string) => {
+    if (!selectedProjectId) return;
+    const normalized = pattern.trim();
+    if (!normalized) return;
+    setTemporaryScanPatterns((current) => {
+      const patterns = current[selectedProjectId] ?? [];
+      if (patterns.includes(normalized) || patterns.length >= 100)
+        return current;
+      return {
+        ...current,
+        [selectedProjectId]: [...patterns, normalized],
+      };
+    });
+  };
+
+  const handleRemoveTemporaryScanPattern = (pattern: string) => {
+    if (!selectedProjectId) return;
+    setTemporaryScanPatterns((current) => ({
+      ...current,
+      [selectedProjectId]: (current[selectedProjectId] ?? []).filter(
+        (value) => value !== pattern,
+      ),
+    }));
+  };
+
   const handleStartScan = async () => {
     if (!selectedProjectId) return;
     setProjectError(null);
     try {
-      const response = await startScan(selectedProjectId);
+      const response = await startScan(
+        selectedProjectId,
+        temporaryScanPatterns[selectedProjectId] ?? [],
+      );
       const report = await getScanReport(response.operationId);
       setScanReports((current) => ({
         ...current,
@@ -271,6 +340,29 @@ export function App() {
     [selectedProjectId],
   );
 
+  const handleAuthorizeSensitiveFile = useCallback(
+    async (fileId: string) => {
+      if (!selectedProjectId) return;
+      setProjectError(null);
+      try {
+        const response = await authorizeSensitiveFile(
+          selectedProjectId,
+          fileId,
+        );
+        setFileRecords((current) => ({
+          ...current,
+          [selectedProjectId]: (current[selectedProjectId] ?? []).map((file) =>
+            file.id === response.file.id ? response.file : file,
+          ),
+        }));
+      } catch (error) {
+        setProjectError(safeProjectError(error));
+        throw error;
+      }
+    },
+    [selectedProjectId],
+  );
+
   const handleCancelScan = async () => {
     if (!selectedProjectId) return;
     const report = scanReports[selectedProjectId];
@@ -279,6 +371,23 @@ export function App() {
       await cancelScan(report.operationId);
     } catch (error) {
       setProjectError(safeProjectError(error));
+    }
+  };
+
+  const handleGenerateContext = async () => {
+    if (!selectedProjectId) return;
+    setProjectError(null);
+    setIsGeneratingContext(true);
+    try {
+      const response = await generateContext(selectedProjectId);
+      setContexts((current) => ({
+        ...current,
+        [selectedProjectId]: response.context,
+      }));
+    } catch (error) {
+      setProjectError(safeProjectError(error));
+    } finally {
+      setIsGeneratingContext(false);
     }
   };
 
@@ -364,6 +473,35 @@ export function App() {
     }
   };
 
+  const handleUpdateProjectRunSettings = async (
+    request: ProjectRunSettingsUpdateRequest,
+  ) => {
+    setApiProfileError(null);
+    try {
+      const response = await updateProjectRunSettings(request);
+      setProjects((current) =>
+        current.map((project) =>
+          project.id === response.project.id
+            ? {
+                ...project,
+                rootDirectory: response.project.sourceDirectory,
+                primaryProfileId: response.project.apiRouting.primaryProfileId,
+                defaultModel: response.project.defaultModel,
+              }
+            : project,
+        ),
+      );
+      setRunPreview(null);
+      setRunError(null);
+      if (response.configMirrorWarning) {
+        setApiProfileError("设置已保存，但项目配置镜像暂时无法写入。");
+      }
+    } catch (error) {
+      setApiProfileError(safeApiProfileError(error));
+      throw error;
+    }
+  };
+
   const handleRunPreview = async (input: { prompt: string }) => {
     if (!selectedProjectId) return;
     setRunError(null);
@@ -384,7 +522,10 @@ export function App() {
     setRunError(null);
     setIsCreatingRun(true);
     try {
-      await createRun({ projectId: selectedProjectId, ...runPreparation });
+      const created = await createRun({
+        projectId: selectedProjectId,
+        ...runPreparation,
+      });
       const project = projects.find((item) => item.id === selectedProjectId);
       setActiveRun({
         projectId: selectedProjectId,
@@ -392,9 +533,12 @@ export function App() {
         status: "running",
       });
       setRunPreview(null);
+      await executeRun({ runId: created.run.id });
+      setActiveRun(null);
     } catch (error) {
       setRunError(safeRunError(error));
     } finally {
+      setActiveRun(null);
       setIsCreatingRun(false);
     }
   };
@@ -404,8 +548,16 @@ export function App() {
       activeRun={activeRun}
       healthState={healthState}
       isAddingProject={isAddingProject}
+      contextVersion={
+        selectedProjectId ? (contexts[selectedProjectId] ?? null) : null
+      }
+      isGeneratingContext={isGeneratingContext}
       onAddProject={handleAddProject}
+      onAuthorizeSensitiveFile={handleAuthorizeSensitiveFile}
+      onGenerateContext={handleGenerateContext}
       onCancelScan={handleCancelScan}
+      onAddTemporaryScanPattern={handleAddTemporaryScanPattern}
+      onRemoveTemporaryScanPattern={handleRemoveTemporaryScanPattern}
       onSelectProject={setSelectedProjectId}
       onStartScan={handleStartScan}
       onRetryHealth={() => {
@@ -429,6 +581,7 @@ export function App() {
       onPutApiProfileSecret={handlePutApiProfileSecret}
       onSaveApiProfile={handleSaveApiProfile}
       onTestApiProfile={handleTestApiProfile}
+      onUpdateProjectRunSettings={handleUpdateProjectRunSettings}
       projectError={projectError}
       projects={projects}
       fileRecords={
@@ -437,6 +590,11 @@ export function App() {
       fileTotal={selectedProjectId ? (fileTotals[selectedProjectId] ?? 0) : 0}
       scanReport={
         selectedProjectId ? (scanReports[selectedProjectId] ?? null) : null
+      }
+      temporaryScanPatterns={
+        selectedProjectId
+          ? (temporaryScanPatterns[selectedProjectId] ?? [])
+          : []
       }
       selectedProjectId={selectedProjectId}
     />
@@ -455,6 +613,8 @@ function safeProjectError(error: unknown): string {
       scan_cancelled: "扫描已取消，本次结果未提交。",
       scan_failed: "扫描失败，请检查项目路径和权限。",
       scan_not_found: "扫描操作不存在。",
+      context_discovery_failed: "项目上下文文件无法读取。",
+      security_sensitive_confirmation_required: "请先确认敏感文件授权。",
       security_sensitive_file_blocked: "敏感文件需要单独确认后才能纳入。",
       scan_file_unreadable: "文件不可读取，暂时不能纳入。",
       scan_encoding_unsupported: "文件编码不支持，暂时不能纳入。",
@@ -503,6 +663,18 @@ function safeRunError(error: unknown): string {
       validation_invalid_value: "目标文件尚未完成有效扫描。",
       persistence_database_unavailable: "本地数据库暂不可用。",
       persistence_transaction_failed: "Run 暂时无法创建。",
+      run_not_found: "Run 不存在。",
+      run_not_active: "Run 当前不可执行。",
+      provider_connection_failed: "模型 Provider 暂不可用。",
+      provider_timeout: "模型请求超时，Task 已记录为可重试失败。",
+      provider_rate_limited: "模型服务限流，Task 已记录为可重试失败。",
+      provider_server_error: "模型服务暂时异常，Task 已记录为可重试失败。",
+      provider_authentication_failed: "模型认证失败，请检查 API Profile。",
+      provider_permission_denied: "模型服务拒绝了当前请求。",
+      provider_model_unavailable: "配置的模型不可用。",
+      provider_invalid_request: "模型请求参数无效。",
+      provider_invalid_response: "模型服务返回了无法识别的响应。",
+      output_write_failed: "分析结果无法写入本地磁盘。",
     };
     return messages[error.code] ?? "Run 操作失败。";
   }

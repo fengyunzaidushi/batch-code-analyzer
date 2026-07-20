@@ -2,9 +2,10 @@
 import type { ProjectId } from "./ProjectId";
 import type { Rfc3339Timestamp } from "./Rfc3339Timestamp";
 import type { ScanOperationStatus } from "./ScanOperationStatus";
+import type { ScanRuleSummaryDto } from "./ScanRuleSummaryDto";
 
 /**
  * Scan progress and the final import report share one stable payload so the
  * UI can render the latest operation without retaining scanner internals.
  */
-export type ScanReportDto = { schemaVersion: 1, operationId: string, projectId: ProjectId, status: ScanOperationStatus, visitedEntries: number, scannedFiles: number, includedFiles: number, excludedByReason: Record<string, number>, unreadableFiles: Array<string>, unsupportedEncodingFiles: Array<string>, sensitiveFiles: Array<string>, symlinkFiles: Array<string>, invalidGitignoreRules: Array<string>, cancelled: boolean, fileCount: number | null, generation: number | null, errorCode: string | null, updatedAt: Rfc3339Timestamp, };
+export type ScanReportDto = { schemaVersion: 1, operationId: string, projectId: ProjectId, status: ScanOperationStatus, visitedEntries: number, scannedFiles: number, includedFiles: number, excludedByReason: Record<string, number>, unreadableFiles: Array<string>, unsupportedEncodingFiles: Array<string>, sensitiveFiles: Array<string>, symlinkFiles: Array<string>, invalidGitignoreRules: Array<string>, rules: ScanRuleSummaryDto, cancelled: boolean, fileCount: number | null, generation: number | null, errorCode: string | null, updatedAt: Rfc3339Timestamp, };

@@ -57,6 +57,8 @@ export interface PageResponse<T> {
 ```text
 project_list
 project_add
+project_get
+project_update_run_settings
 project_update
 project_remove
 project_relocate
@@ -65,6 +67,9 @@ project_relocate
 最低语义：
 
 - `project_add`：输入用户选择的目录，完成 canonical path 校验；重复目录返回已有项目。
+- `project_get`：按需返回当前项目详情；绝对仓库路径不进入项目列表摘要。
+- `project_update_run_settings`：更新未来 Run 使用的主 API Profile 和项目默认模型；
+  Profile 引用必须存在，响应返回更新后的 `ProjectDetailDto` 和配置镜像写入警告。
 - `project_remove`：只移除客户端登记，不删除仓库或历史输出。
 - `project_relocate`：重新绑定不可用项目，必须校验项目 ID 或仓库配置的一致性。
 
@@ -83,6 +88,7 @@ scan_get_report
 ```ts
 interface ScanStartRequest {
   projectId: ProjectId;
+  temporaryExcludedPatterns?: string[];
 }
 
 interface ScanStartResponse {
@@ -110,11 +116,21 @@ interface ScanReportDto {
   generation: number | null;
   errorCode: string | null;
   updatedAt: Rfc3339Timestamp;
+  rules: ScanRuleSummaryDto;
+}
+
+interface ScanRuleSummaryDto {
+  builtinDirectories: string[];
+  builtinExtensions: string[];
+  gitignoreRules: string[];
+  temporaryExcludedPatterns: string[];
+  sensitiveDetectionEnabled: boolean;
 }
 ```
 
 完成或取消前不会提交正式扫描代次；进度和最终报告通过
 `scan://progress` Event 发送，`scan_get_report` 可按 operation ID 查询最近状态。
+临时排除模式只在当前项目会话的扫描请求中生效，不会修改仓库 `.gitignore` 或持久化为项目规则。
 
 ### 4.3 Context
 
@@ -124,7 +140,10 @@ context_update_manual
 context_get
 ```
 
-上下文生成是独立辅助请求，不计入文件任务成功/失败统计。
+`context_generate` 接收 `projectId`，在仓库根目录发现 `README*` 与 `AGENTS.md`，生成
+不可变 `ContextVersion` 并更新项目当前版本引用。当前阶段只生成本地发现摘要，不调用
+模型，也不返回源码原文。`context_get` 返回当前项目版本或 `null`。上下文生成是独立
+辅助请求，不计入文件任务成功/失败统计。
 
 ### 4.4 API Profile
 
@@ -150,6 +169,7 @@ api_models_fetch
 ```text
 run_preview
 run_create
+run_execute
 run_pause
 run_resume
 run_cancel
@@ -166,12 +186,19 @@ run_list
 创建成功后返回 `RunSummaryDto` 和创建的 Task 数量；Run 初始状态为 `running`，Task 初始状态为
 `queued`，实际模型请求由后续调度器任务负责。
 
+`run_execute` 只接收已有的 `runId`，要求 Run 处于 `running` 状态。执行器按顺序领取
+queued Task，并在每次真实请求前追加 `created` Attempt。Provider 成功时先原子写入结果
+Markdown，再提交 Attempt、Task 和 Run 统计；Provider、源码读取或结果写入失败时保存脱敏
+错误摘要并将 Task 收敛为 `failed`。命令只返回最终 `RunSummaryDto`，不返回源码、密钥或
+完整 Provider 响应。
+
 ### 4.6 File
 
 ```text
 file_list
 file_update_override
 file_set_included
+file_authorize_sensitive
 ```
 
 `file_list` 接收 `projectId`、可选的数字游标和 `1..=500` 的 `limit`，返回
@@ -183,7 +210,13 @@ file_set_included
 `file_set_included` 接收 `projectId`、`fileId` 和 `included`，返回
 `{ file: FileRecordSummaryDto }`。手动排除会持久化为当前 FileRecord 的用户覆盖，
 并在后续扫描中保留。敏感、二进制、过大、不可读取、编码不支持和已删除文件不能
-通过普通纳入命令绕过安全阻止；敏感文件授权另有独立流程。
+通过普通纳入命令绕过安全阻止。
+
+`file_authorize_sensitive` 接收 `projectId`、`fileId` 和明确的 `confirmed: true`。
+Rust 会重新校验仓库边界、符号链接、文件大小、二进制和编码，计算当前内容哈希并
+只保存脱敏的风险类型与位置。授权不会返回源码或秘密原文，文件仍保留 `sensitive`
+来源状态，但可以进入后续 Run。普通 `file_set_included(false)` 可以撤销授权；重新扫描
+后授权默认失效，需要用户再次确认。
 
 ### 4.7 Task
 

@@ -6,6 +6,8 @@ import type {
   ProjectAddResponse,
   ProjectDetailDto,
   ProjectId,
+  ProjectRunSettingsUpdateRequest,
+  ProjectRunSettingsUpdateResponse,
 } from "@batch-code-analyzer/ipc-types";
 
 /** Reads project summaries from Rust; no filesystem access happens in React. */
@@ -30,4 +32,13 @@ export function addProject(
 
 export function getProject(projectId: ProjectId): Promise<ProjectDetailDto> {
   return invoke<ProjectDetailDto>("project_get", { projectId });
+}
+
+export function updateProjectRunSettings(
+  request: ProjectRunSettingsUpdateRequest,
+): Promise<ProjectRunSettingsUpdateResponse> {
+  return invoke<ProjectRunSettingsUpdateResponse>(
+    "project_update_run_settings",
+    { request },
+  );
 }

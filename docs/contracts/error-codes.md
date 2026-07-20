@@ -80,6 +80,7 @@ internal
 | `scan_file_too_large` | 否 | 否 | 文件超过大小限制 |
 | `scan_binary_file` | 否 | 否 | 检测为二进制文件 |
 | `scan_encoding_unsupported` | 否 | 否 | 不支持或无法安全识别编码 |
+| `context_discovery_failed` | 是 | 否 | 项目上下文资料无法安全读取 |
 
 ### 4.4 Security
 
@@ -88,6 +89,7 @@ internal
 | `security_path_escape` | 否 | 否 | 路径逃逸到允许根目录外 |
 | `security_symlink_outside_root` | 否 | 否 | 符号链接指向仓库外 |
 | `security_sensitive_file_blocked` | 否 | 否 | 默认敏感文件被阻止 |
+| `security_sensitive_confirmation_required` | 否 | 否 | 敏感文件授权请求缺少明确确认 |
 | `security_secret_detected` | 否 | 否 | 文件中发现疑似秘密 |
 | `security_consent_required` | 否 | 否 | 尚未确认向该服务发送源码 |
 | `security_external_url_blocked` | 否 | 否 | 外部链接协议或目标不允许 |

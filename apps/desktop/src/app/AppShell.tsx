@@ -16,10 +16,13 @@ import { useMemo, useState, type ReactNode } from "react";
 import type {
   ApiProfileSaveRequest,
   ApiProfileSummaryDto,
+  ContextVersionDto,
   FileRecordSummaryDto,
   ProjectPathStatus,
+  ProjectRunSettingsUpdateRequest,
   ProjectSummaryDto,
   RunPreviewResponse,
+  ScanRuleSummaryDto,
   ScanReportDto,
 } from "@batch-code-analyzer/ipc-types";
 
@@ -27,6 +30,8 @@ import { FileTreeTable } from "../features/tasks/FileTreeTable";
 
 export type ShellProject = ProjectSummaryDto & {
   rootDirectory?: string;
+  primaryProfileId?: string | null;
+  defaultModel?: string | null;
   runningTaskCount?: number;
   failedTaskCount?: number;
 };
@@ -49,7 +54,11 @@ interface AppShellProps {
   healthState?: ShellHealthState;
   activeRun?: ActiveRunSummary | null;
   onAddProject?: () => void;
+  onAuthorizeSensitiveFile?: (fileId: string) => Promise<void>;
+  onGenerateContext?: () => Promise<void> | void;
   onCancelScan?: () => void;
+  onAddTemporaryScanPattern?: (pattern: string) => void;
+  onRemoveTemporaryScanPattern?: (pattern: string) => void;
   onRetryHealth?: () => void;
   onSetFileIncluded?: (fileId: string, included: boolean) => Promise<void>;
   onPreviewRun?: (input: { prompt: string }) => void;
@@ -68,12 +77,18 @@ interface AppShellProps {
     request: ApiProfileSaveRequest,
   ) => Promise<ApiProfileSummaryDto>;
   onTestApiProfile?: (id: string) => Promise<void>;
+  onUpdateProjectRunSettings?: (
+    request: ProjectRunSettingsUpdateRequest,
+  ) => Promise<void>;
   onSelectProject?: (id: string) => void;
   onStartScan?: () => void;
   projectError?: string | null;
   scanReport?: ScanReportDto | null;
   selectedProjectId?: string | null;
   isAddingProject?: boolean;
+  isGeneratingContext?: boolean;
+  contextVersion?: ContextVersionDto | null;
+  temporaryScanPatterns?: readonly string[];
 }
 
 type WorkspaceTab = "prompt" | "api";
@@ -90,7 +105,11 @@ export function AppShell({
   healthState = "checking",
   activeRun = null,
   onAddProject = () => undefined,
+  onAuthorizeSensitiveFile = async () => undefined,
+  onGenerateContext = async () => undefined,
   onCancelScan = () => undefined,
+  onAddTemporaryScanPattern = () => undefined,
+  onRemoveTemporaryScanPattern = () => undefined,
   onRetryHealth = () => undefined,
   onSetFileIncluded = async () => undefined,
   onPreviewRun = () => undefined,
@@ -108,12 +127,16 @@ export function AppShell({
     throw new Error("API Profile save handler is unavailable");
   },
   onTestApiProfile = async () => undefined,
+  onUpdateProjectRunSettings = async () => undefined,
   onSelectProject,
   onStartScan = () => undefined,
   projectError = null,
   scanReport = null,
   selectedProjectId: controlledSelectedProjectId,
   isAddingProject = false,
+  isGeneratingContext = false,
+  contextVersion = null,
+  temporaryScanPatterns = [],
 }: AppShellProps) {
   const [internalSelectedProjectId, setInternalSelectedProjectId] = useState<
     string | null
@@ -166,7 +189,13 @@ export function AppShell({
           activeRun={activeRun}
           fileRecords={fileRecords}
           fileTotal={fileTotal}
+          contextVersion={contextVersion}
+          onAuthorizeSensitiveFile={onAuthorizeSensitiveFile}
+          onGenerateContext={onGenerateContext}
+          isGeneratingContext={isGeneratingContext}
           onCancelScan={onCancelScan}
+          onAddTemporaryScanPattern={onAddTemporaryScanPattern}
+          onRemoveTemporaryScanPattern={onRemoveTemporaryScanPattern}
           onSetFileIncluded={onSetFileIncluded}
           onPreviewRun={() => onPreviewRun({ prompt })}
           onPromptChange={setPrompt}
@@ -174,6 +203,7 @@ export function AppShell({
           onStartScan={onStartScan}
           project={selectedProject}
           scanReport={scanReport}
+          temporaryScanPatterns={temporaryScanPatterns}
           tab={tab}
           setTab={setTab}
           apiProfileError={apiProfileError}
@@ -183,6 +213,7 @@ export function AppShell({
           onPutApiProfileSecret={onPutApiProfileSecret}
           onSaveApiProfile={onSaveApiProfile}
           onTestApiProfile={onTestApiProfile}
+          onUpdateProjectRunSettings={onUpdateProjectRunSettings}
         />
       </div>
       <RunPreviewPanel
@@ -433,7 +464,13 @@ function ProjectWorkspace({
   activeRun,
   fileRecords,
   fileTotal,
+  contextVersion,
+  onAuthorizeSensitiveFile,
+  onGenerateContext,
+  isGeneratingContext,
   onCancelScan,
+  onAddTemporaryScanPattern,
+  onRemoveTemporaryScanPattern,
   onPreviewRun,
   onPromptChange,
   prompt,
@@ -441,6 +478,7 @@ function ProjectWorkspace({
   onStartScan,
   project,
   scanReport,
+  temporaryScanPatterns,
   tab,
   setTab,
   onDeleteApiProfile,
@@ -448,13 +486,20 @@ function ProjectWorkspace({
   onPutApiProfileSecret,
   onSaveApiProfile,
   onTestApiProfile,
+  onUpdateProjectRunSettings,
 }: {
   apiProfileError: string | null;
   apiProfiles: readonly ApiProfileSummaryDto[];
   activeRun: ActiveRunSummary | null;
   fileRecords: readonly FileRecordSummaryDto[];
   fileTotal: number;
+  contextVersion: ContextVersionDto | null;
+  onAuthorizeSensitiveFile: (fileId: string) => Promise<void>;
+  onGenerateContext: () => Promise<void> | void;
+  isGeneratingContext: boolean;
   onCancelScan: () => void;
+  onAddTemporaryScanPattern: (pattern: string) => void;
+  onRemoveTemporaryScanPattern: (pattern: string) => void;
   onPreviewRun: () => void;
   onPromptChange: (value: string) => void;
   prompt: string;
@@ -462,6 +507,7 @@ function ProjectWorkspace({
   onStartScan: () => void;
   project: ShellProject | null;
   scanReport: ScanReportDto | null;
+  temporaryScanPatterns: readonly string[];
   tab: WorkspaceTab;
   setTab: (tab: WorkspaceTab) => void;
   onDeleteApiProfile: (id: string) => Promise<void>;
@@ -474,6 +520,9 @@ function ProjectWorkspace({
     request: ApiProfileSaveRequest,
   ) => Promise<ApiProfileSummaryDto>;
   onTestApiProfile: (id: string) => Promise<void>;
+  onUpdateProjectRunSettings: (
+    request: ProjectRunSettingsUpdateRequest,
+  ) => Promise<void>;
 }) {
   return (
     <main className="project-workspace">
@@ -496,7 +545,13 @@ function ProjectWorkspace({
         <PromptWorkspace
           fileRecords={fileRecords}
           fileTotal={fileTotal}
+          contextVersion={contextVersion}
+          onAuthorizeSensitiveFile={onAuthorizeSensitiveFile}
+          onGenerateContext={onGenerateContext}
+          isGeneratingContext={isGeneratingContext}
           onCancelScan={onCancelScan}
+          onAddTemporaryScanPattern={onAddTemporaryScanPattern}
+          onRemoveTemporaryScanPattern={onRemoveTemporaryScanPattern}
           onPreviewRun={onPreviewRun}
           onPromptChange={onPromptChange}
           prompt={prompt}
@@ -504,6 +559,7 @@ function ProjectWorkspace({
           onStartScan={onStartScan}
           project={project}
           scanReport={scanReport}
+          temporaryScanPatterns={temporaryScanPatterns}
         />
       ) : (
         <ApiWorkspace
@@ -514,6 +570,8 @@ function ProjectWorkspace({
           onSave={onSaveApiProfile}
           onTest={onTestApiProfile}
           profiles={apiProfiles}
+          project={project}
+          onUpdateProjectRunSettings={onUpdateProjectRunSettings}
         />
       )}
     </main>
@@ -596,9 +654,15 @@ function TabButton({
 }
 
 function PromptWorkspace({
+  contextVersion,
   fileRecords,
   fileTotal,
+  onAuthorizeSensitiveFile,
+  onGenerateContext,
+  isGeneratingContext,
   onCancelScan,
+  onAddTemporaryScanPattern,
+  onRemoveTemporaryScanPattern,
   onPreviewRun,
   onPromptChange,
   onSetFileIncluded,
@@ -606,8 +670,15 @@ function PromptWorkspace({
   project,
   prompt,
   scanReport,
+  temporaryScanPatterns,
 }: {
+  contextVersion: ContextVersionDto | null;
   onCancelScan: () => void;
+  onAuthorizeSensitiveFile: (fileId: string) => Promise<void>;
+  onGenerateContext: () => Promise<void> | void;
+  isGeneratingContext: boolean;
+  onAddTemporaryScanPattern: (pattern: string) => void;
+  onRemoveTemporaryScanPattern: (pattern: string) => void;
   fileRecords: readonly FileRecordSummaryDto[];
   fileTotal: number;
   onPreviewRun: () => void;
@@ -617,12 +688,12 @@ function PromptWorkspace({
   project: ShellProject | null;
   prompt: string;
   scanReport: ScanReportDto | null;
+  temporaryScanPatterns: readonly string[];
 }) {
   const hasProject = project !== null;
-  const includedFileCount =
-    scanReport?.status === "completed"
-      ? scanReport.includedFiles
-      : fileRecords.filter((file) => file.included).length;
+  const includedFileCount = fileRecords.length
+    ? fileRecords.filter((file) => file.included).length
+    : (scanReport?.includedFiles ?? 0);
   return (
     <div className="workspace-content">
       <div className="content-intro">
@@ -661,6 +732,17 @@ function PromptWorkspace({
           </div>
         </div>
       </section>
+      <ContextPanel
+        contextVersion={contextVersion}
+        isGenerating={isGeneratingContext}
+        onGenerate={() => void onGenerateContext()}
+      />
+      <ScanRuleEditor
+        onAddPattern={onAddTemporaryScanPattern}
+        onRemovePattern={onRemoveTemporaryScanPattern}
+        report={scanReport?.rules ?? null}
+        temporaryPatterns={temporaryScanPatterns}
+      />
       <section className="task-area-band">
         <div className="task-area-heading">
           <div>
@@ -719,6 +801,7 @@ function PromptWorkspace({
                 : "添加项目后，文件任务会显示在这里"
           }
           files={fileRecords}
+          onAuthorizeSensitive={onAuthorizeSensitiveFile}
           onSetIncluded={async (file, included) =>
             onSetFileIncluded(file.id, included)
           }
@@ -848,6 +931,191 @@ function SummaryMetric({ label, value }: { label: string; value: string }) {
   );
 }
 
+function ContextPanel({
+  contextVersion,
+  isGenerating,
+  onGenerate,
+}: {
+  contextVersion: ContextVersionDto | null;
+  isGenerating: boolean;
+  onGenerate: () => void;
+}) {
+  return (
+    <section className="context-panel">
+      <div className="context-panel-heading">
+        <div>
+          <p className="eyebrow">PROJECT CONTEXT</p>
+          <h2>项目上下文</h2>
+        </div>
+        <button
+          className="outline-button"
+          disabled={isGenerating}
+          onClick={onGenerate}
+          type="button"
+        >
+          <RefreshCw size={14} />
+          {isGenerating ? "正在发现" : contextVersion ? "重新发现" : "发现资料"}
+        </button>
+      </div>
+      {contextVersion ? (
+        <>
+          <div className="context-panel-meta">
+            <span>{contextVersion.sourceFiles.length} 个来源文件</span>
+            <span>
+              {contextVersion.status === "ready" ? "已就绪" : "需要处理"}
+            </span>
+            <code>{contextVersion.id}</code>
+          </div>
+          <div className="context-source-list">
+            {contextVersion.sourceFiles.length ? (
+              contextVersion.sourceFiles.map((source) => (
+                <div className="context-source-item" key={source.relativePath}>
+                  <span>{source.relativePath}</span>
+                  <code>{source.contentHash.slice(0, 15)}...</code>
+                </div>
+              ))
+            ) : (
+              <span className="context-empty">未发现 README 或 AGENTS.md</span>
+            )}
+          </div>
+          <p className="context-summary">{contextVersion.summary}</p>
+        </>
+      ) : (
+        <p className="context-empty">
+          尚未建立上下文版本。发现根目录 README 和 AGENTS.md 后，Run
+          可以固定该版本。
+        </p>
+      )}
+    </section>
+  );
+}
+
+function ScanRuleEditor({
+  onAddPattern,
+  onRemovePattern,
+  report,
+  temporaryPatterns,
+}: {
+  onAddPattern: (pattern: string) => void;
+  onRemovePattern: (pattern: string) => void;
+  report: ScanRuleSummaryDto | null;
+  temporaryPatterns: readonly string[];
+}) {
+  const [pattern, setPattern] = useState("");
+  const addPattern = () => {
+    const normalized = pattern.trim();
+    if (!normalized) return;
+    onAddPattern(normalized);
+    setPattern("");
+  };
+  const rules = report ?? {
+    builtinDirectories: [],
+    builtinExtensions: [],
+    gitignoreRules: [],
+    temporaryExcludedPatterns: [],
+    sensitiveDetectionEnabled: true,
+  };
+
+  return (
+    <section className="scan-rules-band">
+      <div className="scan-rules-heading">
+        <div>
+          <p className="eyebrow">SCAN RULES</p>
+          <h2>排除规则</h2>
+        </div>
+        <span className="scan-rules-status">
+          敏感检测：{rules.sensitiveDetectionEnabled ? "开启" : "关闭"}
+        </span>
+      </div>
+      <div className="scan-rule-grid">
+        <details open>
+          <summary>内置目录 ({rules.builtinDirectories.length})</summary>
+          <div className="scan-rule-values">
+            {rules.builtinDirectories.length ? (
+              rules.builtinDirectories.map((value) => (
+                <code key={value}>{value}</code>
+              ))
+            ) : (
+              <span className="scan-rule-empty">扫描后显示</span>
+            )}
+          </div>
+        </details>
+        <details>
+          <summary>内置扩展名 ({rules.builtinExtensions.length})</summary>
+          <div className="scan-rule-values">
+            {rules.builtinExtensions.length ? (
+              rules.builtinExtensions.map((value) => (
+                <code key={value}>.{value}</code>
+              ))
+            ) : (
+              <span className="scan-rule-empty">扫描后显示</span>
+            )}
+          </div>
+        </details>
+        <details>
+          <summary>项目 .gitignore ({rules.gitignoreRules.length})</summary>
+          <div className="scan-rule-values">
+            {rules.gitignoreRules.length ? (
+              rules.gitignoreRules.map((value, index) => (
+                <code key={`${value}-${index}`}>{value}</code>
+              ))
+            ) : (
+              <span className="scan-rule-empty">没有有效规则</span>
+            )}
+          </div>
+        </details>
+        <div className="scan-rule-temporary">
+          <label htmlFor="temporary-scan-pattern">临时排除模式</label>
+          <div className="scan-rule-input">
+            <input
+              id="temporary-scan-pattern"
+              onChange={(event) => setPattern(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  addPattern();
+                }
+              }}
+              placeholder="例如 docs/** 或 *.log"
+              value={pattern}
+            />
+            <button
+              aria-label="添加临时排除模式"
+              className="icon-button"
+              disabled={!pattern.trim()}
+              onClick={addPattern}
+              title="添加临时排除模式"
+              type="button"
+            >
+              <Plus aria-hidden="true" size={16} />
+            </button>
+          </div>
+          <div className="scan-rule-values scan-rule-temporary-values">
+            {temporaryPatterns.length ? (
+              temporaryPatterns.map((value) => (
+                <span className="scan-rule-chip" key={value}>
+                  <code>{value}</code>
+                  <button
+                    aria-label={`移除临时排除模式 ${value}`}
+                    className="icon-button"
+                    onClick={() => onRemovePattern(value)}
+                    title={`移除临时排除模式 ${value}`}
+                    type="button"
+                  >
+                    <X aria-hidden="true" size={12} />
+                  </button>
+                </span>
+              ))
+            ) : (
+              <span className="scan-rule-empty">本次会话未添加</span>
+            )}
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function scanSummaryMessage(report: ScanReportDto | null): string {
   if (!report) return "尚未扫描项目；扫描结果将在这里显示。";
   switch (report.status) {
@@ -870,6 +1138,8 @@ function ApiWorkspace({
   onSave,
   onTest,
   profiles,
+  project,
+  onUpdateProjectRunSettings,
 }: {
   error: string | null;
   onDelete: (id: string) => Promise<void>;
@@ -881,6 +1151,10 @@ function ApiWorkspace({
   onSave: (request: ApiProfileSaveRequest) => Promise<ApiProfileSummaryDto>;
   onTest: (id: string) => Promise<void>;
   profiles: readonly ApiProfileSummaryDto[];
+  project: ShellProject | null;
+  onUpdateProjectRunSettings: (
+    request: ProjectRunSettingsUpdateRequest,
+  ) => Promise<void>;
 }) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [creatingNew, setCreatingNew] = useState(false);
@@ -912,6 +1186,12 @@ function ApiWorkspace({
           {error}
         </div>
       ) : null}
+      <ProjectRunSettings
+        key={`${project?.id ?? "none"}:${project?.primaryProfileId ?? "none"}:${project?.defaultModel ?? "none"}:${profiles.map((profile) => `${profile.id}:${profile.defaultModel ?? "none"}:${profile.modelCache.length}`).join(",")}`}
+        onUpdate={onUpdateProjectRunSettings}
+        profiles={profiles}
+        project={project}
+      />
       <section className="api-config-band">
         <aside className="api-profile-list" aria-label="API Profile 列表">
           {profiles.length === 0 ? (
@@ -953,6 +1233,105 @@ function ApiWorkspace({
         />
       </section>
     </div>
+  );
+}
+
+function ProjectRunSettings({
+  onUpdate,
+  profiles,
+  project,
+}: {
+  onUpdate: (request: ProjectRunSettingsUpdateRequest) => Promise<void>;
+  profiles: readonly ApiProfileSummaryDto[];
+  project: ShellProject | null;
+}) {
+  const initialProfileId = project?.primaryProfileId ?? profiles[0]?.id ?? "";
+  const initialProfile = profiles.find(
+    (profile) => profile.id === initialProfileId,
+  );
+  const [primaryProfileId, setPrimaryProfileId] = useState(initialProfileId);
+  const [defaultModel, setDefaultModel] = useState(
+    project?.defaultModel ?? initialProfile?.defaultModel ?? "",
+  );
+  const [busy, setBusy] = useState(false);
+
+  const selectedProfile = profiles.find(
+    (profile) => profile.id === primaryProfileId,
+  );
+  const modelOptions = Array.from(
+    new Set([
+      ...(selectedProfile?.defaultModel ? [selectedProfile.defaultModel] : []),
+      ...(selectedProfile?.modelCache.map((model) => model.id) ?? []),
+    ]),
+  );
+  const save = async () => {
+    if (!project || !primaryProfileId || !defaultModel.trim()) return;
+    setBusy(true);
+    try {
+      await onUpdate({
+        projectId: project.id,
+        primaryProfileId,
+        defaultModel: defaultModel.trim(),
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="project-run-settings">
+      <div>
+        <p className="eyebrow">PROJECT ROUTING</p>
+        <h3>当前项目运行设置</h3>
+      </div>
+      <label>
+        主 API Profile
+        <select
+          disabled={!project || profiles.length === 0 || busy}
+          onChange={(event) => {
+            const profileId = event.target.value;
+            const profile = profiles.find((item) => item.id === profileId);
+            setPrimaryProfileId(profileId);
+            if (profile?.defaultModel) setDefaultModel(profile.defaultModel);
+          }}
+          value={primaryProfileId}
+        >
+          {profiles.length === 0 ? (
+            <option value="">尚无 API Profile</option>
+          ) : null}
+          {profiles.map((profile) => (
+            <option key={profile.id} value={profile.id}>
+              {profile.name}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label>
+        项目默认模型
+        <input
+          disabled={!project || !primaryProfileId || busy}
+          list={project ? `project-models-${project.id}` : undefined}
+          onChange={(event) => setDefaultModel(event.target.value)}
+          placeholder="例如 gpt-5"
+          value={defaultModel}
+        />
+        {project ? (
+          <datalist id={`project-models-${project.id}`}>
+            {modelOptions.map((model) => (
+              <option key={model} value={model} />
+            ))}
+          </datalist>
+        ) : null}
+      </label>
+      <button
+        className="primary-button"
+        disabled={!project || !primaryProfileId || !defaultModel.trim() || busy}
+        onClick={() => void save()}
+        type="button"
+      >
+        {busy ? "正在保存" : "保存项目运行设置"}
+      </button>
+    </section>
   );
 }
 

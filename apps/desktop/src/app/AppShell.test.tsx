@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type {
   ApiProfileSummaryDto,
+  ContextVersionDto,
   ProjectSummaryDto,
   RunPreviewResponse,
 } from "@batch-code-analyzer/ipc-types";
@@ -66,6 +67,57 @@ describe("AppShell", () => {
     expect(screen.getByText("API 配置档案")).toBeInTheDocument();
   });
 
+  it("adds a temporary scan exclusion pattern for the current session", async () => {
+    const user = userEvent.setup();
+    const onAddTemporaryScanPattern = vi.fn();
+    render(
+      <AppShell
+        onAddTemporaryScanPattern={onAddTemporaryScanPattern}
+        projects={[project()]}
+      />,
+    );
+
+    await user.type(screen.getByLabelText("临时排除模式"), "docs/**");
+    await user.click(screen.getByRole("button", { name: "添加临时排除模式" }));
+
+    expect(onAddTemporaryScanPattern).toHaveBeenCalledWith("docs/**");
+  });
+
+  it("renders context sources and delegates local discovery", async () => {
+    const user = userEvent.setup();
+    const onGenerateContext = vi.fn().mockResolvedValue(undefined);
+    const context: ContextVersionDto = {
+      createdAt: "2026-07-20T10:00:00Z",
+      id: "context-1",
+      manuallyEdited: false,
+      model: null,
+      projectId: "project-1",
+      schemaVersion: 1,
+      sourceFiles: [
+        {
+          contentHash: "blake3:readme",
+          included: true,
+          relativePath: "README.md",
+          truncated: false,
+        },
+      ],
+      status: "ready",
+      summary: "本地发现 1 个项目上下文文件。",
+      summaryHash: "blake3:summary",
+    };
+    render(
+      <AppShell
+        contextVersion={context}
+        onGenerateContext={onGenerateContext}
+        projects={[project()]}
+      />,
+    );
+
+    expect(screen.getByText("README.md")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "重新发现" }));
+    expect(onGenerateContext).toHaveBeenCalledOnce();
+  });
+
   it("renders API profile metadata without exposing a key", async () => {
     const user = userEvent.setup();
     const profile: ApiProfileSummaryDto = {
@@ -85,9 +137,44 @@ describe("AppShell", () => {
     render(<AppShell apiProfiles={[profile]} projects={[project()]} />);
 
     await user.click(screen.getByRole("tab", { name: "API 配置" }));
-    expect(screen.getByDisplayValue("Local API")).toBeInTheDocument();
+    expect(screen.getByLabelText("名称")).toHaveValue("Local API");
     expect(screen.getByText("已配置密钥")).toBeInTheDocument();
     expect(screen.queryByDisplayValue(/sk-|api-key/i)).not.toBeInTheDocument();
+  });
+
+  it("saves the selected project API route and default model", async () => {
+    const user = userEvent.setup();
+    const profile: ApiProfileSummaryDto = {
+      baseUrl: "https://example.test/v1",
+      defaultModel: "gpt-5",
+      hasSecret: true,
+      id: "profile-1",
+      lastConnectionStatus: "unknown",
+      lastErrorCode: null,
+      lastTestedAt: null,
+      modelCache: [],
+      modelCacheUpdatedAt: null,
+      name: "Local API",
+      protocol: "openai-responses",
+      schemaVersion: 1,
+    };
+    const onUpdateProjectRunSettings = vi.fn().mockResolvedValue(undefined);
+    render(
+      <AppShell
+        apiProfiles={[profile]}
+        onUpdateProjectRunSettings={onUpdateProjectRunSettings}
+        projects={[project()]}
+      />,
+    );
+
+    await user.click(screen.getByRole("tab", { name: "API 配置" }));
+    await user.click(screen.getByRole("button", { name: "保存项目运行设置" }));
+
+    expect(onUpdateProjectRunSettings).toHaveBeenCalledWith({
+      defaultModel: "gpt-5",
+      primaryProfileId: "profile-1",
+      projectId: "project-1",
+    });
   });
 
   it("saves profile metadata and writes a key through the dedicated handler", async () => {

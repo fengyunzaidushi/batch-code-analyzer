@@ -4,30 +4,40 @@
 
 use std::{
     collections::BTreeMap,
+    fmt::Write as _,
     fs,
     hash::{Hash, Hasher},
     path::Path,
     sync::atomic::{AtomicU64, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use batch_code_analyzer_api_profiles::ApiProfile as ProviderApiProfile;
 use batch_code_analyzer_domain::{
     ApiModelInfo, ApiProfile, ApiProfileConnectionStatus, ApiProfileId, ApiProtocol, ApiRouting,
-    ContextStatus, ExecutionDefaults, FileRecord, FileRecordId, FileResultStatus, FileSnapshot,
-    FileSourceStatus, FilterRules, Project, ProjectContext, ProjectId, ProjectPathStatus,
-    RetryPolicy, Rfc3339Timestamp, Run, RunId, RunSnapshot, RunStateMachine, RunStatus,
-    RunTransition, SensitiveFinding, Task, TaskId, TaskStateMachine, TaskStatus, TaskTransition,
-    TaskValueSource,
+    Attempt, AttemptError, AttemptId, AttemptStatus, ContextStatus, ContextVersion,
+    ContextVersionId, ContextVersionSourceFile, ExecutionDefaults, FileRecord, FileRecordId,
+    FileResultStatus, FileSnapshot, FileSourceStatus, FilterRules, Project, ProjectContext,
+    ProjectId, ProjectPathStatus, RetryPolicy, Rfc3339Timestamp, Run, RunId, RunSnapshot,
+    RunStateMachine, RunStatus, RunTransition, SensitiveFinding, Task, TaskId, TaskStateMachine,
+    TaskStatus, TaskTransition, TaskValueSource,
+};
+use batch_code_analyzer_model_providers::{
+    ModelProvider, OpenAiResponsesProvider, ProviderRequest,
 };
 use batch_code_analyzer_persistence::{
-    Database, PersistenceError, ProjectRowMetadata, LATEST_SCHEMA_VERSION,
+    AttemptRowMetadata, Database, PersistenceError, ProjectRowMetadata,
+    SensitiveFileAuthorizationMetadata, LATEST_SCHEMA_VERSION,
 };
 use batch_code_analyzer_repository_scanner::{
     FileDecision, ImportReport, ScanCancellation, ScanConfig, ScanError, ScanResult, Scanner,
+    DEFAULT_MAX_FILE_SIZE,
 };
-use batch_code_analyzer_security_core::SafeRoot;
+use batch_code_analyzer_secret_store::SecretRef;
+use batch_code_analyzer_security_core::{content_hash, detect_secrets, SafeRoot};
 use serde::Serialize;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
+use tokio_util::sync::CancellationToken;
 
 pub use batch_code_analyzer_domain as domain;
 
@@ -37,9 +47,13 @@ static NEXT_FILE_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_API_PROFILE_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_RUN_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_ATTEMPT_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_CONTEXT_VERSION_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum ProjectServiceError {
+    NotFound,
+    ApiProfileNotFound,
     PathUnavailable,
     Persistence(PersistenceError),
 }
@@ -48,6 +62,8 @@ impl ProjectServiceError {
     #[must_use]
     pub const fn code(&self) -> &'static str {
         match self {
+            Self::NotFound => "project_not_found",
+            Self::ApiProfileNotFound => "validation_invalid_value",
             Self::PathUnavailable => "project_path_unavailable",
             Self::Persistence(error) => error.code(),
         }
@@ -71,6 +87,7 @@ impl From<PersistenceError> for ProjectServiceError {
 #[derive(Debug, Eq, PartialEq)]
 pub enum FileServiceError {
     NotFound,
+    SensitiveConfirmationRequired,
     SensitiveBlocked,
     Unreadable,
     UnsupportedEncoding,
@@ -86,6 +103,7 @@ impl FileServiceError {
     pub const fn code(&self) -> &'static str {
         match self {
             Self::NotFound | Self::Deleted | Self::RuleExcluded => "validation_invalid_value",
+            Self::SensitiveConfirmationRequired => "security_sensitive_confirmation_required",
             Self::SensitiveBlocked => "security_sensitive_file_blocked",
             Self::Unreadable => "scan_file_unreadable",
             Self::UnsupportedEncoding => "scan_encoding_unsupported",
@@ -148,6 +166,12 @@ impl From<PersistenceError> for ApiProfileServiceError {
 pub struct ProjectAddResult {
     pub project: Project,
     pub created: bool,
+    pub config_mirror_warning: bool,
+}
+
+#[derive(Debug)]
+pub struct ProjectRunSettingsResult {
+    pub project: Project,
     pub config_mirror_warning: bool,
 }
 
@@ -222,8 +246,87 @@ pub struct RunService<'database> {
     database: &'database Database,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+pub enum RunExecutionError {
+    NotFound,
+    NotRunning,
+    PathUnavailable,
+    OutputWriteFailed,
+    Persistence(PersistenceError),
+}
+
+impl RunExecutionError {
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::NotFound => "run_not_found",
+            Self::NotRunning => "run_not_active",
+            Self::PathUnavailable => "project_path_unavailable",
+            Self::OutputWriteFailed => "output_write_failed",
+            Self::Persistence(error) => error.code(),
+        }
+    }
+}
+
+impl std::fmt::Display for RunExecutionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.code())
+    }
+}
+
+impl std::error::Error for RunExecutionError {}
+
+impl From<PersistenceError> for RunExecutionError {
+    fn from(error: PersistenceError) -> Self {
+        Self::Persistence(error)
+    }
+}
+
+pub struct RunExecutionService<'database> {
+    database: &'database Database,
+    provider: OpenAiResponsesProvider,
+}
+
 pub struct ProjectService<'database> {
     database: &'database Database,
+}
+
+pub struct ContextService<'database> {
+    database: &'database Database,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub enum ContextServiceError {
+    NotFound,
+    PathUnavailable,
+    DiscoveryFailed,
+    Persistence(PersistenceError),
+}
+
+impl ContextServiceError {
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::NotFound => "project_not_found",
+            Self::PathUnavailable => "project_path_unavailable",
+            Self::DiscoveryFailed => "context_discovery_failed",
+            Self::Persistence(error) => error.code(),
+        }
+    }
+}
+
+impl std::fmt::Display for ContextServiceError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.code())
+    }
+}
+
+impl std::error::Error for ContextServiceError {}
+
+impl From<PersistenceError> for ContextServiceError {
+    fn from(error: PersistenceError) -> Self {
+        Self::Persistence(error)
+    }
 }
 
 pub struct ApiProfileService<'database> {
@@ -292,9 +395,25 @@ impl<'database> ScanService<'database> {
         project: &Project,
         cancellation: ScanCancellation,
     ) -> Result<ScanResult, ScanServiceError> {
+        Self::scan_project_with_patterns(project, cancellation, Vec::new())
+    }
+
+    /// Runs the scanner with temporary user patterns that apply only to this
+    /// scan session.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable scan error without exposing scanner paths or driver
+    /// diagnostics.
+    pub fn scan_project_with_patterns(
+        project: &Project,
+        cancellation: ScanCancellation,
+        temporary_excluded_patterns: Vec<String>,
+    ) -> Result<ScanResult, ScanServiceError> {
         Scanner::new(ScanConfig {
             root: project.source_directory.clone().into(),
             cancellation,
+            excluded_patterns: temporary_excluded_patterns,
             ..ScanConfig::new(project.source_directory.clone())
         })
         .scan()
@@ -547,6 +666,60 @@ impl<'database> ProjectService<'database> {
         })
     }
 
+    /// Updates the API routing and default model used by future Runs.
+    ///
+    /// `SQLite` remains authoritative. The portable project mirror is written
+    /// only after the database transaction commits and never contains secrets.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable not-found error for a missing Project or API Profile,
+    /// or a persistence error when the settings cannot be committed.
+    pub async fn update_run_settings(
+        &self,
+        project_id: &ProjectId,
+        primary_profile_id: Option<ApiProfileId>,
+        default_model: Option<String>,
+    ) -> Result<ProjectRunSettingsResult, ProjectServiceError> {
+        let mut project = self
+            .database
+            .repository()
+            .get_project(project_id)
+            .await?
+            .ok_or(ProjectServiceError::NotFound)?;
+        if let Some(profile_id) = primary_profile_id.as_ref() {
+            let profile_exists = self
+                .database
+                .repository()
+                .get_api_profile(profile_id)
+                .await?
+                .is_some();
+            if !profile_exists {
+                return Err(ProjectServiceError::ApiProfileNotFound);
+            }
+        }
+        project.api_routing.primary_profile_id = primary_profile_id;
+        project.default_model = default_model
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        self.database
+            .repository()
+            .update_project(
+                &project,
+                ProjectRowMetadata {
+                    canonical_source_directory: project.source_directory.clone(),
+                    created_at: project.last_opened_at.clone(),
+                    updated_at: timestamp_now(),
+                },
+            )
+            .await?;
+        let config_mirror_warning = write_project_mirror(&project).is_err();
+        Ok(ProjectRunSettingsResult {
+            project,
+            config_mirror_warning,
+        })
+    }
+
     /// Lists project summaries from the `SQLite` source of truth.
     ///
     /// # Errors
@@ -617,6 +790,93 @@ impl<'database> ProjectService<'database> {
         self.database
             .repository()
             .set_file_included(project_id, file_id, included, &timestamp_now())
+            .await?
+            .ok_or(FileServiceError::NotFound)
+    }
+
+    /// Revalidates a sensitive file and records explicit user authorization to
+    /// include its current contents in a future Run.
+    ///
+    /// The file remains marked as sensitive. Only a safe hash, encoding, size,
+    /// timestamp, and redacted finding metadata are persisted; source content
+    /// never crosses the application boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable security or file error when confirmation, path safety,
+    /// readability, encoding, binary, or size validation fails.
+    pub async fn authorize_sensitive_file(
+        &self,
+        project_id: &ProjectId,
+        file_id: &FileRecordId,
+        confirmed: bool,
+    ) -> Result<FileRecord, FileServiceError> {
+        if !confirmed {
+            return Err(FileServiceError::SensitiveConfirmationRequired);
+        }
+        let file = self
+            .database
+            .repository()
+            .get_file_record(file_id)
+            .await?
+            .filter(|record| record.project_id == *project_id)
+            .ok_or(FileServiceError::NotFound)?;
+        if file.source_status != FileSourceStatus::Sensitive {
+            return Err(FileServiceError::RuleExcluded);
+        }
+        let project = self
+            .database
+            .repository()
+            .get_project(project_id)
+            .await?
+            .ok_or(FileServiceError::NotFound)?;
+        let root =
+            SafeRoot::new(&project.source_directory).map_err(|_| FileServiceError::Unreadable)?;
+        let relative = root
+            .relative_path(&file.relative_path)
+            .map_err(|_| FileServiceError::RuleExcluded)?;
+        let path = root.path().join(relative);
+        let metadata = fs::symlink_metadata(&path).map_err(|_| FileServiceError::Unreadable)?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(FileServiceError::RuleExcluded);
+        }
+        if metadata.len() > DEFAULT_MAX_FILE_SIZE {
+            return Err(FileServiceError::TooLarge);
+        }
+        let bytes = fs::read(&path).map_err(|_| FileServiceError::Unreadable)?;
+        if bytes.contains(&0) {
+            return Err(FileServiceError::Binary);
+        }
+        let content =
+            std::str::from_utf8(bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&bytes))
+                .map_err(|_| FileServiceError::UnsupportedEncoding)?;
+        let sensitive_findings = detect_secrets(content)
+            .into_iter()
+            .map(|finding| SensitiveFinding {
+                kind: finding.kind,
+                line: Some(finding.line),
+                column: Some(finding.column),
+            })
+            .collect::<Vec<_>>();
+        let modified_at = metadata.modified().ok().and_then(|time| {
+            time.duration_since(UNIX_EPOCH)
+                .ok()
+                .map(|duration| Rfc3339Timestamp::new(format!("unix:{}", duration.as_secs())))
+        });
+        self.database
+            .repository()
+            .authorize_sensitive_file(
+                project_id,
+                file_id,
+                SensitiveFileAuthorizationMetadata {
+                    size_bytes: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+                    modified_at,
+                    content_hash: content_hash(&bytes),
+                    encoding: "utf-8".into(),
+                    sensitive_findings,
+                    updated_at: timestamp_now(),
+                },
+            )
             .await?
             .ok_or(FileServiceError::NotFound)
     }
@@ -888,6 +1148,253 @@ impl<'database> RunService<'database> {
     }
 }
 
+impl<'database> RunExecutionService<'database> {
+    #[must_use]
+    pub fn new(database: &'database Database, provider: OpenAiResponsesProvider) -> Self {
+        Self { database, provider }
+    }
+
+    /// Executes queued Tasks sequentially and finalizes the Run.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable Run or persistence error. Provider and local input
+    /// failures are persisted on their Attempt and do not abort the batch.
+    #[allow(clippy::too_many_lines)]
+    pub async fn execute(&self, run_id: &RunId) -> Result<Run, RunExecutionError> {
+        let run = self
+            .database
+            .repository()
+            .get_run(run_id)
+            .await?
+            .ok_or(RunExecutionError::NotFound)?;
+        if run.status != RunStatus::Running {
+            return Err(RunExecutionError::NotRunning);
+        }
+        let project = self
+            .database
+            .repository()
+            .get_project(&run.project_id)
+            .await?
+            .ok_or(RunExecutionError::NotFound)?;
+        let root = SafeRoot::new(&project.source_directory)
+            .map_err(|_| RunExecutionError::PathUnavailable)?;
+
+        // Validate the immutable Run snapshot and resolve the provider before
+        // claiming a Task. A malformed or deleted profile must not leave a
+        // claimed Task stuck in `running`.
+        let profile_id = run
+            .snapshot
+            .api_routing
+            .primary_profile_id
+            .clone()
+            .ok_or(RunExecutionError::NotRunning)?;
+        let profile = self
+            .database
+            .repository()
+            .get_api_profile(&profile_id)
+            .await?
+            .ok_or(RunExecutionError::NotFound)?;
+        let secret_ref = profile
+            .secret_ref
+            .as_deref()
+            .map(SecretRef::new)
+            .ok_or(RunExecutionError::NotRunning)?;
+        let provider_profile = ProviderApiProfile::new(
+            batch_code_analyzer_api_profiles::ApiProfileId::new(profile.id.to_string()),
+            profile.name.clone(),
+            profile.base_url.clone(),
+            secret_ref,
+        )
+        .map_err(|_| RunExecutionError::NotRunning)?
+        .resolve();
+
+        while let Some(mut task) = self
+            .database
+            .repository()
+            .claim_next_task(run_id, &timestamp_now())
+            .await?
+        {
+            let created_at = timestamp_now();
+            let attempt_id = new_attempt_id();
+            let sequence = u32::try_from(
+                self.database
+                    .repository()
+                    .list_attempts(&task.id)
+                    .await?
+                    .len()
+                    .saturating_add(1),
+            )
+            .unwrap_or(u32::MAX);
+            let mut attempt = Attempt {
+                id: attempt_id,
+                task_id: task.id.clone(),
+                sequence,
+                api_profile_id: profile.id.clone(),
+                api_profile_name: profile.name.clone(),
+                actual_model: task.model_snapshot.clone(),
+                status: AttemptStatus::Created,
+                created_at: created_at.clone(),
+                started_at: None,
+                dispatched_at: None,
+                finished_at: None,
+                duration_ms: None,
+                http_status: None,
+                input_tokens: None,
+                output_tokens: None,
+                total_tokens: None,
+                retry_reason: None,
+                error: None,
+            };
+            self.database
+                .repository()
+                .append_attempt(&attempt, AttemptRowMetadata { response_id: None })
+                .await?;
+            task.latest_attempt_id = Some(attempt.id.clone());
+            attempt.status = AttemptStatus::Dispatched;
+            attempt.started_at = Some(created_at.clone());
+            attempt.dispatched_at = Some(created_at);
+            self.database
+                .repository()
+                .finalize_task_attempt(&attempt, AttemptRowMetadata { response_id: None }, &task)
+                .await?;
+            let started = Instant::now();
+            let source_path = root
+                .relative_path(&task.relative_path)
+                .map_err(|_| RunExecutionError::NotRunning)
+                .map(|relative| root.path().join(relative));
+            let source = match source_path {
+                Ok(path) => fs::read_to_string(path).map_err(|_| "scan_file_unreadable"),
+                Err(error) => Err(match error {
+                    RunExecutionError::NotRunning => "project_path_unavailable",
+                    _ => "scan_file_unreadable",
+                }),
+            };
+            let result = match source {
+                Ok(source) => {
+                    let request = ProviderRequest::new(
+                        provider_profile.clone(),
+                        task.model_snapshot.clone(),
+                        source,
+                    )
+                    .with_instructions(task.prompt_snapshot.clone())
+                    .with_max_output_tokens(run.snapshot.max_output_tokens)
+                    .with_timeout(Duration::from_secs(u64::from(run.snapshot.timeout_seconds)));
+                    self.provider
+                        .execute(request, CancellationToken::new())
+                        .await
+                        .map(|response| (response, started.elapsed()))
+                        .map_err(|error| (error.code().to_owned(), error.retryable()))
+                }
+                Err(code) => Err((code.to_owned(), false)),
+            };
+            match result {
+                Ok((response, elapsed)) => {
+                    let Ok(output_path) = write_result(
+                        &run.output_directory,
+                        &task.relative_path,
+                        &response.output_text,
+                    ) else {
+                        self.persist_task_failure(
+                            &mut attempt,
+                            &mut task,
+                            "output_write_failed".into(),
+                            true,
+                            started,
+                        )
+                        .await?;
+                        continue;
+                    };
+                    attempt.status = AttemptStatus::Succeeded;
+                    attempt.finished_at = Some(timestamp_now());
+                    attempt.duration_ms = Some(elapsed.as_millis().try_into().unwrap_or(u64::MAX));
+                    attempt.input_tokens = response.usage.input_tokens.map(saturating_u32);
+                    attempt.output_tokens = response.usage.output_tokens.map(saturating_u32);
+                    attempt.total_tokens = response.usage.total_tokens.map(saturating_u32);
+                    task.status =
+                        TaskStateMachine::transition(task.status, TaskTransition::Succeed)
+                            .map_err(|error| {
+                                RunExecutionError::Persistence(PersistenceError::StateTransition {
+                                    code: error.code(),
+                                })
+                            })?;
+                    task.current_result_path = Some(output_path);
+                    task.completed_at = attempt.finished_at.clone();
+                    self.database
+                        .repository()
+                        .finalize_task_attempt(
+                            &attempt,
+                            AttemptRowMetadata {
+                                response_id: response.response_id,
+                            },
+                            &task,
+                        )
+                        .await?;
+                }
+                Err((code, retryable)) => {
+                    self.persist_task_failure(&mut attempt, &mut task, code, retryable, started)
+                        .await?;
+                }
+            }
+        }
+
+        let stats = self
+            .database
+            .repository()
+            .recompute_run_stats(run_id)
+            .await?;
+        let transition = if stats.failed == 0
+            && stats.cancelled == 0
+            && stats.interrupted == 0
+            && stats.source_changed == 0
+        {
+            RunTransition::AllTasksSucceeded
+        } else {
+            RunTransition::AllTasksTerminalWithErrors
+        };
+        self.database
+            .repository()
+            .complete_run(run_id, transition, &timestamp_now())
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn persist_task_failure(
+        &self,
+        attempt: &mut Attempt,
+        task: &mut Task,
+        code: String,
+        retryable: bool,
+        started: Instant,
+    ) -> Result<(), RunExecutionError> {
+        attempt.status = if retryable {
+            AttemptStatus::FailedRetryable
+        } else {
+            AttemptStatus::FailedTerminal
+        };
+        attempt.finished_at = Some(timestamp_now());
+        attempt.duration_ms = Some(started.elapsed().as_millis().try_into().unwrap_or(u64::MAX));
+        attempt.error = Some(AttemptError {
+            code,
+            message: "模型请求未完成".into(),
+            retryable,
+            sanitized: true,
+        });
+        task.status =
+            TaskStateMachine::transition(task.status, TaskTransition::Fail).map_err(|error| {
+                RunExecutionError::Persistence(PersistenceError::StateTransition {
+                    code: error.code(),
+                })
+            })?;
+        task.completed_at = attempt.finished_at.clone();
+        self.database
+            .repository()
+            .finalize_task_attempt(attempt, AttemptRowMetadata { response_id: None }, task)
+            .await?;
+        Ok(())
+    }
+}
+
 fn resolve_prompt(input: &RunPreparationInput, project: &Project) -> String {
     input
         .prompt
@@ -909,6 +1416,38 @@ fn new_run_id() -> RunId {
 fn new_task_id() -> TaskId {
     let sequence = NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed);
     TaskId::new(format!("task-{sequence}"))
+}
+
+fn new_attempt_id() -> AttemptId {
+    let sequence = NEXT_ATTEMPT_ID.fetch_add(1, Ordering::Relaxed);
+    AttemptId::new(format!("attempt-{sequence}"))
+}
+
+fn new_context_version_id() -> ContextVersionId {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    let sequence = NEXT_CONTEXT_VERSION_ID.fetch_add(1, Ordering::Relaxed);
+    ContextVersionId::new(format!("context-{timestamp}-{sequence}"))
+}
+
+fn saturating_u32(value: u64) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+fn write_result(
+    output_directory: &str,
+    relative_path: &str,
+    content: &str,
+) -> std::io::Result<String> {
+    let directory = Path::new(output_directory);
+    fs::create_dir_all(directory)?;
+    let file_name = relative_path.replace(['/', '\\'], "__") + ".md";
+    let target = directory.join(file_name);
+    let temporary = target.with_extension(format!("md.tmp-{}", std::process::id()));
+    fs::write(&temporary, content.as_bytes())?;
+    fs::rename(&temporary, &target)?;
+    Ok(target.to_string_lossy().into_owned())
 }
 
 const fn blocker(code: &'static str, message: &'static str) -> RunBlockingReason {
@@ -954,6 +1493,135 @@ const fn invalid_run_blocker() -> RunBlockingReason {
 
 const fn invalid_task_blocker() -> RunBlockingReason {
     blocker("task_invalid_transition", "Task 状态转换无效")
+}
+
+impl<'database> ContextService<'database> {
+    #[must_use]
+    pub const fn new(database: &'database Database) -> Self {
+        Self { database }
+    }
+
+    /// Discovers root-level README/AGENTS files and stores a new immutable
+    /// local `ContextVersion` without sending source content to a provider.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable context error without exposing absolute paths or file
+    /// contents.
+    pub async fn generate(
+        &self,
+        project_id: &ProjectId,
+    ) -> Result<ContextVersion, ContextServiceError> {
+        let project = self
+            .database
+            .repository()
+            .get_project(project_id)
+            .await?
+            .ok_or(ContextServiceError::NotFound)?;
+        if project.path_status != ProjectPathStatus::Available {
+            return Err(ContextServiceError::PathUnavailable);
+        }
+        let root = SafeRoot::new(&project.source_directory)
+            .map_err(|_| ContextServiceError::PathUnavailable)?;
+        let mut discovered = Vec::new();
+        let entries =
+            fs::read_dir(root.path()).map_err(|_| ContextServiceError::DiscoveryFailed)?;
+        for entry in entries {
+            let entry = entry.map_err(|_| ContextServiceError::DiscoveryFailed)?;
+            let metadata = fs::symlink_metadata(entry.path())
+                .map_err(|_| ContextServiceError::DiscoveryFailed)?;
+            if !metadata.is_file() || metadata.file_type().is_symlink() {
+                continue;
+            }
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let lower = name.to_ascii_lowercase();
+            if !(lower == "agents.md" || lower.starts_with("readme")) {
+                continue;
+            }
+            if metadata.len() > DEFAULT_MAX_FILE_SIZE {
+                continue;
+            }
+            let bytes = fs::read(entry.path()).map_err(|_| ContextServiceError::DiscoveryFailed)?;
+            if bytes.contains(&0) {
+                continue;
+            }
+            if std::str::from_utf8(bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&bytes))
+                .is_err()
+            {
+                continue;
+            }
+            discovered.push((name, metadata.len(), content_hash(&bytes)));
+        }
+        discovered.sort_by(|left, right| left.0.cmp(&right.0));
+        let source_files = discovered
+            .iter()
+            .map(
+                |(relative_path, _, content_hash)| ContextVersionSourceFile {
+                    relative_path: relative_path.clone(),
+                    content_hash: content_hash.clone(),
+                    included: true,
+                    truncated: false,
+                },
+            )
+            .collect::<Vec<_>>();
+        let mut summary = format!("本地发现 {} 个项目上下文文件。\n\n", source_files.len());
+        for (relative_path, size_bytes, _) in &discovered {
+            let _ = writeln!(summary, "- {relative_path} ({size_bytes} bytes)");
+        }
+        summary.push_str("\n当前摘要由本地发现生成，尚未调用模型。\n");
+        let context_version = ContextVersion {
+            id: new_context_version_id(),
+            project_id: project_id.clone(),
+            status: ContextStatus::Ready,
+            source_files,
+            model: project
+                .context_model
+                .clone()
+                .or(project.default_model.clone()),
+            summary_hash: content_hash(summary.as_bytes()),
+            summary,
+            manually_edited: false,
+            created_at: timestamp_now(),
+        };
+        self.database
+            .repository()
+            .create_context_version_and_update_project(
+                &context_version,
+                true,
+                ContextStatus::Ready,
+                &timestamp_now(),
+            )
+            .await?;
+        Ok(context_version)
+    }
+
+    /// Gets the current `ContextVersion` referenced by a project.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable persistence error when the project or version cannot
+    /// be read.
+    pub async fn get(
+        &self,
+        project_id: &ProjectId,
+    ) -> Result<Option<ContextVersion>, ContextServiceError> {
+        let project = self
+            .database
+            .repository()
+            .get_project(project_id)
+            .await?
+            .ok_or(ContextServiceError::NotFound)?;
+        let Some(version_id) = project.project_context.current_version_id else {
+            return Ok(None);
+        };
+        self.database
+            .repository()
+            .get_context_version(&version_id)
+            .await
+            .map_err(Into::into)
+    }
 }
 
 impl<'database> ApiProfileService<'database> {
@@ -1133,6 +1801,7 @@ struct ProjectConfigMirror<'project> {
     default_prompt: &'project str,
     default_model: &'project Option<String>,
     context_model: &'project Option<String>,
+    api_routing: &'project ApiRouting,
     output_root: &'project Option<String>,
 }
 
@@ -1149,6 +1818,7 @@ fn write_project_mirror(project: &Project) -> std::io::Result<()> {
         default_prompt: &project.default_prompt,
         default_model: &project.default_model,
         context_model: &project.context_model,
+        api_routing: &project.api_routing,
         output_root: &project.output_root,
     };
     let bytes = serde_json::to_vec_pretty(&mirror).map_err(std::io::Error::other)?;
@@ -1195,14 +1865,19 @@ pub fn timestamp_now() -> Rfc3339Timestamp {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::PathBuf};
+    use std::{fs, path::PathBuf, sync::Arc, time::Duration};
 
+    use batch_code_analyzer_domain::ApiProfileId;
+    use batch_code_analyzer_model_providers::OpenAiResponsesProvider;
     use batch_code_analyzer_persistence::Database;
     use batch_code_analyzer_repository_scanner::ScanCancellation;
+    use batch_code_analyzer_secret_store::{MemorySecretStore, SecretStore, SecretValue};
+    use tokio::{io::AsyncWriteExt, net::TcpListener};
 
     use super::{
-        timestamp_now, ApiProfileService, ApiProfileServiceError, FileServiceError, ProjectService,
-        ProjectServiceError, RunPreparationInput, RunService, ScanService,
+        timestamp_now, ApiProfileService, ApiProfileServiceError, ContextService, FileServiceError,
+        ProjectService, ProjectServiceError, RunExecutionService, RunPreparationInput, RunService,
+        ScanService,
     };
 
     fn temporary_directory(name: &str) -> PathBuf {
@@ -1214,6 +1889,222 @@ mod tests {
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).expect("temporary directory should be created");
         path
+    }
+
+    async fn provider_server(status: &str, body: &str) -> String {
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("provider server should bind");
+        let address = listener.local_addr().expect("provider address");
+        let status = status.to_owned();
+        let body = body.to_owned();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("provider request");
+            let mut request = [0_u8; 4096];
+            let _ = tokio::io::AsyncReadExt::read(&mut stream, &mut request).await;
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nContent-Type: application/json\r\n\r\n{body}",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("provider response should be written");
+        });
+        format!("http://{address}/v1")
+    }
+
+    async fn execution_fixture(
+        status: &str,
+        body: &str,
+        output_blocked: bool,
+    ) -> (
+        Database,
+        batch_code_analyzer_domain::Run,
+        OpenAiResponsesProvider,
+        Arc<MemorySecretStore>,
+        PathBuf,
+    ) {
+        let database = Database::open_in_memory()
+            .await
+            .expect("database should open");
+        let path = temporary_directory(if status.starts_with("200") {
+            if output_blocked {
+                "run-execution-output-failure"
+            } else {
+                "run-execution-success"
+            }
+        } else {
+            "run-execution-failure"
+        });
+        fs::write(path.join("main.rs"), "fn main() {}\n").expect("source file should be created");
+        let mut project = ProjectService::new(&database)
+            .add_project(&path)
+            .await
+            .expect("project should add")
+            .project;
+        let output_path_file = path.join("output-blocker");
+        if output_blocked {
+            fs::write(
+                &output_path_file,
+                b"output path is intentionally unavailable",
+            )
+            .expect("output blocker should be created");
+            project.output_root = Some(output_path_file.to_string_lossy().into_owned());
+        }
+        let base_url = provider_server(status, body).await;
+        let profile = ApiProfileService::new(&database)
+            .save(None, "Test Profile".into(), base_url, Some("gpt-5".into()))
+            .await
+            .expect("profile should save");
+        let secrets = Arc::new(MemorySecretStore::new());
+        let secret_ref = secrets
+            .put(SecretValue::new("sk-test-key"))
+            .await
+            .expect("secret should be stored");
+        ApiProfileService::new(&database)
+            .set_secret_ref(&profile.id, Some(secret_ref.to_string()))
+            .await
+            .expect("profile secret should be linked");
+        project.api_routing.primary_profile_id = Some(profile.id);
+        database
+            .repository()
+            .update_project(
+                &project,
+                batch_code_analyzer_persistence::ProjectRowMetadata {
+                    canonical_source_directory: path.to_string_lossy().into_owned(),
+                    created_at: timestamp_now(),
+                    updated_at: timestamp_now(),
+                },
+            )
+            .await
+            .expect("project routing should save");
+        let scan = ScanService::scan_project(&project, ScanCancellation::new())
+            .expect("scan should complete");
+        ScanService::new(&database)
+            .persist_scan(&project.id, scan)
+            .await
+            .expect("scan should persist");
+        let run = RunService::new(&database)
+            .create(&project.id, &RunPreparationInput::default())
+            .await
+            .expect("run should create");
+        let provider = OpenAiResponsesProvider::with_client(
+            reqwest::Client::new(),
+            secrets.clone(),
+            Duration::from_secs(2),
+        );
+        (database, run, provider, secrets, path)
+    }
+
+    #[tokio::test]
+    async fn run_execution_persists_successful_attempt_and_result() {
+        let (database, run, provider, _secrets, path) = execution_fixture(
+            "200 OK",
+            r##"{"id":"resp-1","output_text":"# Result"}"##,
+            false,
+        )
+        .await;
+        let completed = RunExecutionService::new(&database, provider)
+            .execute(&run.id)
+            .await
+            .expect("run should execute");
+        assert_eq!(
+            completed.status,
+            batch_code_analyzer_domain::RunStatus::Completed
+        );
+        assert_eq!(completed.stats.succeeded, 1);
+        assert_eq!(completed.stats.failed, 0);
+        let tasks = database
+            .repository()
+            .unfinished_tasks(&run.id)
+            .await
+            .unwrap();
+        assert!(tasks.is_empty(), "successful task must not remain running");
+        let task_id = database.repository().list_tasks(&run.id).await.unwrap()[0]
+            .id
+            .clone();
+        let attempts = database.repository().list_attempts(&task_id).await.unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(
+            attempts[0].status,
+            batch_code_analyzer_domain::AttemptStatus::Succeeded
+        );
+        assert!(PathBuf::from(completed.output_directory)
+            .join("main.rs.md")
+            .is_file());
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[tokio::test]
+    async fn run_execution_persists_retryable_provider_failure() {
+        let (database, run, provider, _secrets, path) = execution_fixture(
+            "500 Internal Server Error",
+            r#"{"error":{"message":"temporary"}}"#,
+            false,
+        )
+        .await;
+        let completed = RunExecutionService::new(&database, provider)
+            .execute(&run.id)
+            .await
+            .expect("provider failure should be persisted");
+        assert_eq!(
+            completed.status,
+            batch_code_analyzer_domain::RunStatus::CompletedWithErrors
+        );
+        assert_eq!(completed.stats.failed, 1);
+        assert!(database
+            .repository()
+            .unfinished_tasks(&run.id)
+            .await
+            .unwrap()
+            .is_empty());
+        let task_id = database.repository().list_tasks(&run.id).await.unwrap()[0]
+            .id
+            .clone();
+        let attempts = database.repository().list_attempts(&task_id).await.unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(
+            attempts[0].status,
+            batch_code_analyzer_domain::AttemptStatus::FailedRetryable
+        );
+        assert_eq!(
+            attempts[0].error.as_ref().map(|error| error.code.as_str()),
+            Some("provider_server_error")
+        );
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[tokio::test]
+    async fn run_execution_persists_output_write_failure_without_success_state() {
+        let (database, run, provider, _secrets, path) = execution_fixture(
+            "200 OK",
+            r##"{"id":"resp-2","output_text":"# Result"}"##,
+            true,
+        )
+        .await;
+        let completed = RunExecutionService::new(&database, provider)
+            .execute(&run.id)
+            .await
+            .expect("output failure should be persisted");
+        assert_eq!(
+            completed.status,
+            batch_code_analyzer_domain::RunStatus::CompletedWithErrors
+        );
+        let task = database.repository().list_tasks(&run.id).await.unwrap()[0].clone();
+        assert_eq!(task.status, batch_code_analyzer_domain::TaskStatus::Failed);
+        assert_eq!(task.current_result_path, None);
+        let attempts = database.repository().list_attempts(&task.id).await.unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(
+            attempts[0].status,
+            batch_code_analyzer_domain::AttemptStatus::FailedRetryable
+        );
+        assert_eq!(
+            attempts[0].error.as_ref().map(|error| error.code.as_str()),
+            Some("output_write_failed")
+        );
+        let _ = fs::remove_dir_all(path);
     }
 
     #[tokio::test]
@@ -1277,6 +2168,66 @@ mod tests {
         assert!(result.config_mirror_warning);
         assert_eq!(service.list_projects().await.unwrap(), vec![result.project]);
 
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[tokio::test]
+    async fn updates_project_run_settings_and_rejects_unknown_profiles() {
+        let database = Database::open_in_memory()
+            .await
+            .expect("database should open");
+        let path = temporary_directory("run-settings");
+        let project = ProjectService::new(&database)
+            .add_project(&path)
+            .await
+            .expect("project should add")
+            .project;
+        let profile = ApiProfileService::new(&database)
+            .save(
+                None,
+                "Local API".into(),
+                "https://example.test/v1".into(),
+                Some("gpt-5".into()),
+            )
+            .await
+            .expect("profile should save");
+        let service = ProjectService::new(&database);
+        let updated = service
+            .update_run_settings(
+                &project.id,
+                Some(profile.id.clone()),
+                Some("gpt-5-mini".into()),
+            )
+            .await
+            .expect("project settings should update");
+        assert_eq!(
+            updated.project.api_routing.primary_profile_id,
+            Some(profile.id.clone())
+        );
+        assert_eq!(updated.project.default_model.as_deref(), Some("gpt-5-mini"));
+        let persisted = database
+            .repository()
+            .get_project(&project.id)
+            .await
+            .unwrap()
+            .expect("project should remain persisted");
+        assert_eq!(persisted, updated.project);
+        let mirror = fs::read_to_string(path.join(".batch-analysis/project.json"))
+            .expect("project mirror should exist");
+        assert!(mirror.contains("apiRouting"));
+        assert!(!mirror.contains("sk-test"));
+        assert_eq!(
+            service
+                .update_run_settings(
+                    &project.id,
+                    Some(ApiProfileId::new("missing-profile")),
+                    Some("gpt-5".into()),
+                )
+                .await
+                .expect_err("unknown profile should be rejected")
+                .code(),
+            "validation_invalid_value"
+        );
         let _ = fs::remove_dir_all(path);
     }
 
@@ -1440,6 +2391,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn context_generation_discovers_root_documents_and_updates_current_version() {
+        let database = Database::open_in_memory()
+            .await
+            .expect("database should open");
+        let path = temporary_directory("context");
+        fs::write(path.join("README.md"), "# InkOS\n\nProject overview\n")
+            .expect("README should be created");
+        fs::write(path.join("AGENTS.md"), "# Rules\nKeep source local.\n")
+            .expect("AGENTS should be created");
+        fs::write(path.join("README.tmp"), [0, 1, 2]).expect("binary fixture should be created");
+        let project = ProjectService::new(&database)
+            .add_project(&path)
+            .await
+            .expect("project should add")
+            .project;
+
+        let service = ContextService::new(&database);
+        let context = service
+            .generate(&project.id)
+            .await
+            .expect("context should generate");
+        assert_eq!(context.source_files.len(), 2);
+        assert_eq!(context.source_files[0].relative_path, "AGENTS.md");
+        assert_eq!(context.source_files[1].relative_path, "README.md");
+        assert!(!context.summary.contains("Project overview"));
+
+        let current = service
+            .get(&project.id)
+            .await
+            .expect("context should load")
+            .expect("current context should exist");
+        assert_eq!(current.id, context.id);
+        let updated_project = database
+            .repository()
+            .get_project(&project.id)
+            .await
+            .unwrap()
+            .expect("project should load");
+        assert_eq!(
+            updated_project.project_context.current_version_id.as_ref(),
+            Some(&context.id)
+        );
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[tokio::test]
     async fn file_inclusion_override_survives_rescan_and_blocks_sensitive_files() {
         let database = Database::open_in_memory()
             .await
@@ -1518,6 +2516,27 @@ mod tests {
                 .expect_err("sensitive file should remain blocked"),
             FileServiceError::SensitiveBlocked
         );
+
+        let authorized = ProjectService::new(&database)
+            .authorize_sensitive_file(&project.id, &sensitive.id, true)
+            .await
+            .expect("explicit sensitive authorization should succeed");
+        assert!(authorized.included);
+        assert_eq!(
+            authorized.source_status,
+            batch_code_analyzer_domain::FileSourceStatus::Sensitive
+        );
+        assert_eq!(
+            authorized.exclusion_reason.as_deref(),
+            Some("user_authorized_sensitive")
+        );
+        assert!(authorized.content_hash.is_some());
+
+        let revoked = ProjectService::new(&database)
+            .set_file_included(&project.id, &sensitive.id, false)
+            .await
+            .expect("sensitive authorization should be revocable");
+        assert!(!revoked.included);
 
         let _ = fs::remove_dir_all(path);
     }

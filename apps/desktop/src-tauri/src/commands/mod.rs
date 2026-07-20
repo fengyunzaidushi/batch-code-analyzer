@@ -8,20 +8,24 @@ use batch_code_analyzer_api_profiles::{
 };
 use batch_code_analyzer_app_core::{
     domain::{ApiModelInfo, ApiProfile, ApiProfileConnectionStatus, ApiProfileId, ProjectId},
-    timestamp_now, ApiProfileService, ApiProfileServiceError, FileServiceError, ProjectService,
-    ProjectServiceError, RunPreparationInput, RunService, RunServiceError, ScanService,
+    timestamp_now, ApiProfileService, ApiProfileServiceError, ContextService, ContextServiceError,
+    FileServiceError, ProjectService, ProjectServiceError, RunExecutionService,
+    RunPreparationInput, RunService, RunServiceError, ScanService,
 };
 use batch_code_analyzer_ipc_contracts::{
     ApiModelsFetchRequest, ApiModelsFetchResponse, ApiProfileDeleteRequest,
     ApiProfileDeleteResponse, ApiProfileListResponse, ApiProfileSaveRequest,
     ApiProfileSaveResponse, ApiProfileSummaryDto, ApiProfileTestRequest, ApiProfileTestResponse,
-    DatabaseStatus, ErrorCategory, FileListRequest, FileRecordSummaryDto, FileSetIncludedRequest,
-    FileSetIncludedResponse, HealthCheckResponse, HealthStatus, IpcError, PageResponse,
-    ProjectAddRequest, ProjectAddResponse, ProjectDetailDto, ProjectSummaryDto,
-    RunBlockingReasonDto, RunCreateRequest, RunCreateResponse, RunPreviewRequest,
+    ContextGenerateRequest, ContextGenerateResponse, ContextGetRequest, ContextGetResponse,
+    DatabaseStatus, ErrorCategory, FileAuthorizeSensitiveRequest, FileAuthorizeSensitiveResponse,
+    FileListRequest, FileRecordSummaryDto, FileSetIncludedRequest, FileSetIncludedResponse,
+    HealthCheckResponse, HealthStatus, IpcError, PageResponse, ProjectAddRequest,
+    ProjectAddResponse, ProjectDetailDto, ProjectRunSettingsUpdateRequest,
+    ProjectRunSettingsUpdateResponse, ProjectSummaryDto, RunBlockingReasonDto, RunCreateRequest,
+    RunCreateResponse, RunExecuteRequest, RunExecuteResponse, RunPreviewRequest,
     RunPreviewResponse, RunPreviewTaskDto, RunSummaryDto, ScanCancelRequest, ScanCancelResponse,
-    ScanOperationStatus, ScanReportDto, ScanStartRequest, ScanStartResponse, DTO_SCHEMA_VERSION,
-    HEALTH_CHECK_SCHEMA_VERSION,
+    ScanOperationStatus, ScanReportDto, ScanRuleSummaryDto, ScanStartRequest, ScanStartResponse,
+    DTO_SCHEMA_VERSION, HEALTH_CHECK_SCHEMA_VERSION,
 };
 use batch_code_analyzer_model_providers::{ModelProvider, OpenAiResponsesProvider, ProviderError};
 use batch_code_analyzer_persistence::DatabaseHealth;
@@ -92,6 +96,58 @@ pub(crate) async fn project_get(
 }
 
 #[tauri::command]
+pub(crate) async fn context_generate(
+    request: ContextGenerateRequest,
+    state: State<'_, PersistenceState>,
+) -> Result<ContextGenerateResponse, IpcError> {
+    let database = state.database.as_ref().ok_or_else(database_unavailable)?;
+    let context = ContextService::new(database)
+        .generate(&request.project_id)
+        .await
+        .map_err(context_service_error)?;
+    Ok(ContextGenerateResponse {
+        context: batch_code_analyzer_ipc_contracts::ContextVersionDto::from(&context),
+    })
+}
+
+#[tauri::command]
+pub(crate) async fn context_get(
+    request: ContextGetRequest,
+    state: State<'_, PersistenceState>,
+) -> Result<ContextGetResponse, IpcError> {
+    let database = state.database.as_ref().ok_or_else(database_unavailable)?;
+    let context = ContextService::new(database)
+        .get(&request.project_id)
+        .await
+        .map_err(context_service_error)?;
+    Ok(ContextGetResponse {
+        context: context
+            .as_ref()
+            .map(batch_code_analyzer_ipc_contracts::ContextVersionDto::from),
+    })
+}
+
+#[tauri::command]
+pub(crate) async fn project_update_run_settings(
+    request: ProjectRunSettingsUpdateRequest,
+    state: State<'_, PersistenceState>,
+) -> Result<ProjectRunSettingsUpdateResponse, IpcError> {
+    let database = state.database.as_ref().ok_or_else(database_unavailable)?;
+    let result = ProjectService::new(database)
+        .update_run_settings(
+            &request.project_id,
+            request.primary_profile_id,
+            request.default_model,
+        )
+        .await
+        .map_err(project_service_error)?;
+    Ok(ProjectRunSettingsUpdateResponse {
+        project: ProjectDetailDto::from(&result.project),
+        config_mirror_warning: result.config_mirror_warning,
+    })
+}
+
+#[tauri::command]
 pub(crate) async fn run_preview(
     request: RunPreviewRequest,
     state: State<'_, PersistenceState>,
@@ -155,6 +211,29 @@ pub(crate) async fn run_create(
         .map_err(run_service_error)?;
     Ok(RunCreateResponse {
         task_count: run.stats.total,
+        run: RunSummaryDto::from(&run),
+    })
+}
+
+#[tauri::command]
+pub(crate) async fn run_execute(
+    request: RunExecuteRequest,
+    state: State<'_, PersistenceState>,
+) -> Result<RunExecuteResponse, IpcError> {
+    let database = state.database.as_ref().ok_or_else(database_unavailable)?;
+    let provider = OpenAiResponsesProvider::new(state.secret_store.clone()).map_err(|_| {
+        ipc_error(
+            "provider_connection_failed",
+            ErrorCategory::Provider,
+            "模型 Provider 暂不可用",
+            true,
+        )
+    })?;
+    let run = RunExecutionService::new(database, provider)
+        .execute(&request.run_id)
+        .await
+        .map_err(run_execution_error)?;
+    Ok(RunExecuteResponse {
         run: RunSummaryDto::from(&run),
     })
 }
@@ -506,6 +585,21 @@ pub(crate) async fn file_set_included(
 }
 
 #[tauri::command]
+pub(crate) async fn file_authorize_sensitive(
+    request: FileAuthorizeSensitiveRequest,
+    state: State<'_, PersistenceState>,
+) -> Result<FileAuthorizeSensitiveResponse, IpcError> {
+    let database = state.database.as_ref().ok_or_else(database_unavailable)?;
+    let file = ProjectService::new(database)
+        .authorize_sensitive_file(&request.project_id, &request.file_id, request.confirmed)
+        .await
+        .map_err(file_service_error)?;
+    Ok(FileAuthorizeSensitiveResponse {
+        file: FileRecordSummaryDto::from(&file),
+    })
+}
+
+#[tauri::command]
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn scan_start(
     request: ScanStartRequest,
@@ -520,6 +614,14 @@ pub(crate) async fn scan_start(
         .ok_or_else(|| project_not_found(request.project_id.as_str()))?;
     let operation_id = new_scan_operation_id();
     let cancellation = ScanCancellation::new();
+    let temporary_patterns = request
+        .temporary_excluded_patterns
+        .unwrap_or_default()
+        .into_iter()
+        .map(|pattern| pattern.trim().to_owned())
+        .filter(|pattern| !pattern.is_empty())
+        .take(100)
+        .collect::<Vec<_>>();
     let report = scan_report(
         &operation_id,
         &project.id,
@@ -548,8 +650,13 @@ pub(crate) async fn scan_start(
     tauri::async_runtime::spawn(async move {
         let project_for_scan = project.clone();
         let cancellation_for_scan = cancellation.clone();
+        let temporary_patterns_for_scan = temporary_patterns.clone();
         let scan_result = tauri::async_runtime::spawn_blocking(move || {
-            ScanService::scan_project(&project_for_scan, cancellation_for_scan)
+            ScanService::scan_project_with_patterns(
+                &project_for_scan,
+                cancellation_for_scan,
+                temporary_patterns_for_scan,
+            )
         })
         .await;
         let report = match scan_result {
@@ -668,6 +775,13 @@ fn scan_report(
         sensitive_files: report.sensitive_files.clone(),
         symlink_files: report.symlink_files.clone(),
         invalid_gitignore_rules: report.invalid_gitignore_rules.clone(),
+        rules: ScanRuleSummaryDto {
+            builtin_directories: report.builtin_directories.clone(),
+            builtin_extensions: report.builtin_extensions.clone(),
+            gitignore_rules: report.gitignore_rules.clone(),
+            temporary_excluded_patterns: report.temporary_excluded_patterns.clone(),
+            sensitive_detection_enabled: report.sensitive_detection_enabled,
+        },
         cancelled: report.cancelled,
         file_count,
         generation,
@@ -712,6 +826,13 @@ fn database_unavailable() -> IpcError {
 
 fn project_service_error(error: ProjectServiceError) -> IpcError {
     match error {
+        ProjectServiceError::NotFound => project_not_found(""),
+        ProjectServiceError::ApiProfileNotFound => ipc_error(
+            "validation_invalid_value",
+            ErrorCategory::Validation,
+            "主 API Profile 不存在",
+            false,
+        ),
         ProjectServiceError::PathUnavailable => ipc_error(
             "project_path_unavailable",
             ErrorCategory::Project,
@@ -719,6 +840,25 @@ fn project_service_error(error: ProjectServiceError) -> IpcError {
             true,
         ),
         ProjectServiceError::Persistence(error) => persistence_error(&error),
+    }
+}
+
+fn context_service_error(error: ContextServiceError) -> IpcError {
+    match error {
+        ContextServiceError::NotFound => project_not_found(""),
+        ContextServiceError::PathUnavailable => ipc_error(
+            "project_path_unavailable",
+            ErrorCategory::Project,
+            "项目路径不可用",
+            true,
+        ),
+        ContextServiceError::DiscoveryFailed => ipc_error(
+            "context_discovery_failed",
+            ErrorCategory::Scan,
+            "项目上下文文件无法读取",
+            true,
+        ),
+        ContextServiceError::Persistence(error) => persistence_error(&error),
     }
 }
 
@@ -747,6 +887,38 @@ fn run_service_error(error: RunServiceError) -> IpcError {
     }
 }
 
+fn run_execution_error(error: batch_code_analyzer_app_core::RunExecutionError) -> IpcError {
+    match error {
+        batch_code_analyzer_app_core::RunExecutionError::NotFound => ipc_error(
+            "run_not_found",
+            ErrorCategory::Scheduler,
+            "Run 不存在",
+            false,
+        ),
+        batch_code_analyzer_app_core::RunExecutionError::NotRunning => ipc_error(
+            "run_not_active",
+            ErrorCategory::Scheduler,
+            "Run 当前不可执行",
+            false,
+        ),
+        batch_code_analyzer_app_core::RunExecutionError::PathUnavailable => ipc_error(
+            "project_path_unavailable",
+            ErrorCategory::Project,
+            "项目路径不可用",
+            true,
+        ),
+        batch_code_analyzer_app_core::RunExecutionError::OutputWriteFailed => ipc_error(
+            "output_write_failed",
+            ErrorCategory::Output,
+            "分析结果暂时无法写入",
+            true,
+        ),
+        batch_code_analyzer_app_core::RunExecutionError::Persistence(error) => {
+            persistence_error(&error)
+        }
+    }
+}
+
 fn file_service_error(error: FileServiceError) -> IpcError {
     match error {
         FileServiceError::NotFound | FileServiceError::Deleted => ipc_error(
@@ -759,6 +931,12 @@ fn file_service_error(error: FileServiceError) -> IpcError {
             "security_sensitive_file_blocked",
             ErrorCategory::Security,
             "敏感文件需要单独确认后才能纳入",
+            false,
+        ),
+        FileServiceError::SensitiveConfirmationRequired => ipc_error(
+            "security_sensitive_confirmation_required",
+            ErrorCategory::Security,
+            "请先确认敏感文件授权",
             false,
         ),
         FileServiceError::Unreadable => ipc_error(
@@ -873,8 +1051,8 @@ fn health_check_response(database_health: DatabaseHealth) -> HealthCheckResponse
 #[cfg(test)]
 mod tests {
     use super::{
-        health_check_response, ApiProfileServiceError, FileServiceError, ProjectServiceError,
-        ProviderError, RunServiceError,
+        health_check_response, ApiProfileServiceError, ContextServiceError, FileServiceError,
+        ProjectServiceError, ProviderError, RunServiceError,
     };
     use batch_code_analyzer_app_core::RunBlockingReason;
     use batch_code_analyzer_persistence::DatabaseHealth;
@@ -945,11 +1123,28 @@ mod tests {
     }
 
     #[test]
+    fn context_errors_use_stable_codes_and_safe_messages() {
+        let error = super::context_service_error(ContextServiceError::DiscoveryFailed);
+        assert_eq!(error.code, "context_discovery_failed");
+        assert_eq!(error.message, "项目上下文文件无法读取");
+        assert!(error.details.is_none());
+    }
+
+    #[test]
     fn file_errors_use_stable_codes_and_safe_messages() {
         let sensitive = super::file_service_error(FileServiceError::SensitiveBlocked);
         assert_eq!(sensitive.code, "security_sensitive_file_blocked");
         assert_eq!(sensitive.message, "敏感文件需要单独确认后才能纳入");
         assert!(sensitive.details.is_none());
+
+        let confirmation =
+            super::file_service_error(FileServiceError::SensitiveConfirmationRequired);
+        assert_eq!(
+            confirmation.code,
+            "security_sensitive_confirmation_required"
+        );
+        assert_eq!(confirmation.message, "请先确认敏感文件授权");
+        assert!(confirmation.details.is_none());
 
         let missing = super::file_service_error(FileServiceError::NotFound);
         assert_eq!(missing.code, "validation_invalid_value");
