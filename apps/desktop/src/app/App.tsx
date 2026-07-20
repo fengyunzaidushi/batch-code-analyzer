@@ -632,11 +632,14 @@ export function App() {
     if (!selectedProjectId) return;
     setRunError(null);
     setIsCreatingRun(true);
+
+    let createdRunId: string;
     try {
       const created = await createRun({
         projectId: selectedProjectId,
         ...runPreparation,
       });
+      createdRunId = created.run.id;
       const project = projects.find((item) => item.id === selectedProjectId);
       setActiveRun({
         projectId: selectedProjectId,
@@ -644,11 +647,22 @@ export function App() {
         status: "running",
       });
       setRunPreview(null);
-      await executeRun({ runId: created.run.id });
-      await refreshRunHistory(selectedProjectId, created.run.id);
-      setActiveRun(null);
     } catch (error) {
       setRunError(safeRunError(error));
+      setActiveRun(null);
+      setIsCreatingRun(false);
+      return;
+    }
+
+    try {
+      await executeRun({ runId: createdRunId });
+      await refreshRunHistory(selectedProjectId, createdRunId);
+    } catch (error) {
+      // The Run is already persisted at this point. Keep the error wording
+      // separate so an execution/persistence failure is not reported as a
+      // failed creation.
+      setRunError(safeRunExecutionError(error));
+      await refreshRunHistory(selectedProjectId, createdRunId);
     } finally {
       setActiveRun(null);
       setIsCreatingRun(false);
@@ -832,6 +846,31 @@ function safeRunError(error: unknown): string {
     return messages[error.code] ?? "Run 操作失败。";
   }
   return "Run 操作失败。";
+}
+
+function safeRunExecutionError(error: unknown): string {
+  if (isIpcError(error)) {
+    const messages: Record<string, string> = {
+      persistence_database_unavailable: "Run 已创建，但本地数据库暂时不可用。",
+      persistence_transaction_failed:
+        "Run 已创建，但执行状态暂时无法保存，请刷新运行历史。",
+      project_path_unavailable: "Run 已创建，但项目路径不可用。",
+      run_not_found: "Run 已创建，但运行记录无法读取。",
+      run_not_active: "Run 已创建，但当前状态不可执行。",
+      provider_connection_failed: "Run 已创建，但模型 Provider 暂不可用。",
+      provider_timeout: "模型请求超时，Task 已记录为可重试失败。",
+      provider_rate_limited: "模型服务限流，Task 已记录为可重试失败。",
+      provider_server_error: "模型服务暂时异常，Task 已记录为可重试失败。",
+      provider_authentication_failed: "模型认证失败，请检查 API Profile。",
+      provider_permission_denied: "模型服务拒绝了当前请求。",
+      provider_model_unavailable: "配置的模型不可用。",
+      provider_invalid_request: "模型请求参数无效。",
+      provider_invalid_response: "模型服务返回了无法识别的响应。",
+      output_write_failed: "分析结果无法写入本地磁盘。",
+    };
+    return messages[error.code] ?? "Run 已创建，但执行阶段失败。";
+  }
+  return "Run 已创建，但执行阶段失败。";
 }
 
 function safeRunResultsError(error: unknown): string {
