@@ -1669,26 +1669,27 @@ fn hash_prompt(prompt: &str) -> String {
 }
 
 fn new_run_id() -> RunId {
-    let sequence = NEXT_RUN_ID.fetch_add(1, Ordering::Relaxed);
-    RunId::new(format!("run-{sequence}"))
+    RunId::new(unique_id("run", &NEXT_RUN_ID))
 }
 
 fn new_task_id() -> TaskId {
-    let sequence = NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed);
-    TaskId::new(format!("task-{sequence}"))
+    TaskId::new(unique_id("task", &NEXT_TASK_ID))
 }
 
 fn new_attempt_id() -> AttemptId {
-    let sequence = NEXT_ATTEMPT_ID.fetch_add(1, Ordering::Relaxed);
-    AttemptId::new(format!("attempt-{sequence}"))
+    AttemptId::new(unique_id("attempt", &NEXT_ATTEMPT_ID))
 }
 
 fn new_context_version_id() -> ContextVersionId {
+    ContextVersionId::new(unique_id("context", &NEXT_CONTEXT_VERSION_ID))
+}
+
+fn unique_id(prefix: &str, sequence: &AtomicU64) -> String {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_nanos());
-    let sequence = NEXT_CONTEXT_VERSION_ID.fetch_add(1, Ordering::Relaxed);
-    ContextVersionId::new(format!("context-{timestamp}-{sequence}"))
+    let sequence = sequence.fetch_add(1, Ordering::Relaxed);
+    format!("{prefix}-{timestamp}-{sequence}")
 }
 
 fn saturating_u32(value: u64) -> u32 {

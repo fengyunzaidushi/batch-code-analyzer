@@ -158,6 +158,15 @@ export function App() {
     [],
   );
 
+  const refreshRunTasks = useCallback(
+    async (projectId: string, runId: string) => {
+      const response = await listTasks({ projectId, runId, limit: 500 });
+      setRunTasks(response.items);
+      setRunResultsError(null);
+    },
+    [],
+  );
+
   useEffect(() => {
     let active = true;
     void checkBackendHealth().then(
@@ -647,6 +656,7 @@ export function App() {
         status: "running",
       });
       setRunPreview(null);
+      await refreshRunHistory(selectedProjectId, createdRunId);
     } catch (error) {
       setRunError(safeRunError(error));
       setActiveRun(null);
@@ -654,16 +664,24 @@ export function App() {
       return;
     }
 
+    const refreshTimer = window.setInterval(() => {
+      void refreshRunTasks(selectedProjectId, createdRunId).catch((error) => {
+        setRunResultsError(safeRunResultsError(error));
+      });
+    }, 1000);
     try {
       await executeRun({ runId: createdRunId });
       await refreshRunHistory(selectedProjectId, createdRunId);
+      await refreshRunTasks(selectedProjectId, createdRunId);
     } catch (error) {
       // The Run is already persisted at this point. Keep the error wording
       // separate so an execution/persistence failure is not reported as a
       // failed creation.
       setRunError(safeRunExecutionError(error));
       await refreshRunHistory(selectedProjectId, createdRunId);
+      await refreshRunTasks(selectedProjectId, createdRunId);
     } finally {
+      window.clearInterval(refreshTimer);
       setActiveRun(null);
       setIsCreatingRun(false);
     }
