@@ -46,6 +46,7 @@ import {
   type ApiProfileSecretPutRequest,
 } from "../ipc/apiProfiles";
 import {
+  cancelRun,
   createRun,
   executeRun,
   getTask,
@@ -82,9 +83,10 @@ export function App() {
   const [apiProfiles, setApiProfiles] = useState<ApiProfileSummaryDto[]>([]);
   const [apiProfileError, setApiProfileError] = useState<string | null>(null);
   const [activeRun, setActiveRun] = useState<{
+    runId?: string;
     projectId: string;
     projectName: string;
-    status: "running";
+    status: "running" | "cancelling" | "interrupted";
   } | null>(null);
   const [runPreview, setRunPreview] = useState<RunPreviewResponse | null>(null);
   const [runPreparation, setRunPreparation] = useState<
@@ -267,6 +269,27 @@ export function App() {
       (response) => {
         if (!active) return;
         setRunHistory(response.items);
+        const activeHistoryRun = response.items.find((run) =>
+          ["running", "pausing", "paused", "cancelling"].includes(run.status),
+        );
+        if (activeHistoryRun) {
+          const project = projects.find(
+            (item) => item.id === selectedProjectId,
+          );
+          setActiveRun({
+            runId: activeHistoryRun.id,
+            projectId: selectedProjectId,
+            projectName: project?.name ?? "当前项目",
+            status:
+              activeHistoryRun.status === "cancelling"
+                ? "cancelling"
+                : "running",
+          });
+        } else {
+          setActiveRun((current) =>
+            current?.projectId === selectedProjectId ? null : current,
+          );
+        }
         setSelectedRunId((current) =>
           current && response.items.some((run) => run.id === current)
             ? current
@@ -280,12 +303,15 @@ export function App() {
         setRunHistory([]);
         setSelectedRunId(null);
         setRunTasks([]);
+        setActiveRun((current) =>
+          current?.projectId === selectedProjectId ? null : current,
+        );
       },
     );
     return () => {
       active = false;
     };
-  }, [selectedProjectId]);
+  }, [projects, selectedProjectId]);
 
   useEffect(() => {
     if (!selectedProjectId || !selectedRunId) {
@@ -651,6 +677,7 @@ export function App() {
       createdRunId = created.run.id;
       const project = projects.find((item) => item.id === selectedProjectId);
       setActiveRun({
+        runId: createdRunId,
         projectId: selectedProjectId,
         projectName: project?.name ?? "当前项目",
         status: "running",
@@ -687,6 +714,25 @@ export function App() {
     }
   };
 
+  const handleRunCancel = async () => {
+    const current = activeRun;
+    if (!current?.runId) return;
+    setRunError(null);
+    try {
+      await cancelRun(current.runId);
+      setActiveRun(null);
+      await refreshRunHistory(current.projectId, current.runId);
+      if (selectedProjectId === current.projectId) {
+        await refreshRunTasks(current.projectId, current.runId);
+      }
+    } catch (error) {
+      setRunError(safeRunCancellationError(error));
+      await refreshRunHistory(current.projectId, current.runId).catch(() => {
+        // Keep the original cancellation error visible when history refresh fails.
+      });
+    }
+  };
+
   const handleLoadTaskDetail = async (taskId: string) => {
     if (!selectedProjectId) return;
     setRunResultsError(null);
@@ -719,6 +765,7 @@ export function App() {
   return (
     <AppShell
       activeRun={activeRun}
+      onCancelRun={() => void handleRunCancel()}
       healthState={healthState}
       isAddingProject={isAddingProject}
       contextVersion={
@@ -875,6 +922,8 @@ function safeRunExecutionError(error: unknown): string {
       project_path_unavailable: "Run 已创建，但项目路径不可用。",
       run_not_found: "Run 已创建，但运行记录无法读取。",
       run_not_active: "Run 已创建，但当前状态不可执行。",
+      security_secret_not_found:
+        "Run 已创建，但当前进程无法读取 API Key，请重新配置。",
       provider_connection_failed: "Run 已创建，但模型 Provider 暂不可用。",
       provider_timeout: "模型请求超时，Task 已记录为可重试失败。",
       provider_rate_limited: "模型服务限流，Task 已记录为可重试失败。",
@@ -889,6 +938,19 @@ function safeRunExecutionError(error: unknown): string {
     return messages[error.code] ?? "Run 已创建，但执行阶段失败。";
   }
   return "Run 已创建，但执行阶段失败。";
+}
+
+function safeRunCancellationError(error: unknown): string {
+  if (isIpcError(error)) {
+    const messages: Record<string, string> = {
+      persistence_database_unavailable: "运行数据暂时不可用。",
+      persistence_transaction_failed: "取消状态暂时无法保存，请重试。",
+      run_not_found: "Run 不存在。",
+      run_not_active: "Run 已经结束，正在刷新运行历史。",
+    };
+    return messages[error.code] ?? "Run 暂时无法取消。";
+  }
+  return "Run 暂时无法取消。";
 }
 
 function safeRunResultsError(error: unknown): string {

@@ -583,6 +583,18 @@ pub struct RunExecuteResponse {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
+pub struct RunCancelRequest {
+    pub run_id: RunId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct RunCancelResponse {
+    pub run: RunSummaryDto,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
 pub struct RunListRequest {
     pub project_id: ProjectId,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -899,6 +911,8 @@ pub fn export_types(out_dir: &Path) -> Result<(), ExportError> {
     RunCreateResponse::export_all(&config)?;
     RunExecuteRequest::export_all(&config)?;
     RunExecuteResponse::export_all(&config)?;
+    RunCancelRequest::export_all(&config)?;
+    RunCancelResponse::export_all(&config)?;
     RunListRequest::export_all(&config)?;
     RunGetRequest::export_all(&config)?;
     RunGetResponse::export_all(&config)?;

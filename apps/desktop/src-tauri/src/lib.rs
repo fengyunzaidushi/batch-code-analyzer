@@ -1,3 +1,4 @@
+use batch_code_analyzer_app_core::RunCancellationRegistry;
 use batch_code_analyzer_persistence::{Database, DatabaseHealth, DatabaseStartup};
 use batch_code_analyzer_secret_store::{MemorySecretStore, SecretStoreAvailability};
 use std::sync::Arc;
@@ -13,6 +14,7 @@ pub(crate) struct PersistenceState {
     pub(crate) health: DatabaseHealth,
     pub(crate) scans: ScanState,
     pub(crate) secret_store: Arc<MemorySecretStore>,
+    pub(crate) run_cancellations: RunCancellationRegistry,
 }
 
 /// Starts the desktop application and registers its IPC commands.
@@ -34,6 +36,7 @@ pub fn run() {
                     secret_store: Arc::new(MemorySecretStore::with_availability(
                         SecretStoreAvailability::SessionOnly,
                     )),
+                    run_cancellations: RunCancellationRegistry::default(),
                 },
                 DatabaseStartup::Recovery(recovery) => PersistenceState {
                     health: recovery.health(),
@@ -42,6 +45,7 @@ pub fn run() {
                     secret_store: Arc::new(MemorySecretStore::with_availability(
                         SecretStoreAvailability::SessionOnly,
                     )),
+                    run_cancellations: RunCancellationRegistry::default(),
                 },
             };
 
@@ -60,6 +64,7 @@ pub fn run() {
             commands::run_preview,
             commands::run_create,
             commands::run_execute,
+            commands::run_cancel,
             commands::run_list,
             commands::run_get,
             commands::task_list,

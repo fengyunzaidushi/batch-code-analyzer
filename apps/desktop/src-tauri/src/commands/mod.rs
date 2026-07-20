@@ -7,11 +7,14 @@ use batch_code_analyzer_api_profiles::{
     ApiProfile as ProviderApiProfile, ApiProfileId as ProviderApiProfileId,
 };
 use batch_code_analyzer_app_core::{
-    domain::{ApiModelInfo, ApiProfile, ApiProfileConnectionStatus, ApiProfileId, ProjectId},
+    domain::{
+        ApiModelInfo, ApiProfile, ApiProfileConnectionStatus, ApiProfileId, ProjectId,
+        RunTransition,
+    },
     timestamp_now, ApiProfileService, ApiProfileServiceError, ContextService, ContextServiceError,
-    FileServiceError, ProjectService, ProjectServiceError, RunExecutionService,
-    RunPreparationInput, RunResultService, RunResultServiceError, RunService, RunServiceError,
-    ScanService,
+    FileServiceError, ProjectService, ProjectServiceError, RunCancellationError,
+    RunExecutionService, RunPreparationInput, RunResultService, RunResultServiceError, RunService,
+    RunServiceError, ScanService,
 };
 use batch_code_analyzer_ipc_contracts::{
     ApiModelsFetchRequest, ApiModelsFetchResponse, ApiProfileDeleteRequest,
@@ -23,12 +26,12 @@ use batch_code_analyzer_ipc_contracts::{
     FileSetIncludedResponse, HealthCheckResponse, HealthStatus, IpcError, PageResponse,
     ProjectAddRequest, ProjectAddResponse, ProjectDetailDto, ProjectRunSettingsUpdateRequest,
     ProjectRunSettingsUpdateResponse, ProjectSummaryDto, ResultReadRequest, ResultReadResponse,
-    RunBlockingReasonDto, RunCreateRequest, RunCreateResponse, RunExecuteRequest,
-    RunExecuteResponse, RunGetRequest, RunGetResponse, RunListRequest, RunPreviewRequest,
-    RunPreviewResponse, RunPreviewTaskDto, RunSummaryDto, ScanCancelRequest, ScanCancelResponse,
-    ScanOperationStatus, ScanReportDto, ScanRuleSummaryDto, ScanStartRequest, ScanStartResponse,
-    TaskGetRequest, TaskGetResponse, TaskListRequest, TaskSummaryDto, DTO_SCHEMA_VERSION,
-    HEALTH_CHECK_SCHEMA_VERSION,
+    RunBlockingReasonDto, RunCancelRequest, RunCancelResponse, RunCreateRequest, RunCreateResponse,
+    RunExecuteRequest, RunExecuteResponse, RunGetRequest, RunGetResponse, RunListRequest,
+    RunPreviewRequest, RunPreviewResponse, RunPreviewTaskDto, RunSummaryDto, ScanCancelRequest,
+    ScanCancelResponse, ScanOperationStatus, ScanReportDto, ScanRuleSummaryDto, ScanStartRequest,
+    ScanStartResponse, TaskGetRequest, TaskGetResponse, TaskListRequest, TaskSummaryDto,
+    DTO_SCHEMA_VERSION, HEALTH_CHECK_SCHEMA_VERSION,
 };
 use batch_code_analyzer_model_providers::{ModelProvider, OpenAiResponsesProvider, ProviderError};
 use batch_code_analyzer_persistence::DatabaseHealth;
@@ -156,6 +159,7 @@ pub(crate) async fn run_preview(
     state: State<'_, PersistenceState>,
 ) -> Result<RunPreviewResponse, IpcError> {
     let database = state.database.as_ref().ok_or_else(database_unavailable)?;
+    let secret_available = primary_secret_available(database, &state, &request.project_id).await?;
     let preview = RunService::new(database)
         .preview(
             &request.project_id,
@@ -166,6 +170,28 @@ pub(crate) async fn run_preview(
         )
         .await
         .map_err(run_service_error)?;
+    let mut blockers = preview
+        .blockers
+        .into_iter()
+        .map(|blocker| RunBlockingReasonDto {
+            code: blocker.code.to_owned(),
+            message: blocker.message.to_owned(),
+            file_id: blocker.file_id,
+            relative_path: blocker.relative_path,
+        })
+        .collect::<Vec<_>>();
+    if !secret_available
+        && !blockers
+            .iter()
+            .any(|blocker| blocker.code == "security_secret_not_found")
+    {
+        blockers.push(RunBlockingReasonDto {
+            code: "security_secret_not_found".into(),
+            message: "主 API Profile 密钥不可用，请重新配置".into(),
+            file_id: None,
+            relative_path: None,
+        });
+    }
     Ok(RunPreviewResponse {
         schema_version: DTO_SCHEMA_VERSION,
         project_id: preview.project_id,
@@ -179,16 +205,7 @@ pub(crate) async fn run_preview(
                 content_hash: task.content_hash,
             })
             .collect(),
-        blockers: preview
-            .blockers
-            .into_iter()
-            .map(|blocker| RunBlockingReasonDto {
-                code: blocker.code.to_owned(),
-                message: blocker.message.to_owned(),
-                file_id: blocker.file_id,
-                relative_path: blocker.relative_path,
-            })
-            .collect(),
+        blockers,
         model: preview.model,
         prompt_source: preview.prompt_source,
         model_source: preview.model_source,
@@ -202,6 +219,9 @@ pub(crate) async fn run_create(
     state: State<'_, PersistenceState>,
 ) -> Result<RunCreateResponse, IpcError> {
     let database = state.database.as_ref().ok_or_else(database_unavailable)?;
+    if !primary_secret_available(database, &state, &request.project_id).await? {
+        return Err(secret_not_available_error());
+    }
     let run = RunService::new(database)
         .create(
             &request.project_id,
@@ -224,19 +244,69 @@ pub(crate) async fn run_execute(
     state: State<'_, PersistenceState>,
 ) -> Result<RunExecuteResponse, IpcError> {
     let database = state.database.as_ref().ok_or_else(database_unavailable)?;
-    let provider = OpenAiResponsesProvider::new(state.secret_store.clone()).map_err(|_| {
-        ipc_error(
+    let run = database
+        .repository()
+        .get_run(&request.run_id)
+        .await
+        .map_err(|error| persistence_error(&error))?
+        .ok_or_else(|| {
+            ipc_error(
+                "run_not_found",
+                ErrorCategory::Scheduler,
+                "Run 不存在",
+                false,
+            )
+        })?;
+    if !primary_secret_available(database, &state, &run.project_id).await? {
+        let _ = database
+            .repository()
+            .complete_run(
+                &request.run_id,
+                RunTransition::ProcessInterrupted,
+                &timestamp_now(),
+            )
+            .await;
+        return Err(secret_not_available_error());
+    }
+    let Ok(provider) = OpenAiResponsesProvider::new(state.secret_store.clone()) else {
+        let _ = database
+            .repository()
+            .complete_run(
+                &request.run_id,
+                RunTransition::ProcessInterrupted,
+                &timestamp_now(),
+            )
+            .await;
+        return Err(ipc_error(
             "provider_connection_failed",
             ErrorCategory::Provider,
             "模型 Provider 暂不可用",
             true,
-        )
-    })?;
-    let run = RunExecutionService::new(database, provider)
-        .execute(&request.run_id)
-        .await
-        .map_err(run_execution_error)?;
+        ));
+    };
+    let cancellation = state.run_cancellations.register(&request.run_id);
+    let result = RunExecutionService::new(database, provider)
+        .execute_with_cancellation(&request.run_id, cancellation)
+        .await;
+    state.run_cancellations.remove(&request.run_id);
+    let run = result.map_err(run_execution_error)?;
     Ok(RunExecuteResponse {
+        run: RunSummaryDto::from(&run),
+    })
+}
+
+#[tauri::command]
+pub(crate) async fn run_cancel(
+    request: RunCancelRequest,
+    state: State<'_, PersistenceState>,
+) -> Result<RunCancelResponse, IpcError> {
+    let database = state.database.as_ref().ok_or_else(database_unavailable)?;
+    let run = RunService::new(database)
+        .cancel(&request.run_id)
+        .await
+        .map_err(run_cancellation_error)?;
+    state.run_cancellations.cancel(&request.run_id);
+    Ok(RunCancelResponse {
         run: RunSummaryDto::from(&run),
     })
 }
@@ -500,6 +570,51 @@ async fn profile_summary(
         None => false,
     };
     ApiProfileSummaryDto::from_profile(profile, has_secret)
+}
+
+async fn primary_secret_available(
+    database: &batch_code_analyzer_persistence::Database,
+    state: &State<'_, PersistenceState>,
+    project_id: &ProjectId,
+) -> Result<bool, IpcError> {
+    let project = database
+        .repository()
+        .get_project(project_id)
+        .await
+        .map_err(|error| persistence_error(&error))?;
+    let Some(project) = project else {
+        return Err(ipc_error(
+            "project_not_found",
+            ErrorCategory::Project,
+            "项目不存在",
+            false,
+        ));
+    };
+    let Some(profile_id) = project.api_routing.primary_profile_id else {
+        return Ok(false);
+    };
+    let profile = database
+        .repository()
+        .get_api_profile(&profile_id)
+        .await
+        .map_err(|error| persistence_error(&error))?;
+    let Some(secret_ref) = profile.and_then(|profile| profile.secret_ref) else {
+        return Ok(false);
+    };
+    Ok(state
+        .secret_store
+        .get(&SecretRef::new(secret_ref))
+        .await
+        .is_ok())
+}
+
+fn secret_not_available_error() -> IpcError {
+    ipc_error(
+        "security_secret_not_found",
+        ErrorCategory::Security,
+        "主 API Profile 密钥不可用，请重新配置",
+        false,
+    )
 }
 
 async fn fetch_models(
@@ -1103,6 +1218,24 @@ fn run_execution_error(error: batch_code_analyzer_app_core::RunExecutionError) -
         batch_code_analyzer_app_core::RunExecutionError::Persistence(error) => {
             persistence_error(&error)
         }
+    }
+}
+
+fn run_cancellation_error(error: RunCancellationError) -> IpcError {
+    match error {
+        RunCancellationError::NotFound => ipc_error(
+            "run_not_found",
+            ErrorCategory::Scheduler,
+            "Run 不存在",
+            false,
+        ),
+        RunCancellationError::NotActive => ipc_error(
+            "run_not_active",
+            ErrorCategory::Scheduler,
+            "Run 当前不可取消",
+            false,
+        ),
+        RunCancellationError::Persistence(error) => persistence_error(&error),
     }
 }
 

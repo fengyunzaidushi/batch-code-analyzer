@@ -182,6 +182,11 @@ run_list
 - `run_preview` 返回任务数量、排除数量、预计使用配置和阻塞项，不创建 Run。
 - `run_create` 在事务内创建不可变快照与 Task。
 - 首期存在活动 Run 时，第二次 `run_create` 返回 `run_active_exists`。
+- `run_cancel` 接收已有 `runId`，原子取消排队 Task、将已领取 Task 标记为中断，
+  并把 Run 收敛为 `cancelled`；若存在进程内请求，会同时触发请求取消令牌。
+- Run 预览、创建和执行前必须确认主 API Profile 的密钥引用当前可由 SecretStore
+  读取；只有数据库中存在引用但当前会话无法读取时，也必须返回
+  `security_secret_not_found`，不得创建必然失败的 Run。
 
 `run_preview` 和 `run_create` 接收 `projectId`，可选地接收当前提示词和模型覆盖。
 预览响应只包含相对路径、文件大小、内容哈希、解析后的模型和阻塞原因，不包含源文件内容。
@@ -193,6 +198,9 @@ queued Task，并在每次真实请求前追加 `created` Attempt。Provider 成
 Markdown，再提交 Attempt、Task 和 Run 统计；Provider、源码读取或结果写入失败时保存脱敏
 错误摘要并将 Task 收敛为 `failed`。命令只返回最终 `RunSummaryDto`，不返回源码、密钥或
 完整 Provider 响应。
+
+执行前置校验或持久化失败时，执行器会把仍处于活动状态的 Run 收敛为 `interrupted`，
+避免创建成功但永远占用活动 Run 限制。
 
 ### 4.6 File
 

@@ -3,6 +3,8 @@ import type {
   PageResponse,
   RunCreateRequest,
   RunCreateResponse,
+  RunCancelRequest,
+  RunCancelResponse,
   RunExecuteRequest,
   RunExecuteResponse,
   RunGetRequest,
@@ -29,6 +31,11 @@ export function executeRun(
   request: RunExecuteRequest,
 ): Promise<RunExecuteResponse> {
   return invoke<RunExecuteResponse>("run_execute", { request });
+}
+
+export function cancelRun(runId: string): Promise<RunCancelResponse> {
+  const request: RunCancelRequest = { runId };
+  return invoke<RunCancelResponse>("run_cancel", { request });
 }
 
 export function createRun(

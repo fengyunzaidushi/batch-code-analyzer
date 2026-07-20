@@ -861,7 +861,14 @@ impl Repository<'_> {
         let running = status_string(next_status)?;
         let mut transaction = self.database.begin_write().await?;
         let result = async {
-            ensure_run_exists(&mut transaction, run_id.as_str()).await?;
+            let run = load_run(&mut transaction, run_id.as_str())
+                .await?
+                .ok_or_else(|| run_not_found(run_id.as_str()))?;
+            if run.status != RunStatus::Running {
+                return Err(PersistenceError::StateTransition {
+                    code: "run_not_active",
+                });
+            }
             let id: Option<String> = sqlx::query_scalar(
                 "UPDATE tasks SET status = ?, started_at = ?
                  WHERE id = (
@@ -955,6 +962,47 @@ impl Repository<'_> {
         finish_write(transaction, result).await
     }
 
+    /// Appends an Attempt only while its Task and parent Run are still active.
+    /// This closes the cancellation race between claiming a Task and creating
+    /// its first Attempt.
+    ///
+    /// # Errors
+    ///
+    /// Returns a state transition error when cancellation won the race.
+    pub async fn append_running_attempt(
+        &self,
+        attempt: &Attempt,
+        metadata: AttemptRowMetadata,
+        run_id: &RunId,
+    ) -> Result<(), PersistenceError> {
+        if attempt.sequence == 0 {
+            return Err(PersistenceError::InvalidStoredState);
+        }
+        let row = AttemptRow::from_domain(attempt, metadata)?;
+        let mut transaction = self.database.begin_write().await?;
+        let result = async {
+            let task = load_task(&mut transaction, attempt.task_id.as_str())
+                .await?
+                .ok_or_else(|| task_not_found(attempt.task_id.as_str()))?;
+            if task.run_id.as_str() != run_id.as_str() || task.status != TaskStatus::Running {
+                return Err(PersistenceError::StateTransition {
+                    code: "task_invalid_transition",
+                });
+            }
+            let run = load_run(&mut transaction, run_id.as_str())
+                .await?
+                .ok_or_else(|| run_not_found(run_id.as_str()))?;
+            if run.status != RunStatus::Running {
+                return Err(PersistenceError::StateTransition {
+                    code: "run_not_active",
+                });
+            }
+            insert_attempt(&mut transaction, &row).await
+        }
+        .await;
+        finish_write(transaction, result).await
+    }
+
     /// Atomically records a completed Attempt and its Task snapshot.
     ///
     /// The Attempt row is created before dispatch; this method only updates
@@ -1025,6 +1073,134 @@ impl Repository<'_> {
             .bind(status_string(run.status)?)
             .bind(completed_at.as_str())
             .bind(serde_json::to_string(&stats).map_err(|_| PersistenceError::InvalidStoredState)?)
+            .bind(run_id.as_str())
+            .execute(transaction.connection())
+            .await
+            .map_err(|_| PersistenceError::TransactionFailed)?;
+            Ok(run)
+        }
+        .await;
+        finish_write(transaction, result).await
+    }
+
+    /// Cancels a Run and atomically settles every task that has not reached a
+    /// successful/failed terminal state. Queued tasks are cancelled; tasks
+    /// already claimed by the executor become interrupted because the remote
+    /// request outcome may be unknown.
+    ///
+    /// # Errors
+    ///
+    /// Returns `run_not_active` for an already terminal Run and a persistence
+    /// error when the transition cannot be committed.
+    #[allow(clippy::too_many_lines)]
+    pub async fn cancel_run(
+        &self,
+        run_id: &RunId,
+        completed_at: &Rfc3339Timestamp,
+    ) -> Result<Run, PersistenceError> {
+        let cancelling = status_string(RunStatus::Cancelling)?;
+        let cancelled = status_string(
+            RunStateMachine::transition(RunStatus::Cancelling, RunTransition::AllTasksTerminal)
+                .map_err(|error| PersistenceError::StateTransition { code: error.code() })?,
+        )?;
+        let pending = status_string(TaskStatus::Pending)?;
+        let queued = status_string(TaskStatus::Queued)?;
+        let running = status_string(TaskStatus::Running)?;
+        let cancelled_task = status_string(
+            TaskStateMachine::transition(TaskStatus::Queued, TaskTransition::Cancel)
+                .map_err(|error| PersistenceError::StateTransition { code: error.code() })?,
+        )?;
+        let interrupted_task = status_string(
+            TaskStateMachine::transition(TaskStatus::Running, TaskTransition::ProcessInterrupted)
+                .map_err(|error| PersistenceError::StateTransition { code: error.code() })?,
+        )?;
+        let interrupted_attempt =
+            status_string(batch_code_analyzer_domain::AttemptStatus::InterruptedUnknown)?;
+        let mut transaction = self.database.begin_write().await?;
+        let result = async {
+            let mut run = load_run(&mut transaction, run_id.as_str())
+                .await?
+                .ok_or_else(|| run_not_found(run_id.as_str()))?;
+            match run.status {
+                RunStatus::Running | RunStatus::Pausing | RunStatus::Paused => {
+                    run.status =
+                        RunStateMachine::transition(run.status, RunTransition::CancelRequested)
+                            .map_err(|error| PersistenceError::StateTransition {
+                                code: error.code(),
+                            })?;
+                }
+                RunStatus::Cancelling => {}
+                _ => {
+                    return Err(PersistenceError::StateTransition {
+                        code: "run_not_active",
+                    });
+                }
+            }
+            sqlx::query("UPDATE runs SET status = ? WHERE id = ?")
+                .bind(&cancelling)
+                .bind(run_id.as_str())
+                .execute(transaction.connection())
+                .await
+                .map_err(|_| PersistenceError::TransactionFailed)?;
+
+            sqlx::query(
+                "UPDATE tasks SET status = ?, completed_at = ?
+                 WHERE run_id = ? AND status IN (?, ?)",
+            )
+            .bind(&cancelled_task)
+            .bind(completed_at.as_str())
+            .bind(run_id.as_str())
+            .bind(&pending)
+            .bind(&queued)
+            .execute(transaction.connection())
+            .await
+            .map_err(|_| PersistenceError::TransactionFailed)?;
+
+            sqlx::query(
+                "UPDATE attempts SET status = ?, finished_at = ?
+                 WHERE task_id IN (
+                    SELECT id FROM tasks WHERE run_id = ? AND status = ?
+                 ) AND status IN (?, ?)",
+            )
+            .bind(&interrupted_attempt)
+            .bind(completed_at.as_str())
+            .bind(run_id.as_str())
+            .bind(&running)
+            .bind(status_string(
+                batch_code_analyzer_domain::AttemptStatus::Created,
+            )?)
+            .bind(status_string(
+                batch_code_analyzer_domain::AttemptStatus::Dispatched,
+            )?)
+            .execute(transaction.connection())
+            .await
+            .map_err(|_| PersistenceError::TransactionFailed)?;
+
+            sqlx::query(
+                "UPDATE tasks SET status = ?, completed_at = ?
+                 WHERE run_id = ? AND status = ?",
+            )
+            .bind(&interrupted_task)
+            .bind(completed_at.as_str())
+            .bind(run_id.as_str())
+            .bind(&running)
+            .execute(transaction.connection())
+            .await
+            .map_err(|_| PersistenceError::TransactionFailed)?;
+
+            run.status = RunStatus::Cancelled;
+            run.completed_at = Some(completed_at.clone());
+            run.stats =
+                recompute_run_stats_in_transaction(&mut transaction, run_id.as_str()).await?;
+            sqlx::query(
+                "UPDATE runs SET status = ?, completed_at = ?, stats_json = ? WHERE id = ?",
+            )
+            .bind(&cancelled)
+            .bind(completed_at.as_str())
+            .bind(
+                serde_json::to_string(&run.stats)
+                    .map_err(|_| PersistenceError::InvalidStoredState)?,
+            )
             .bind(run_id.as_str())
             .execute(transaction.connection())
             .await
@@ -1495,10 +1671,11 @@ async fn update_task_row(
     transaction: &mut WriteTransaction<'_>,
     row: &TaskRow,
 ) -> Result<u64, PersistenceError> {
+    let running = status_string(TaskStatus::Running)?;
     let result = sqlx::query(
         "UPDATE tasks SET status = ?, current_result_path = ?,
             latest_attempt_id = ?, result_version = ?, started_at = ?,
-            completed_at = ? WHERE id = ?",
+            completed_at = ? WHERE id = ? AND status = ?",
     )
     .bind(&row.status)
     .bind(&row.current_result_path)
@@ -1507,6 +1684,7 @@ async fn update_task_row(
     .bind(&row.started_at)
     .bind(&row.completed_at)
     .bind(&row.id)
+    .bind(running)
     .execute(transaction.connection())
     .await
     .map_err(|_| PersistenceError::TransactionFailed)?;

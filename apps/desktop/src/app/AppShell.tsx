@@ -47,6 +47,7 @@ export type ShellHealthState =
   "checking" | "ready" | "degraded" | "unavailable";
 
 export interface ActiveRunSummary {
+  runId?: string;
   projectId: string;
   projectName: string;
   status: "running" | "paused" | "cancelling" | "interrupted";
@@ -60,6 +61,7 @@ interface AppShellProps {
   projects?: readonly ShellProject[];
   healthState?: ShellHealthState;
   activeRun?: ActiveRunSummary | null;
+  onCancelRun?: () => void;
   onAddProject?: () => void;
   onAuthorizeSensitiveFile?: (fileId: string) => Promise<void>;
   onGenerateContext?: () => Promise<void> | void;
@@ -123,6 +125,7 @@ export function AppShell({
   projects = [],
   healthState = "checking",
   activeRun = null,
+  onCancelRun = () => undefined,
   onAddProject = () => undefined,
   onAuthorizeSensitiveFile = async () => undefined,
   onGenerateContext = async () => undefined,
@@ -202,6 +205,7 @@ export function AppShell({
       <GlobalRunBar
         activeRun={activeRun}
         healthState={healthState}
+        onCancelRun={onCancelRun}
         onRetryHealth={onRetryHealth}
       />
       <div className="shell-body">
@@ -282,10 +286,12 @@ export function AppShell({
 function GlobalRunBar({
   activeRun,
   healthState,
+  onCancelRun,
   onRetryHealth,
 }: {
   activeRun: ActiveRunSummary | null;
   healthState: ShellHealthState;
+  onCancelRun: () => void;
   onRetryHealth: () => void;
 }) {
   return (
@@ -308,6 +314,19 @@ function GlobalRunBar({
             <span className="muted-status">
               {runStatusLabel(activeRun.status)}
             </span>
+            {activeRun.runId ? (
+              <button
+                aria-label="取消 Run"
+                className="run-cancel-button"
+                disabled={activeRun.status === "cancelling"}
+                onClick={onCancelRun}
+                title="取消 Run"
+                type="button"
+              >
+                <X aria-hidden="true" size={13} />
+                取消
+              </button>
+            ) : null}
           </div>
         ) : (
           <span className="muted-status">没有活动 Run</span>

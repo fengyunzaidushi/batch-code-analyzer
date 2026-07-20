@@ -55,6 +55,8 @@ export type { ProjectSummaryDto } from "./generated/ProjectSummaryDto";
 export type { Rfc3339Timestamp } from "./generated/Rfc3339Timestamp";
 export type { RunId } from "./generated/RunId";
 export type { RunBlockingReasonDto } from "./generated/RunBlockingReasonDto";
+export type { RunCancelRequest } from "./generated/RunCancelRequest";
+export type { RunCancelResponse } from "./generated/RunCancelResponse";
 export type { RunCreateRequest } from "./generated/RunCreateRequest";
 export type { RunCreateResponse } from "./generated/RunCreateResponse";
 export type { RunExecuteRequest } from "./generated/RunExecuteRequest";

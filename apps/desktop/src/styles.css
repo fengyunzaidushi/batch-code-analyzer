@@ -160,6 +160,25 @@ button:disabled {
 .muted-status {
   color: #96a3b2;
 }
+.run-cancel-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 7px;
+  color: #ffd7d3;
+  background: transparent;
+  border: 1px solid #8c4d52;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 10px;
+}
+.run-cancel-button:hover:not(:disabled) {
+  background: rgba(201, 91, 91, 0.18);
+}
+.run-cancel-button:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
 
 .shell-body {
   display: grid;

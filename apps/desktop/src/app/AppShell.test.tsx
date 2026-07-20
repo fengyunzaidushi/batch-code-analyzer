@@ -72,6 +72,26 @@ describe("AppShell", () => {
     expect(screen.getByText("API 配置档案")).toBeInTheDocument();
   });
 
+  it("exposes cancellation for a persisted active run", async () => {
+    const user = userEvent.setup();
+    const onCancelRun = vi.fn();
+    render(
+      <AppShell
+        activeRun={{
+          runId: "run-3",
+          projectId: "project-1",
+          projectName: "Analyzer Repo",
+          status: "running",
+        }}
+        onCancelRun={onCancelRun}
+        projects={[project()]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "取消 Run" }));
+    expect(onCancelRun).toHaveBeenCalledOnce();
+  });
+
   it("adds a temporary scan exclusion pattern for the current session", async () => {
     const user = userEvent.setup();
     const onAddTemporaryScanPattern = vi.fn();

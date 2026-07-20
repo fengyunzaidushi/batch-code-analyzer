@@ -357,6 +357,77 @@ async fn recovery_queries_find_only_unfinished_objects() {
     );
 }
 
+#[tokio::test]
+async fn cancelling_run_settles_queued_and_running_tasks_atomically() {
+    let database = Database::open_in_memory()
+        .await
+        .expect("database should open");
+    let repository = database.repository();
+    let project = project("project-cancel", "/workspace/cancel");
+    repository
+        .create_project(&project, project_metadata("/workspace/cancel"))
+        .await
+        .unwrap();
+    let file = file("file-cancel", &project.id);
+    repository
+        .create_file_record(&file, file_metadata())
+        .await
+        .unwrap();
+    let run = run("run-cancel", &project.id, RunStatus::Running);
+    let queued = task("task-queued", &run.id, file.id.as_str(), TaskStatus::Queued);
+    let running = task(
+        "task-running",
+        &run.id,
+        file.id.as_str(),
+        TaskStatus::Running,
+    );
+    repository
+        .create_run_with_tasks(
+            &run,
+            RunRowMetadata {
+                interruption_reason: None,
+            },
+            &[queued, running.clone()],
+        )
+        .await
+        .unwrap();
+    repository
+        .append_attempt(
+            &attempt("attempt-running", &running.id, 1, AttemptStatus::Dispatched),
+            AttemptRowMetadata { response_id: None },
+        )
+        .await
+        .unwrap();
+
+    let cancelled = repository
+        .cancel_run(&run.id, &timestamp())
+        .await
+        .expect("run should cancel");
+    assert_eq!(cancelled.status, RunStatus::Cancelled);
+    assert_eq!(cancelled.stats.cancelled, 1);
+    assert_eq!(cancelled.stats.interrupted, 1);
+    assert!(repository.unfinished_runs().await.unwrap().is_empty());
+    let tasks = repository.list_tasks(&run.id).await.unwrap();
+    assert!(tasks
+        .iter()
+        .any(|task| task.status == TaskStatus::Cancelled));
+    assert!(tasks
+        .iter()
+        .any(|task| task.status == TaskStatus::Interrupted));
+    assert_eq!(
+        repository.list_attempts(&running.id).await.unwrap()[0].status,
+        AttemptStatus::InterruptedUnknown
+    );
+    assert_eq!(
+        repository
+            .cancel_run(&run.id, &timestamp())
+            .await
+            .expect_err("terminal run cannot be cancelled")
+            .code(),
+        "run_not_active"
+    );
+}
+
 fn timestamp() -> Rfc3339Timestamp {
     Rfc3339Timestamp::new(TIMESTAMP)
 }

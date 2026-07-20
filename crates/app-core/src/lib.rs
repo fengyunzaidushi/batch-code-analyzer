@@ -8,7 +8,10 @@ use std::{
     fs,
     hash::{Hash, Hasher},
     path::Path,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -216,6 +219,38 @@ pub enum RunServiceError {
     Persistence(PersistenceError),
 }
 
+#[derive(Debug, Eq, PartialEq)]
+pub enum RunCancellationError {
+    NotFound,
+    NotActive,
+    Persistence(PersistenceError),
+}
+
+impl RunCancellationError {
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::NotFound => "run_not_found",
+            Self::NotActive => "run_not_active",
+            Self::Persistence(error) => error.code(),
+        }
+    }
+}
+
+impl std::fmt::Display for RunCancellationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.code())
+    }
+}
+
+impl std::error::Error for RunCancellationError {}
+
+impl From<PersistenceError> for RunCancellationError {
+    fn from(error: PersistenceError) -> Self {
+        Self::Persistence(error)
+    }
+}
+
 impl RunServiceError {
     #[must_use]
     pub const fn code(&self) -> &'static str {
@@ -244,6 +279,56 @@ impl From<PersistenceError> for RunServiceError {
 
 pub struct RunService<'database> {
     database: &'database Database,
+}
+
+/// Process-local cancellation handles shared by the Tauri execute/cancel
+/// commands. The database remains the source of truth; these tokens only make
+/// an in-flight provider request stop promptly.
+#[derive(Clone, Default)]
+pub struct RunCancellationRegistry {
+    tokens: Arc<Mutex<BTreeMap<String, CancellationToken>>>,
+}
+
+impl RunCancellationRegistry {
+    ///
+    /// # Panics
+    ///
+    /// Panics only if another thread poisoned the registry mutex.
+    #[must_use]
+    pub fn register(&self, run_id: &RunId) -> CancellationToken {
+        let token = CancellationToken::new();
+        self.tokens
+            .lock()
+            .expect("run cancellation registry lock poisoned")
+            .insert(run_id.to_string(), token.clone());
+        token
+    }
+
+    ///
+    /// # Panics
+    ///
+    /// Panics only if another thread poisoned the registry mutex.
+    pub fn cancel(&self, run_id: &RunId) {
+        if let Some(token) = self
+            .tokens
+            .lock()
+            .expect("run cancellation registry lock poisoned")
+            .get(run_id.as_str())
+        {
+            token.cancel();
+        }
+    }
+
+    ///
+    /// # Panics
+    ///
+    /// Panics only if another thread poisoned the registry mutex.
+    pub fn remove(&self, run_id: &RunId) {
+        self.tokens
+            .lock()
+            .expect("run cancellation registry lock poisoned")
+            .remove(run_id.as_str());
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -956,6 +1041,30 @@ impl<'database> RunService<'database> {
         Self { database }
     }
 
+    /// Cancels a persisted Run and settles its queued/in-flight Tasks in one
+    /// transaction. The caller may separately signal an in-flight provider via
+    /// [`RunCancellationRegistry`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable error when the Run is missing, already terminal, or
+    /// cannot be committed.
+    pub async fn cancel(&self, run_id: &RunId) -> Result<Run, RunCancellationError> {
+        self.database
+            .repository()
+            .cancel_run(run_id, &timestamp_now())
+            .await
+            .map_err(|error| match error {
+                PersistenceError::RecordNotFound { kind: "run", .. } => {
+                    RunCancellationError::NotFound
+                }
+                PersistenceError::StateTransition {
+                    code: "run_not_active",
+                } => RunCancellationError::NotActive,
+                other => RunCancellationError::Persistence(other),
+            })
+    }
+
     /// Builds a read-only preview of the next immutable Run snapshot.
     ///
     /// # Errors
@@ -1414,6 +1523,50 @@ impl<'database> RunExecutionService<'database> {
         Self { database, provider }
     }
 
+    /// Executes a Run with a private cancellation token.
+    ///
+    /// The desktop command uses [`Self::execute_with_cancellation`] so a
+    /// separate cancel command can interrupt the provider request.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable execution or persistence error.
+    pub async fn execute(&self, run_id: &RunId) -> Result<Run, RunExecutionError> {
+        self.execute_with_cancellation(run_id, CancellationToken::new())
+            .await
+    }
+
+    /// Executes a Run and converts preflight/persistence failures into an
+    /// interrupted terminal Run instead of leaving an orphaned `running` row.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable execution or persistence error after attempting to
+    /// persist the Run as interrupted.
+    pub async fn execute_with_cancellation(
+        &self,
+        run_id: &RunId,
+        cancellation: CancellationToken,
+    ) -> Result<Run, RunExecutionError> {
+        let cancellation_observer = cancellation.clone();
+        let result = self.execute_inner(run_id, cancellation).await;
+        if result.is_err() && !cancellation_observer.is_cancelled() {
+            if let Ok(Some(run)) = self.database.repository().get_run(run_id).await {
+                if matches!(
+                    run.status,
+                    RunStatus::Running | RunStatus::Pausing | RunStatus::Cancelling
+                ) {
+                    let _ = self
+                        .database
+                        .repository()
+                        .complete_run(run_id, RunTransition::ProcessInterrupted, &timestamp_now())
+                        .await;
+                }
+            }
+        }
+        result
+    }
+
     /// Executes queued Tasks sequentially and finalizes the Run.
     ///
     /// # Errors
@@ -1421,7 +1574,11 @@ impl<'database> RunExecutionService<'database> {
     /// Returns a stable Run or persistence error. Provider and local input
     /// failures are persisted on their Attempt and do not abort the batch.
     #[allow(clippy::too_many_lines)]
-    pub async fn execute(&self, run_id: &RunId) -> Result<Run, RunExecutionError> {
+    async fn execute_inner(
+        &self,
+        run_id: &RunId,
+        cancellation: CancellationToken,
+    ) -> Result<Run, RunExecutionError> {
         let run = self
             .database
             .repository()
@@ -1469,12 +1626,15 @@ impl<'database> RunExecutionService<'database> {
         .map_err(|_| RunExecutionError::NotRunning)?
         .resolve();
 
-        while let Some(mut task) = self
-            .database
-            .repository()
-            .claim_next_task(run_id, &timestamp_now())
-            .await?
-        {
+        while !cancellation.is_cancelled() {
+            let Some(mut task) = self
+                .database
+                .repository()
+                .claim_next_task(run_id, &timestamp_now())
+                .await?
+            else {
+                break;
+            };
             let created_at = timestamp_now();
             let attempt_id = new_attempt_id();
             let sequence = u32::try_from(
@@ -1508,7 +1668,7 @@ impl<'database> RunExecutionService<'database> {
             };
             self.database
                 .repository()
-                .append_attempt(&attempt, AttemptRowMetadata { response_id: None })
+                .append_running_attempt(&attempt, AttemptRowMetadata { response_id: None }, run_id)
                 .await?;
             task.latest_attempt_id = Some(attempt.id.clone());
             attempt.status = AttemptStatus::Dispatched;
@@ -1541,13 +1701,16 @@ impl<'database> RunExecutionService<'database> {
                     .with_max_output_tokens(run.snapshot.max_output_tokens)
                     .with_timeout(Duration::from_secs(u64::from(run.snapshot.timeout_seconds)));
                     self.provider
-                        .execute(request, CancellationToken::new())
+                        .execute(request, cancellation.clone())
                         .await
                         .map(|response| (response, started.elapsed()))
                         .map_err(|error| (error.code().to_owned(), error.retryable()))
                 }
                 Err(code) => Err((code.to_owned(), false)),
             };
+            if cancellation.is_cancelled() {
+                break;
+            }
             match result {
                 Ok((response, elapsed)) => {
                     let Ok(output_path) = write_result(
@@ -1596,6 +1759,15 @@ impl<'database> RunExecutionService<'database> {
                         .await?;
                 }
             }
+        }
+
+        if cancellation.is_cancelled() {
+            return self
+                .database
+                .repository()
+                .get_run(run_id)
+                .await?
+                .ok_or(RunExecutionError::NotFound);
         }
 
         let stats = self
@@ -2377,6 +2549,47 @@ mod tests {
         assert_eq!(
             attempts[0].error.as_ref().map(|error| error.code.as_str()),
             Some("output_write_failed")
+        );
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[tokio::test]
+    async fn run_execution_preflight_failure_interrupts_the_persisted_run() {
+        let (database, run, provider, _secrets, path) = execution_fixture(
+            "200 OK",
+            r##"{"id":"resp-preflight","output_text":"# Result"}"##,
+            false,
+        )
+        .await;
+        let project = database
+            .repository()
+            .get_project(&run.project_id)
+            .await
+            .unwrap()
+            .expect("project should exist");
+        let profile_id = project
+            .api_routing
+            .primary_profile_id
+            .expect("fixture should have a profile");
+        ApiProfileService::new(&database)
+            .set_secret_ref(&profile_id, None)
+            .await
+            .expect("profile secret should be removable");
+
+        let error = RunExecutionService::new(&database, provider)
+            .execute(&run.id)
+            .await
+            .expect_err("missing secret should fail before dispatch");
+        assert_eq!(error.code(), "run_not_active");
+        assert_eq!(
+            database
+                .repository()
+                .get_run(&run.id)
+                .await
+                .unwrap()
+                .expect("run should remain queryable")
+                .status,
+            batch_code_analyzer_domain::RunStatus::Interrupted
         );
         let _ = fs::remove_dir_all(path);
     }
