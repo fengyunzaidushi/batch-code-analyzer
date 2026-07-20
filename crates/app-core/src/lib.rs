@@ -246,6 +246,62 @@ pub struct RunService<'database> {
     database: &'database Database,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskResultContent {
+    pub project_id: ProjectId,
+    pub run_id: RunId,
+    pub task_id: TaskId,
+    pub relative_path: String,
+    pub result_version: u32,
+    pub content: String,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub enum RunResultServiceError {
+    ProjectNotFound,
+    RunNotFound,
+    TaskNotFound,
+    ResultNotFound,
+    ResultPathEscape,
+    ResultTooLarge,
+    ResultUnreadable,
+    Persistence(PersistenceError),
+}
+
+impl RunResultServiceError {
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::ProjectNotFound => "project_not_found",
+            Self::RunNotFound => "run_not_found",
+            Self::TaskNotFound => "task_not_found",
+            Self::ResultNotFound => "output_result_not_found",
+            Self::ResultPathEscape => "security_path_escape",
+            Self::ResultTooLarge => "output_result_too_large",
+            Self::ResultUnreadable => "output_result_read_failed",
+            Self::Persistence(error) => error.code(),
+        }
+    }
+}
+
+impl std::fmt::Display for RunResultServiceError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.code())
+    }
+}
+
+impl std::error::Error for RunResultServiceError {}
+
+impl From<PersistenceError> for RunResultServiceError {
+    fn from(error: PersistenceError) -> Self {
+        Self::Persistence(error)
+    }
+}
+
+pub struct RunResultService<'database> {
+    database: &'database Database,
+}
+
 #[derive(Debug, Eq, PartialEq)]
 pub enum RunExecutionError {
     NotFound,
@@ -1148,6 +1204,210 @@ impl<'database> RunService<'database> {
     }
 }
 
+impl<'database> RunResultService<'database> {
+    const MAX_RESULT_BYTES: u64 = 4 * 1024 * 1024;
+
+    #[must_use]
+    pub const fn new(database: &'database Database) -> Self {
+        Self { database }
+    }
+
+    /// Lists Run summaries belonging to one Project.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable not-found or persistence error without exposing
+    /// database diagnostics.
+    pub async fn list_runs(
+        &self,
+        project_id: &ProjectId,
+    ) -> Result<Vec<Run>, RunResultServiceError> {
+        self.ensure_project(project_id).await?;
+        self.database
+            .repository()
+            .list_runs(project_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Loads one Run after checking its Project ownership.
+    ///
+    /// # Errors
+    ///
+    /// Returns `run_not_found` for missing or cross-Project Runs.
+    pub async fn get_run(
+        &self,
+        project_id: &ProjectId,
+        run_id: &RunId,
+    ) -> Result<Run, RunResultServiceError> {
+        self.ensure_project(project_id).await?;
+        let run = self
+            .database
+            .repository()
+            .get_run(run_id)
+            .await?
+            .ok_or(RunResultServiceError::RunNotFound)?;
+        if run.project_id != *project_id {
+            return Err(RunResultServiceError::RunNotFound);
+        }
+        Ok(run)
+    }
+
+    /// Lists Tasks belonging to a Run owned by the Project.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable not-found or persistence error.
+    pub async fn list_tasks(
+        &self,
+        project_id: &ProjectId,
+        run_id: &RunId,
+    ) -> Result<Vec<Task>, RunResultServiceError> {
+        self.get_run(project_id, run_id).await?;
+        self.database
+            .repository()
+            .list_tasks(run_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Loads one Task after checking its Run and Project ownership.
+    ///
+    /// # Errors
+    ///
+    /// Returns `task_not_found` for missing or cross-Project Tasks.
+    pub async fn get_task(
+        &self,
+        project_id: &ProjectId,
+        task_id: &TaskId,
+    ) -> Result<Task, RunResultServiceError> {
+        self.ensure_project(project_id).await?;
+        let task = self
+            .database
+            .repository()
+            .get_task(task_id)
+            .await?
+            .ok_or(RunResultServiceError::TaskNotFound)?;
+        let run = self
+            .database
+            .repository()
+            .get_run(&task.run_id)
+            .await?
+            .ok_or(RunResultServiceError::TaskNotFound)?;
+        if run.project_id != *project_id {
+            return Err(RunResultServiceError::TaskNotFound);
+        }
+        Ok(task)
+    }
+
+    /// Lists the append-only Attempt history for one Project-owned Task.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable not-found or persistence error.
+    pub async fn list_attempts(
+        &self,
+        project_id: &ProjectId,
+        task_id: &TaskId,
+    ) -> Result<Vec<Attempt>, RunResultServiceError> {
+        self.get_task(project_id, task_id).await?;
+        self.database
+            .repository()
+            .list_attempts(task_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Reads the current Markdown result after re-validating the persisted path.
+    ///
+    /// The path is resolved beneath the Run output directory, rejects traversal
+    /// and outside symlinks, and is bounded before being read into memory.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable output or security error without exposing filesystem
+    /// details.
+    pub async fn read_result(
+        &self,
+        project_id: &ProjectId,
+        task_id: &TaskId,
+    ) -> Result<TaskResultContent, RunResultServiceError> {
+        let task = self.get_task(project_id, task_id).await?;
+        let run = self
+            .database
+            .repository()
+            .get_run(&task.run_id)
+            .await?
+            .ok_or(RunResultServiceError::TaskNotFound)?;
+        let stored_path = task
+            .current_result_path
+            .as_deref()
+            .ok_or(RunResultServiceError::ResultNotFound)?;
+        let root = SafeRoot::new(&run.output_directory)
+            .map_err(|_| RunResultServiceError::ResultNotFound)?;
+        let resolved = resolve_result_file(&root, Path::new(stored_path))?;
+        let metadata =
+            fs::metadata(&resolved).map_err(|_| RunResultServiceError::ResultNotFound)?;
+        if !metadata.is_file() {
+            return Err(RunResultServiceError::ResultUnreadable);
+        }
+        if metadata.len() > Self::MAX_RESULT_BYTES {
+            return Err(RunResultServiceError::ResultTooLarge);
+        }
+        let content =
+            fs::read_to_string(&resolved).map_err(|_| RunResultServiceError::ResultUnreadable)?;
+        let relative_path = resolved
+            .strip_prefix(root.path())
+            .map_err(|_| RunResultServiceError::ResultPathEscape)?
+            .to_string_lossy()
+            .replace('\\', "/");
+        Ok(TaskResultContent {
+            project_id: project_id.clone(),
+            run_id: task.run_id,
+            task_id: task.id,
+            relative_path,
+            result_version: task.result_version,
+            content,
+        })
+    }
+
+    async fn ensure_project(&self, project_id: &ProjectId) -> Result<(), RunResultServiceError> {
+        self.database
+            .repository()
+            .get_project(project_id)
+            .await?
+            .ok_or(RunResultServiceError::ProjectNotFound)
+            .map(|_| ())
+    }
+}
+
+fn resolve_result_file(
+    root: &SafeRoot,
+    stored_path: &Path,
+) -> Result<std::path::PathBuf, RunResultServiceError> {
+    let candidate = if stored_path.is_absolute() {
+        stored_path.to_path_buf()
+    } else {
+        root.relative_path(stored_path)
+            .map_err(|_| RunResultServiceError::ResultPathEscape)
+            .map(|relative| root.path().join(relative))?
+    };
+    if !candidate.starts_with(root.path()) {
+        return Err(RunResultServiceError::ResultPathEscape);
+    }
+    root.resolve_existing(&candidate)
+        .map_err(|error| match error {
+            batch_code_analyzer_security_core::SecurityError::PathEscape
+            | batch_code_analyzer_security_core::SecurityError::SymlinkOutsideRoot => {
+                RunResultServiceError::ResultPathEscape
+            }
+            batch_code_analyzer_security_core::SecurityError::RootUnavailable
+            | batch_code_analyzer_security_core::SecurityError::InvalidRelativePath => {
+                RunResultServiceError::ResultNotFound
+            }
+        })
+}
+
 impl<'database> RunExecutionService<'database> {
     #[must_use]
     pub fn new(database: &'database Database, provider: OpenAiResponsesProvider) -> Self {
@@ -1865,25 +2125,38 @@ pub fn timestamp_now() -> Rfc3339Timestamp {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::PathBuf, sync::Arc, time::Duration};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        sync::{
+            atomic::{AtomicU64, Ordering},
+            Arc,
+        },
+        time::Duration,
+    };
 
     use batch_code_analyzer_domain::ApiProfileId;
     use batch_code_analyzer_model_providers::OpenAiResponsesProvider;
     use batch_code_analyzer_persistence::Database;
     use batch_code_analyzer_repository_scanner::ScanCancellation;
     use batch_code_analyzer_secret_store::{MemorySecretStore, SecretStore, SecretValue};
+    use batch_code_analyzer_security_core::SafeRoot;
     use tokio::{io::AsyncWriteExt, net::TcpListener};
 
     use super::{
         timestamp_now, ApiProfileService, ApiProfileServiceError, ContextService, FileServiceError,
-        ProjectService, ProjectServiceError, RunExecutionService, RunPreparationInput, RunService,
-        ScanService,
+        ProjectService, ProjectServiceError, RunExecutionService, RunPreparationInput,
+        RunResultService, RunResultServiceError, RunService, ScanService,
     };
 
+    static NEXT_TEST_DIRECTORY_ID: AtomicU64 = AtomicU64::new(1);
+
     fn temporary_directory(name: &str) -> PathBuf {
+        let sequence = NEXT_TEST_DIRECTORY_ID.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
-            "batch-code-analyzer-project-service-{}-{}",
+            "batch-code-analyzer-project-service-{}-{}-{}",
             std::process::id(),
+            sequence,
             name
         ));
         let _ = fs::remove_dir_all(&path);
@@ -2573,5 +2846,117 @@ mod tests {
             with_secret_ref.secret_ref.as_deref(),
             Some("session-secret-1")
         );
+    }
+
+    #[tokio::test]
+    async fn run_result_service_reads_result_and_attempt_history() {
+        let (database, run, provider, _secrets, path) = execution_fixture(
+            "200 OK",
+            r##"{"id":"resp-1","output_text":"# Result"}"##,
+            false,
+        )
+        .await;
+        RunExecutionService::new(&database, provider)
+            .execute(&run.id)
+            .await
+            .expect("run should execute");
+        let task = database
+            .repository()
+            .list_tasks(&run.id)
+            .await
+            .expect("tasks should load")
+            .into_iter()
+            .next()
+            .expect("task should exist");
+        assert!(Path::new(&run.output_directory).is_dir());
+        assert!(task
+            .current_result_path
+            .as_deref()
+            .is_some_and(|path| Path::new(path).is_file()));
+        let service = RunResultService::new(&database);
+        let result = service
+            .read_result(&run.project_id, &task.id)
+            .await
+            .expect("result should be readable");
+        assert_eq!(result.relative_path, "main.rs.md");
+        assert_eq!(result.result_version, 1);
+        assert_eq!(result.content, "# Result");
+        assert_eq!(
+            service
+                .list_attempts(&run.project_id, &task.id)
+                .await
+                .expect("attempts should load")
+                .len(),
+            1
+        );
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[tokio::test]
+    async fn run_result_service_hides_missing_and_cross_project_records() {
+        let (database, run, provider, _secrets, path) = execution_fixture(
+            "500 Internal Server Error",
+            r#"{"error":{"message":"temporary"}}"#,
+            false,
+        )
+        .await;
+        RunExecutionService::new(&database, provider)
+            .execute(&run.id)
+            .await
+            .expect("failed run should still finalize");
+        let task = database
+            .repository()
+            .list_tasks(&run.id)
+            .await
+            .expect("tasks should load")
+            .into_iter()
+            .next()
+            .expect("task should exist");
+        let service = RunResultService::new(&database);
+        assert_eq!(
+            service
+                .read_result(&run.project_id, &task.id)
+                .await
+                .expect_err("failed task should have no result"),
+            RunResultServiceError::ResultNotFound
+        );
+        let other_path = temporary_directory("result-cross-project");
+        let other_project = ProjectService::new(&database)
+            .add_project(&other_path)
+            .await
+            .expect("other project should add")
+            .project;
+        assert_eq!(
+            service
+                .get_task(&other_project.id, &task.id)
+                .await
+                .expect_err("cross-project task must be hidden"),
+            RunResultServiceError::TaskNotFound
+        );
+        let _ = fs::remove_dir_all(path);
+        let _ = fs::remove_dir_all(other_path);
+    }
+
+    #[test]
+    fn result_path_resolution_rejects_traversal_and_outside_files() {
+        let root_path = temporary_directory("result-path-root");
+        let outside_path = temporary_directory("result-path-outside");
+        let result_path = root_path.join("result.md");
+        let outside_file = outside_path.join("secret.md");
+        fs::write(&result_path, "# safe").expect("result should be created");
+        fs::write(&outside_file, "# outside").expect("outside fixture should be created");
+        let root = SafeRoot::new(&root_path).expect("root should be safe");
+        assert_eq!(
+            super::resolve_result_file(&root, Path::new("../secret.md"))
+                .expect_err("traversal should be blocked"),
+            RunResultServiceError::ResultPathEscape
+        );
+        assert_eq!(
+            super::resolve_result_file(&root, &outside_file)
+                .expect_err("outside path should be blocked"),
+            RunResultServiceError::ResultPathEscape
+        );
+        let _ = fs::remove_dir_all(root_path);
+        let _ = fs::remove_dir_all(outside_path);
     }
 }

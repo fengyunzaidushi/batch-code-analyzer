@@ -16,17 +16,24 @@ import { useMemo, useState, type ReactNode } from "react";
 import type {
   ApiProfileSaveRequest,
   ApiProfileSummaryDto,
+  AttemptDto,
   ContextVersionDto,
   FileRecordSummaryDto,
   ProjectPathStatus,
   ProjectRunSettingsUpdateRequest,
   ProjectSummaryDto,
+  ResultReadResponse,
   RunPreviewResponse,
+  RunSummaryDto,
   ScanRuleSummaryDto,
   ScanReportDto,
+  TaskGetResponse,
+  TaskSummaryDto,
 } from "@batch-code-analyzer/ipc-types";
 
 import { FileTreeTable } from "../features/tasks/FileTreeTable";
+import { VirtualTaskTable } from "../features/tasks/VirtualTaskTable";
+import { MarkdownPreview } from "../features/markdown/MarkdownPreview";
 
 export type ShellProject = ProjectSummaryDto & {
   rootDirectory?: string;
@@ -66,6 +73,18 @@ interface AppShellProps {
   onCloseRunPreview?: () => void;
   runPreview?: RunPreviewResponse | null;
   runError?: string | null;
+  runHistory?: readonly RunSummaryDto[];
+  runResultsError?: string | null;
+  runTasks?: readonly TaskSummaryDto[];
+  selectedRunId?: string | null;
+  selectedTaskId?: string | null;
+  taskDetails?: Readonly<Record<string, TaskGetResponse>>;
+  isLoadingRunResults?: boolean;
+  onLoadTaskDetail?: (taskId: string) => Promise<void>;
+  onOpenResult?: (taskId: string) => Promise<void>;
+  onSelectRun?: (runId: string) => void;
+  resultPreview?: ResultReadResponse | null;
+  onCloseResultPreview?: () => void;
   isCreatingRun?: boolean;
   onDeleteApiProfile?: (id: string) => Promise<void>;
   onFetchApiModels?: (id: string) => Promise<void>;
@@ -117,6 +136,18 @@ export function AppShell({
   onCloseRunPreview = () => undefined,
   runPreview = null,
   runError = null,
+  runHistory = [],
+  runResultsError = null,
+  runTasks = [],
+  selectedRunId = null,
+  selectedTaskId = null,
+  taskDetails = {},
+  isLoadingRunResults = false,
+  onLoadTaskDetail = async () => undefined,
+  onOpenResult = async () => undefined,
+  onSelectRun = () => undefined,
+  resultPreview = null,
+  onCloseResultPreview = () => undefined,
   isCreatingRun = false,
   onDeleteApiProfile = async () => undefined,
   onFetchApiModels = async () => undefined,
@@ -214,6 +245,16 @@ export function AppShell({
           onSaveApiProfile={onSaveApiProfile}
           onTestApiProfile={onTestApiProfile}
           onUpdateProjectRunSettings={onUpdateProjectRunSettings}
+          runHistory={runHistory}
+          runResultsError={runResultsError}
+          runTasks={runTasks}
+          selectedRunId={selectedRunId}
+          selectedTaskId={selectedTaskId}
+          taskDetails={taskDetails}
+          isLoadingRunResults={isLoadingRunResults}
+          onLoadTaskDetail={onLoadTaskDetail}
+          onOpenResult={onOpenResult}
+          onSelectRun={onSelectRun}
         />
       </div>
       <RunPreviewPanel
@@ -228,6 +269,12 @@ export function AppShell({
           {runError}
         </div>
       ) : null}
+      <MarkdownPreview
+        content={resultPreview?.markdown ?? ""}
+        onClose={onCloseResultPreview}
+        open={resultPreview !== null}
+        title={resultPreview?.relativePath ?? "分析结果"}
+      />
     </div>
   );
 }
@@ -487,6 +534,16 @@ function ProjectWorkspace({
   onSaveApiProfile,
   onTestApiProfile,
   onUpdateProjectRunSettings,
+  runHistory,
+  runResultsError,
+  runTasks,
+  selectedRunId,
+  selectedTaskId,
+  taskDetails,
+  isLoadingRunResults,
+  onLoadTaskDetail,
+  onOpenResult,
+  onSelectRun,
 }: {
   apiProfileError: string | null;
   apiProfiles: readonly ApiProfileSummaryDto[];
@@ -523,6 +580,16 @@ function ProjectWorkspace({
   onUpdateProjectRunSettings: (
     request: ProjectRunSettingsUpdateRequest,
   ) => Promise<void>;
+  runHistory: readonly RunSummaryDto[];
+  runResultsError: string | null;
+  runTasks: readonly TaskSummaryDto[];
+  selectedRunId: string | null;
+  selectedTaskId: string | null;
+  taskDetails: Readonly<Record<string, TaskGetResponse>>;
+  isLoadingRunResults: boolean;
+  onLoadTaskDetail: (taskId: string) => Promise<void>;
+  onOpenResult: (taskId: string) => Promise<void>;
+  onSelectRun: (runId: string) => void;
 }) {
   return (
     <main className="project-workspace">
@@ -560,6 +627,16 @@ function ProjectWorkspace({
           project={project}
           scanReport={scanReport}
           temporaryScanPatterns={temporaryScanPatterns}
+          runHistory={runHistory}
+          runResultsError={runResultsError}
+          runTasks={runTasks}
+          selectedRunId={selectedRunId}
+          selectedTaskId={selectedTaskId}
+          taskDetails={taskDetails}
+          isLoadingRunResults={isLoadingRunResults}
+          onLoadTaskDetail={onLoadTaskDetail}
+          onOpenResult={onOpenResult}
+          onSelectRun={onSelectRun}
         />
       ) : (
         <ApiWorkspace
@@ -671,6 +748,16 @@ function PromptWorkspace({
   prompt,
   scanReport,
   temporaryScanPatterns,
+  runHistory,
+  runResultsError,
+  runTasks,
+  selectedRunId,
+  selectedTaskId,
+  taskDetails,
+  isLoadingRunResults,
+  onLoadTaskDetail,
+  onOpenResult,
+  onSelectRun,
 }: {
   contextVersion: ContextVersionDto | null;
   onCancelScan: () => void;
@@ -689,6 +776,16 @@ function PromptWorkspace({
   prompt: string;
   scanReport: ScanReportDto | null;
   temporaryScanPatterns: readonly string[];
+  runHistory: readonly RunSummaryDto[];
+  runResultsError: string | null;
+  runTasks: readonly TaskSummaryDto[];
+  selectedRunId: string | null;
+  selectedTaskId: string | null;
+  taskDetails: Readonly<Record<string, TaskGetResponse>>;
+  isLoadingRunResults: boolean;
+  onLoadTaskDetail: (taskId: string) => Promise<void>;
+  onOpenResult: (taskId: string) => Promise<void>;
+  onSelectRun: (runId: string) => void;
 }) {
   const hasProject = project !== null;
   const includedFileCount = fileRecords.length
@@ -807,8 +904,231 @@ function PromptWorkspace({
           }
         />
       </section>
+      <RunResultsPanel
+        error={runResultsError}
+        isLoading={isLoadingRunResults}
+        onLoadTaskDetail={onLoadTaskDetail}
+        onOpenResult={onOpenResult}
+        onSelectRun={onSelectRun}
+        runHistory={runHistory}
+        runTasks={runTasks}
+        selectedRunId={selectedRunId}
+        selectedTaskId={selectedTaskId}
+        taskDetails={taskDetails}
+      />
     </div>
   );
+}
+
+function RunResultsPanel({
+  error,
+  isLoading,
+  onLoadTaskDetail,
+  onOpenResult,
+  onSelectRun,
+  runHistory,
+  runTasks,
+  selectedRunId,
+  selectedTaskId,
+  taskDetails,
+}: {
+  error: string | null;
+  isLoading: boolean;
+  onLoadTaskDetail: (taskId: string) => Promise<void>;
+  onOpenResult: (taskId: string) => Promise<void>;
+  onSelectRun: (runId: string) => void;
+  runHistory: readonly RunSummaryDto[];
+  runTasks: readonly TaskSummaryDto[];
+  selectedRunId: string | null;
+  selectedTaskId: string | null;
+  taskDetails: Readonly<Record<string, TaskGetResponse>>;
+}) {
+  const selectedTask = runTasks.find((task) => task.id === selectedTaskId);
+  const selectedDetail = selectedTaskId ? taskDetails[selectedTaskId] : null;
+  return (
+    <section className="run-results-panel" aria-label="运行结果">
+      <div className="run-results-heading">
+        <div>
+          <p className="eyebrow">RUN RESULTS</p>
+          <h2>运行结果</h2>
+        </div>
+        {isLoading ? (
+          <span className="run-results-loading">正在刷新</span>
+        ) : null}
+      </div>
+      {error ? (
+        <div className="project-error" role="alert">
+          {error}
+        </div>
+      ) : null}
+      {runHistory.length ? (
+        <label className="run-selector">
+          选择 Run
+          <select
+            aria-label="选择 Run"
+            onChange={(event) => onSelectRun(event.target.value)}
+            value={selectedRunId ?? ""}
+          >
+            {runHistory.map((run) => (
+              <option key={run.id} value={run.id}>
+                {formatRunLabel(run)}
+              </option>
+            ))}
+          </select>
+        </label>
+      ) : (
+        <p className="run-results-empty">当前项目还没有正式 Run。</p>
+      )}
+      {runHistory.length ? (
+        <>
+          <div className="run-results-stats">
+            {runHistory.find((run) => run.id === selectedRunId)?.stats &&
+              renderRunStats(
+                runHistory.find((run) => run.id === selectedRunId)!.stats,
+              )}
+          </div>
+          <VirtualTaskTable
+            emptyLabel="该 Run 没有 Task"
+            getRowKey={(task) => task.id}
+            header={
+              <>
+                <span>文件</span>
+                <span>状态</span>
+                <span>模型</span>
+                <span>结果 / Attempt</span>
+              </>
+            }
+            items={runTasks}
+            renderRow={(task) => {
+              const detail = taskDetails[task.id];
+              return (
+                <>
+                  <span className="run-task-path" title={task.relativePath}>
+                    {task.relativePath}
+                  </span>
+                  <span>{taskStatusLabel(task.status)}</span>
+                  <span title={task.modelSnapshot}>{task.modelSnapshot}</span>
+                  <span className="run-task-actions">
+                    {task.hasResult ? (
+                      <button
+                        className="text-button"
+                        onClick={() => void onOpenResult(task.id)}
+                        type="button"
+                      >
+                        查看结果
+                      </button>
+                    ) : (
+                      <span className="file-tree-muted">无结果</span>
+                    )}
+                    <button
+                      className="text-button"
+                      onClick={() => void onLoadTaskDetail(task.id)}
+                      type="button"
+                    >
+                      {detail ? `${detail.attempts.length} 次尝试` : "查看尝试"}
+                    </button>
+                  </span>
+                </>
+              );
+            }}
+          />
+          {selectedTask && selectedDetail ? (
+            <AttemptDetailPanel
+              attempts={selectedDetail.attempts}
+              path={selectedTask.relativePath}
+            />
+          ) : null}
+        </>
+      ) : null}
+    </section>
+  );
+}
+
+function AttemptDetailPanel({
+  attempts,
+  path,
+}: {
+  attempts: readonly AttemptDto[];
+  path: string;
+}) {
+  return (
+    <div className="attempt-detail-panel">
+      <div className="attempt-detail-heading">
+        <strong>{path}</strong>
+        <span>{attempts.length} 次请求尝试</span>
+      </div>
+      {attempts.length ? (
+        <div className="attempt-list">
+          {attempts.map((attempt) => (
+            <div className="attempt-row" key={attempt.id}>
+              <span>#{attempt.sequence}</span>
+              <span>{attemptStatusLabel(attempt.status)}</span>
+              <span>{attempt.apiProfileName}</span>
+              <span>{attempt.actualModel}</span>
+              <span>{attempt.totalTokens ?? "—"} tokens</span>
+              <span>{attempt.error?.message ?? "—"}</span>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <span className="file-tree-muted">尚未产生请求尝试</span>
+      )}
+    </div>
+  );
+}
+
+function formatRunLabel(run: RunSummaryDto): string {
+  return `${run.id} · ${historyRunStatusLabel(run.status)}`;
+}
+
+function renderRunStats(stats: RunSummaryDto["stats"]) {
+  return (
+    <>
+      <SummaryMetric label="总任务" value={String(stats.total)} />
+      <SummaryMetric label="成功" value={String(stats.succeeded)} />
+      <SummaryMetric label="失败" value={String(stats.failed)} />
+      <SummaryMetric label="处理中" value={String(stats.running)} />
+    </>
+  );
+}
+
+function taskStatusLabel(status: TaskSummaryDto["status"]): string {
+  return {
+    pending: "待处理",
+    queued: "排队中",
+    running: "处理中",
+    succeeded: "成功",
+    failed: "失败",
+    cancelled: "已取消",
+    interrupted: "已中断",
+    source_changed: "源文件已变化",
+  }[status];
+}
+
+function attemptStatusLabel(status: AttemptDto["status"]): string {
+  return {
+    created: "已创建",
+    dispatched: "已发送",
+    succeeded: "成功",
+    failed_retryable: "可重试失败",
+    failed_terminal: "失败",
+    cancelled: "已取消",
+    interrupted_unknown: "已中断",
+  }[status];
+}
+
+function historyRunStatusLabel(status: RunSummaryDto["status"]): string {
+  return {
+    draft: "草稿",
+    running: "运行中",
+    pausing: "暂停中",
+    paused: "已暂停",
+    cancelling: "取消中",
+    cancelled: "已取消",
+    completed: "已完成",
+    completed_with_errors: "完成但有错误",
+    interrupted: "已中断",
+  }[status];
 }
 
 function RunPreviewPanel({

@@ -10,22 +10,25 @@ use batch_code_analyzer_app_core::{
     domain::{ApiModelInfo, ApiProfile, ApiProfileConnectionStatus, ApiProfileId, ProjectId},
     timestamp_now, ApiProfileService, ApiProfileServiceError, ContextService, ContextServiceError,
     FileServiceError, ProjectService, ProjectServiceError, RunExecutionService,
-    RunPreparationInput, RunService, RunServiceError, ScanService,
+    RunPreparationInput, RunResultService, RunResultServiceError, RunService, RunServiceError,
+    ScanService,
 };
 use batch_code_analyzer_ipc_contracts::{
     ApiModelsFetchRequest, ApiModelsFetchResponse, ApiProfileDeleteRequest,
     ApiProfileDeleteResponse, ApiProfileListResponse, ApiProfileSaveRequest,
     ApiProfileSaveResponse, ApiProfileSummaryDto, ApiProfileTestRequest, ApiProfileTestResponse,
-    ContextGenerateRequest, ContextGenerateResponse, ContextGetRequest, ContextGetResponse,
-    DatabaseStatus, ErrorCategory, FileAuthorizeSensitiveRequest, FileAuthorizeSensitiveResponse,
-    FileListRequest, FileRecordSummaryDto, FileSetIncludedRequest, FileSetIncludedResponse,
-    HealthCheckResponse, HealthStatus, IpcError, PageResponse, ProjectAddRequest,
-    ProjectAddResponse, ProjectDetailDto, ProjectRunSettingsUpdateRequest,
-    ProjectRunSettingsUpdateResponse, ProjectSummaryDto, RunBlockingReasonDto, RunCreateRequest,
-    RunCreateResponse, RunExecuteRequest, RunExecuteResponse, RunPreviewRequest,
+    AttemptDto, ContextGenerateRequest, ContextGenerateResponse, ContextGetRequest,
+    ContextGetResponse, DatabaseStatus, ErrorCategory, FileAuthorizeSensitiveRequest,
+    FileAuthorizeSensitiveResponse, FileListRequest, FileRecordSummaryDto, FileSetIncludedRequest,
+    FileSetIncludedResponse, HealthCheckResponse, HealthStatus, IpcError, PageResponse,
+    ProjectAddRequest, ProjectAddResponse, ProjectDetailDto, ProjectRunSettingsUpdateRequest,
+    ProjectRunSettingsUpdateResponse, ProjectSummaryDto, ResultReadRequest, ResultReadResponse,
+    RunBlockingReasonDto, RunCreateRequest, RunCreateResponse, RunExecuteRequest,
+    RunExecuteResponse, RunGetRequest, RunGetResponse, RunListRequest, RunPreviewRequest,
     RunPreviewResponse, RunPreviewTaskDto, RunSummaryDto, ScanCancelRequest, ScanCancelResponse,
     ScanOperationStatus, ScanReportDto, ScanRuleSummaryDto, ScanStartRequest, ScanStartResponse,
-    DTO_SCHEMA_VERSION, HEALTH_CHECK_SCHEMA_VERSION,
+    TaskGetRequest, TaskGetResponse, TaskListRequest, TaskSummaryDto, DTO_SCHEMA_VERSION,
+    HEALTH_CHECK_SCHEMA_VERSION,
 };
 use batch_code_analyzer_model_providers::{ModelProvider, OpenAiResponsesProvider, ProviderError};
 use batch_code_analyzer_persistence::DatabaseHealth;
@@ -235,6 +238,99 @@ pub(crate) async fn run_execute(
         .map_err(run_execution_error)?;
     Ok(RunExecuteResponse {
         run: RunSummaryDto::from(&run),
+    })
+}
+
+#[tauri::command]
+pub(crate) async fn run_list(
+    request: RunListRequest,
+    state: State<'_, PersistenceState>,
+) -> Result<PageResponse<RunSummaryDto>, IpcError> {
+    let database = state.database.as_ref().ok_or_else(database_unavailable)?;
+    let runs = RunResultService::new(database)
+        .list_runs(&request.project_id)
+        .await
+        .map_err(run_result_service_error)?;
+    page_items(
+        runs.into_iter()
+            .map(|run| RunSummaryDto::from(&run))
+            .collect(),
+        request.cursor.as_deref(),
+        request.limit,
+    )
+}
+
+#[tauri::command]
+pub(crate) async fn run_get(
+    request: RunGetRequest,
+    state: State<'_, PersistenceState>,
+) -> Result<RunGetResponse, IpcError> {
+    let database = state.database.as_ref().ok_or_else(database_unavailable)?;
+    let run = RunResultService::new(database)
+        .get_run(&request.project_id, &request.run_id)
+        .await
+        .map_err(run_result_service_error)?;
+    Ok(RunGetResponse {
+        run: RunSummaryDto::from(&run),
+    })
+}
+
+#[tauri::command]
+pub(crate) async fn task_list(
+    request: TaskListRequest,
+    state: State<'_, PersistenceState>,
+) -> Result<PageResponse<TaskSummaryDto>, IpcError> {
+    let database = state.database.as_ref().ok_or_else(database_unavailable)?;
+    let tasks = RunResultService::new(database)
+        .list_tasks(&request.project_id, &request.run_id)
+        .await
+        .map_err(run_result_service_error)?;
+    page_items(
+        tasks.iter().map(TaskSummaryDto::from).collect::<Vec<_>>(),
+        request.cursor.as_deref(),
+        request.limit,
+    )
+}
+
+#[tauri::command]
+pub(crate) async fn task_get(
+    request: TaskGetRequest,
+    state: State<'_, PersistenceState>,
+) -> Result<TaskGetResponse, IpcError> {
+    let database = state.database.as_ref().ok_or_else(database_unavailable)?;
+    let service = RunResultService::new(database);
+    let task = service
+        .get_task(&request.project_id, &request.task_id)
+        .await
+        .map_err(run_result_service_error)?;
+    let attempts = service
+        .list_attempts(&request.project_id, &request.task_id)
+        .await
+        .map_err(run_result_service_error)?;
+    Ok(TaskGetResponse {
+        task: TaskSummaryDto::from(&task),
+        attempts: attempts.iter().map(AttemptDto::from).collect(),
+    })
+}
+
+#[tauri::command]
+pub(crate) async fn result_read(
+    request: ResultReadRequest,
+    state: State<'_, PersistenceState>,
+) -> Result<ResultReadResponse, IpcError> {
+    let database = state.database.as_ref().ok_or_else(database_unavailable)?;
+    let result = RunResultService::new(database)
+        .read_result(&request.project_id, &request.task_id)
+        .await
+        .map_err(run_result_service_error)?;
+    Ok(ResultReadResponse {
+        schema_version: DTO_SCHEMA_VERSION,
+        project_id: result.project_id,
+        run_id: result.run_id,
+        task_id: result.task_id,
+        relative_path: result.relative_path,
+        result_version: result.result_version,
+        markdown: result.content,
     })
 }
 
@@ -887,6 +983,97 @@ fn run_service_error(error: RunServiceError) -> IpcError {
     }
 }
 
+fn run_result_service_error(error: RunResultServiceError) -> IpcError {
+    match error {
+        RunResultServiceError::ProjectNotFound => project_not_found(""),
+        RunResultServiceError::RunNotFound => ipc_error(
+            "run_not_found",
+            ErrorCategory::Scheduler,
+            "Run 不存在",
+            false,
+        ),
+        RunResultServiceError::TaskNotFound => ipc_error(
+            "task_not_found",
+            ErrorCategory::Scheduler,
+            "Task 不存在",
+            false,
+        ),
+        RunResultServiceError::ResultNotFound => ipc_error(
+            "output_result_not_found",
+            ErrorCategory::Output,
+            "分析结果不存在",
+            false,
+        ),
+        RunResultServiceError::ResultPathEscape => ipc_error(
+            "security_path_escape",
+            ErrorCategory::Security,
+            "分析结果路径无效",
+            false,
+        ),
+        RunResultServiceError::ResultTooLarge => ipc_error(
+            "output_result_too_large",
+            ErrorCategory::Output,
+            "分析结果超过可预览大小",
+            false,
+        ),
+        RunResultServiceError::ResultUnreadable => ipc_error(
+            "output_result_read_failed",
+            ErrorCategory::Output,
+            "分析结果暂时无法读取",
+            true,
+        ),
+        RunResultServiceError::Persistence(error) => ipc_error(
+            error.code(),
+            ErrorCategory::Persistence,
+            "运行数据暂时无法读取",
+            matches!(
+                error,
+                batch_code_analyzer_persistence::PersistenceError::DatabaseUnavailable
+                    | batch_code_analyzer_persistence::PersistenceError::TransactionFailed
+            ),
+        ),
+    }
+}
+
+fn page_items<T>(
+    items: Vec<T>,
+    cursor: Option<&str>,
+    limit: u16,
+) -> Result<PageResponse<T>, IpcError> {
+    if !(1..=500).contains(&limit) {
+        return Err(ipc_error(
+            "validation_limit_exceeded",
+            ErrorCategory::Validation,
+            "列表分页大小无效",
+            false,
+        ));
+    }
+    let offset = cursor
+        .map(str::parse::<usize>)
+        .transpose()
+        .map_err(|_| {
+            ipc_error(
+                "validation_invalid_value",
+                ErrorCategory::Validation,
+                "列表游标无效",
+                false,
+            )
+        })?
+        .unwrap_or(0);
+    let total = u32::try_from(items.len()).unwrap_or(u32::MAX);
+    let limit = usize::from(limit);
+    let mut items = items;
+    let page = items.drain(..).skip(offset).take(limit).collect::<Vec<_>>();
+    let next_offset = offset.saturating_add(page.len());
+    let next_cursor = (next_offset < usize::try_from(total).unwrap_or(usize::MAX))
+        .then(|| next_offset.to_string());
+    Ok(PageResponse {
+        items: page,
+        next_cursor,
+        total,
+    })
+}
+
 fn run_execution_error(error: batch_code_analyzer_app_core::RunExecutionError) -> IpcError {
     match error {
         batch_code_analyzer_app_core::RunExecutionError::NotFound => ipc_error(
@@ -1052,7 +1239,7 @@ fn health_check_response(database_health: DatabaseHealth) -> HealthCheckResponse
 mod tests {
     use super::{
         health_check_response, ApiProfileServiceError, ContextServiceError, FileServiceError,
-        ProjectServiceError, ProviderError, RunServiceError,
+        ProjectServiceError, ProviderError, RunResultServiceError, RunServiceError,
     };
     use batch_code_analyzer_app_core::RunBlockingReason;
     use batch_code_analyzer_persistence::DatabaseHealth;
@@ -1188,5 +1375,38 @@ mod tests {
             batch_code_analyzer_ipc_contracts::ErrorCategory::Validation
         );
         assert!(blocked.details.is_none());
+    }
+
+    #[test]
+    fn result_errors_use_stable_categories_and_safe_messages() {
+        let path_escape = super::run_result_service_error(RunResultServiceError::ResultPathEscape);
+        assert_eq!(path_escape.code, "security_path_escape");
+        assert_eq!(
+            path_escape.category,
+            batch_code_analyzer_ipc_contracts::ErrorCategory::Security
+        );
+        assert_eq!(path_escape.message, "分析结果路径无效");
+        assert!(path_escape.details.is_none());
+
+        let missing = super::run_result_service_error(RunResultServiceError::ResultNotFound);
+        assert_eq!(missing.code, "output_result_not_found");
+        assert_eq!(missing.message, "分析结果不存在");
+        assert!(missing.details.is_none());
+    }
+
+    #[test]
+    fn result_lists_reject_invalid_pagination() {
+        assert_eq!(
+            super::page_items::<String>(Vec::new(), None, 0)
+                .expect_err("zero limit should fail")
+                .code,
+            "validation_limit_exceeded"
+        );
+        assert_eq!(
+            super::page_items::<String>(Vec::new(), Some("not-a-number"), 10)
+                .expect_err("invalid cursor should fail")
+                .code,
+            "validation_invalid_value"
+        );
     }
 }

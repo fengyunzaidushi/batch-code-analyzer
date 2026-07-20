@@ -193,6 +193,8 @@ async fn queued_tasks_are_claimed_once_and_stats_are_recomputed_from_tasks() {
         file.id.as_str(),
         TaskStatus::Pending,
     );
+    let first_id = first.id.clone();
+    let first_expected = first.clone();
     repository
         .create_run_with_tasks(
             &active_run,
@@ -203,6 +205,10 @@ async fn queued_tasks_are_claimed_once_and_stats_are_recomputed_from_tasks() {
         )
         .await
         .unwrap();
+    assert_eq!(
+        repository.get_task(&first_id).await.unwrap().unwrap(),
+        first_expected
+    );
     let second_run = run("run-2", &project.id, RunStatus::Draft);
     let second_task = task(
         "task-3",

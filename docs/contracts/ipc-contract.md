@@ -170,6 +170,8 @@ api_models_fetch
 run_preview
 run_create
 run_execute
+run_list
+run_get
 run_pause
 run_resume
 run_cancel
@@ -222,7 +224,7 @@ Rust 会重新校验仓库边界、符号链接、文件大小、二进制和编
 
 ```text
 task_list
-task_get_detail
+task_get
 task_retry
 task_regenerate
 task_cancel
@@ -232,12 +234,21 @@ task_cancel
 - `task_regenerate`：创建新的 Task 版本，不覆盖原 Task。
 - 运行中 Task 不允许重复提交。
 
+`run_list` 按 Project 返回分页的 `RunSummaryDto`，`run_get` 只允许读取该 Project
+所属的 Run。`task_list` 按 Run 返回分页的 `TaskSummaryDto`，`task_get` 返回一个
+Task 及其按 sequence 升序排列的 `AttemptDto` 历史。跨 Project 的 ID 查询统一按
+不存在处理，不暴露其他项目是否存在。
+
 ### 4.8 Result
 
 ```text
 result_read
 result_open_in_folder
 ```
+
+`result_read` 只接收 Project ID 与 Task ID。Rust 从 SQLite 的当前结果引用和所属
+Run 输出目录重新解析路径，拒绝路径逃逸、外部符号链接、缺失和超大文件；响应只
+包含结果相对路径、版本和 Markdown 正文，不包含源文件、绝对路径、请求原文或密钥。
 
 - `result_read` 按需读取已完成结果；不得通过 `task_list` 返回完整 Markdown。
 - `result_open_in_folder` 只能打开已验证位于允许输出根目录内的路径。

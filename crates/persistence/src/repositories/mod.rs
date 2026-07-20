@@ -1124,6 +1124,20 @@ impl Repository<'_> {
         finish_read(transaction, result).await
     }
 
+    /// Loads one Task by ID.
+    ///
+    /// The caller is responsible for checking the Task's Run and Project
+    /// ownership before exposing it through an application boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns a persistence error when the query or stored row decoding fails.
+    pub async fn get_task(&self, task_id: &TaskId) -> Result<Option<Task>, PersistenceError> {
+        let mut transaction = self.database.begin_write().await?;
+        let result = load_task(&mut transaction, task_id.as_str()).await;
+        finish_read(transaction, result).await
+    }
+
     /// Returns Attempts whose provider outcome is not yet known.
     ///
     /// # Errors

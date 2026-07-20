@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import type {
   ApiProfileSaveRequest,
   ApiProfileSummaryDto,
+  ResultReadResponse,
   ContextVersionDto,
   FileRecordSummaryDto,
   IpcError,
@@ -9,7 +10,10 @@ import type {
   ProjectSummaryDto,
   RunPreviewRequest,
   RunPreviewResponse,
+  RunSummaryDto,
   ScanReportDto,
+  TaskGetResponse,
+  TaskSummaryDto,
 } from "@batch-code-analyzer/ipc-types";
 
 import {
@@ -41,7 +45,15 @@ import {
   testApiProfile,
   type ApiProfileSecretPutRequest,
 } from "../ipc/apiProfiles";
-import { createRun, executeRun, previewRun } from "../ipc/runs";
+import {
+  createRun,
+  executeRun,
+  getTask,
+  listRuns,
+  listTasks,
+  previewRun,
+  readResult,
+} from "../ipc/runs";
 import { AppShell, type ShellHealthState, type ShellProject } from "./AppShell";
 
 export function App() {
@@ -80,6 +92,18 @@ export function App() {
   >({});
   const [runError, setRunError] = useState<string | null>(null);
   const [isCreatingRun, setIsCreatingRun] = useState(false);
+  const [runHistory, setRunHistory] = useState<RunSummaryDto[]>([]);
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  const [runTasks, setRunTasks] = useState<TaskSummaryDto[]>([]);
+  const [taskDetails, setTaskDetails] = useState<
+    Record<string, TaskGetResponse>
+  >({});
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [runResultsError, setRunResultsError] = useState<string | null>(null);
+  const [isLoadingRunResults, setIsLoadingRunResults] = useState(false);
+  const [resultPreview, setResultPreview] = useState<ResultReadResponse | null>(
+    null,
+  );
 
   const refreshProjects = useCallback(async () => {
     const items = await listProjects();
@@ -102,6 +126,37 @@ export function App() {
       [projectId]: response.total,
     }));
   }, []);
+
+  const refreshRunHistory = useCallback(
+    async (projectId: string, preferredRunId?: string) => {
+      setIsLoadingRunResults(true);
+      try {
+        const response = await listRuns({ projectId, limit: 500 });
+        setRunHistory(response.items);
+        setSelectedRunId((current) => {
+          if (
+            preferredRunId &&
+            response.items.some((run) => run.id === preferredRunId)
+          ) {
+            return preferredRunId;
+          }
+          if (current && response.items.some((run) => run.id === current)) {
+            return current;
+          }
+          return response.items[0]?.id ?? null;
+        });
+        setRunResultsError(null);
+      } catch (error) {
+        setRunResultsError(safeRunResultsError(error));
+        setRunHistory([]);
+        setSelectedRunId(null);
+        setRunTasks([]);
+      } finally {
+        setIsLoadingRunResults(false);
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
     let active = true;
@@ -193,6 +248,62 @@ export function App() {
       active = false;
     };
   }, [selectedProjectId]);
+
+  useEffect(() => {
+    if (!selectedProjectId) {
+      return;
+    }
+    let active = true;
+    void listRuns({ projectId: selectedProjectId, limit: 500 }).then(
+      (response) => {
+        if (!active) return;
+        setRunHistory(response.items);
+        setSelectedRunId((current) =>
+          current && response.items.some((run) => run.id === current)
+            ? current
+            : (response.items[0]?.id ?? null),
+        );
+        setRunResultsError(null);
+      },
+      (error) => {
+        if (!active) return;
+        setRunResultsError(safeRunResultsError(error));
+        setRunHistory([]);
+        setSelectedRunId(null);
+        setRunTasks([]);
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, [selectedProjectId]);
+
+  useEffect(() => {
+    if (!selectedProjectId || !selectedRunId) {
+      return;
+    }
+    let active = true;
+    void listTasks({
+      projectId: selectedProjectId,
+      runId: selectedRunId,
+      limit: 500,
+    }).then(
+      (response) => {
+        if (!active) return;
+        setRunTasks(response.items);
+        setSelectedTaskId(null);
+        setRunResultsError(null);
+      },
+      (error) => {
+        if (!active) return;
+        setRunTasks([]);
+        setRunResultsError(safeRunResultsError(error));
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, [selectedProjectId, selectedRunId]);
 
   useEffect(() => {
     if (!selectedProjectId) return;
@@ -534,12 +645,42 @@ export function App() {
       });
       setRunPreview(null);
       await executeRun({ runId: created.run.id });
+      await refreshRunHistory(selectedProjectId, created.run.id);
       setActiveRun(null);
     } catch (error) {
       setRunError(safeRunError(error));
     } finally {
       setActiveRun(null);
       setIsCreatingRun(false);
+    }
+  };
+
+  const handleLoadTaskDetail = async (taskId: string) => {
+    if (!selectedProjectId) return;
+    setRunResultsError(null);
+    setSelectedTaskId(taskId);
+    try {
+      const detail = await getTask({
+        projectId: selectedProjectId,
+        taskId,
+      });
+      setTaskDetails((current) => ({ ...current, [taskId]: detail }));
+    } catch (error) {
+      setRunResultsError(safeRunResultsError(error));
+    }
+  };
+
+  const handleReadResult = async (taskId: string) => {
+    if (!selectedProjectId) return;
+    setRunResultsError(null);
+    try {
+      const result = await readResult({
+        projectId: selectedProjectId,
+        taskId,
+      });
+      setResultPreview(result);
+    } catch (error) {
+      setRunResultsError(safeRunResultsError(error));
     }
   };
 
@@ -573,6 +714,18 @@ export function App() {
       }}
       runPreview={runPreview}
       runError={runError}
+      runHistory={runHistory}
+      runResultsError={runResultsError}
+      runTasks={runTasks}
+      selectedRunId={selectedRunId}
+      selectedTaskId={selectedTaskId}
+      taskDetails={taskDetails}
+      isLoadingRunResults={isLoadingRunResults}
+      onLoadTaskDetail={handleLoadTaskDetail}
+      onOpenResult={handleReadResult}
+      onSelectRun={setSelectedRunId}
+      resultPreview={resultPreview}
+      onCloseResultPreview={() => setResultPreview(null)}
       isCreatingRun={isCreatingRun}
       apiProfileError={apiProfileError}
       apiProfiles={apiProfiles}
@@ -679,6 +832,26 @@ function safeRunError(error: unknown): string {
     return messages[error.code] ?? "Run 操作失败。";
   }
   return "Run 操作失败。";
+}
+
+function safeRunResultsError(error: unknown): string {
+  if (isIpcError(error)) {
+    const messages: Record<string, string> = {
+      persistence_database_unavailable: "运行数据暂时不可用。",
+      persistence_transaction_failed: "运行数据暂时无法读取。",
+      project_not_found: "项目不存在。",
+      run_not_found: "Run 不存在或不属于当前项目。",
+      task_not_found: "Task 不存在或不属于当前项目。",
+      output_result_not_found: "当前 Task 没有可读取的结果。",
+      output_result_too_large: "结果超过可预览大小。",
+      output_result_read_failed: "结果文件暂时无法读取。",
+      security_path_escape: "结果路径无效，已阻止读取。",
+      validation_invalid_value: "运行列表分页参数无效。",
+      validation_limit_exceeded: "运行列表分页大小无效。",
+    };
+    return messages[error.code] ?? "运行结果暂时无法读取。";
+  }
+  return "运行结果暂时无法读取。";
 }
 
 function isIpcError(error: unknown): error is IpcError {

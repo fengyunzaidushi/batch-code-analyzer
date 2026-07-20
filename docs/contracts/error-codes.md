@@ -137,6 +137,7 @@ internal
 | `run_not_paused` | 否 | 否 | 继续操作要求 Paused |
 | `run_already_terminal` | 否 | 否 | Run 已进入终态 |
 | `task_invalid_transition` | 否 | 否 | Task 状态转换非法 |
+| `task_not_found` | 否 | 否 | Task 不存在或不属于当前项目 |
 | `task_already_running` | 否 | 否 | Task 已执行中 |
 | `task_cannot_retry` | 否 | 否 | 当前 Task 不允许重试 |
 | `task_source_changed` | 否 | 否 | 文件内容与 Task 快照不一致 |
@@ -148,6 +149,9 @@ internal
 | `output_directory_unavailable` | 是 | 否 | 输出根目录不可用 |
 | `output_path_mapping_failed` | 否 | 否 | 无法安全映射结果路径 |
 | `output_write_failed` | 是 | 否 | 原子写入失败 |
+| `output_result_not_found` | 否 | 否 | 当前 Task 没有可读取的结果 |
+| `output_result_too_large` | 否 | 否 | 结果超过可预览大小限制 |
+| `output_result_read_failed` | 是 | 否 | 结果文件无法读取 |
 | `output_export_failed` | 是 | 否 | 模型请求成功但导出镜像失败 |
 
 ### 4.9 Recovery

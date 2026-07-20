@@ -2,10 +2,15 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type {
+  AttemptDto,
   ApiProfileSummaryDto,
   ContextVersionDto,
   ProjectSummaryDto,
+  ResultReadResponse,
   RunPreviewResponse,
+  RunSummaryDto,
+  TaskGetResponse,
+  TaskSummaryDto,
 } from "@batch-code-analyzer/ipc-types";
 
 import { AppShell, type ShellProject } from "./AppShell";
@@ -275,7 +280,128 @@ describe("AppShell", () => {
 
     expect(screen.getAllByRole("row").length).toBeLessThan(30);
   });
+
+  it("renders Run tasks, Attempt metadata, and delegates result preview", async () => {
+    const user = userEvent.setup();
+    const onLoadTaskDetail = vi.fn().mockResolvedValue(undefined);
+    const onOpenResult = vi.fn().mockResolvedValue(undefined);
+    const run = runSummary();
+    const task = taskSummary();
+    const attempt = attemptDto();
+    const detail: TaskGetResponse = { attempts: [attempt], task };
+    render(
+      <AppShell
+        onLoadTaskDetail={onLoadTaskDetail}
+        onOpenResult={onOpenResult}
+        projects={[project()]}
+        runHistory={[run]}
+        runTasks={[task]}
+        selectedRunId={run.id}
+        selectedTaskId={task.id}
+        taskDetails={{ [task.id]: detail }}
+      />,
+    );
+
+    expect(screen.getAllByText("src/main.ts")).not.toHaveLength(0);
+    expect(screen.getByText("1 次尝试")).toBeInTheDocument();
+    expect(screen.getByText("Local API")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "查看结果" }));
+    await user.click(screen.getByRole("button", { name: "1 次尝试" }));
+    expect(onOpenResult).toHaveBeenCalledWith(task.id);
+    expect(onLoadTaskDetail).toHaveBeenCalledWith(task.id);
+  });
+
+  it("shows a sanitized Markdown result dialog when a result is loaded", () => {
+    const result: ResultReadResponse = {
+      markdown: "# Result\n<script>bad()</script>",
+      projectId: "project-1",
+      relativePath: "src/main.ts.md",
+      resultVersion: 1,
+      runId: "run-1",
+      schemaVersion: 1,
+      taskId: "task-1",
+    };
+    render(
+      <AppShell
+        onCloseResultPreview={() => undefined}
+        projects={[project()]}
+        resultPreview={result}
+      />,
+    );
+
+    const dialog = screen.getByRole("dialog", { name: "src/main.ts.md" });
+    expect(dialog).toBeInTheDocument();
+    expect(dialog.querySelector("pre")).toHaveTextContent("# Result");
+    expect(dialog.querySelector("pre")).toHaveTextContent("bad()");
+    expect(screen.queryByText("<script>")).not.toBeInTheDocument();
+  });
 });
+
+function runSummary(): RunSummaryDto {
+  return {
+    completedAt: "2026-07-20T10:02:00Z",
+    contextVersionId: null,
+    createdAt: "2026-07-20T10:00:00Z",
+    id: "run-1",
+    projectId: "project-1",
+    schemaVersion: 1,
+    startedAt: "2026-07-20T10:00:01Z",
+    stats: {
+      cancelled: 0,
+      failed: 0,
+      interrupted: 0,
+      pending: 0,
+      queued: 0,
+      running: 0,
+      sourceChanged: 0,
+      succeeded: 1,
+      total: 1,
+    },
+    status: "completed",
+  };
+}
+
+function taskSummary(): TaskSummaryDto {
+  return {
+    completedAt: "2026-07-20T10:02:00Z",
+    createdAt: "2026-07-20T10:00:01Z",
+    fileId: "file-1",
+    hasResult: true,
+    id: "task-1",
+    latestAttemptId: "attempt-1",
+    modelSnapshot: "gpt-5",
+    modelSource: "project",
+    promptSource: "project",
+    relativePath: "src/main.ts",
+    resultVersion: 1,
+    runId: "run-1",
+    schemaVersion: 1,
+    startedAt: "2026-07-20T10:00:02Z",
+    status: "succeeded",
+  };
+}
+
+function attemptDto(): AttemptDto {
+  return {
+    actualModel: "gpt-5",
+    apiProfileId: "profile-1",
+    apiProfileName: "Local API",
+    durationMs: 1200,
+    error: null,
+    finishedAt: "2026-07-20T10:02:00Z",
+    httpStatus: 200,
+    id: "attempt-1",
+    inputTokens: 10,
+    outputTokens: 20,
+    retryReason: null,
+    schemaVersion: 1,
+    sequence: 1,
+    startedAt: "2026-07-20T10:00:02Z",
+    status: "succeeded",
+    taskId: "task-1",
+    totalTokens: 30,
+  };
+}
 
 describe("MarkdownPreview", () => {
   it("removes raw HTML and remote or dangerous destinations", () => {

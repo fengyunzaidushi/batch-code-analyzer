@@ -581,6 +581,74 @@ pub struct RunExecuteResponse {
     pub run: RunSummaryDto,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct RunListRequest {
+    pub project_id: ProjectId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub cursor: Option<String>,
+    pub limit: u16,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct RunGetRequest {
+    pub project_id: ProjectId,
+    pub run_id: RunId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct RunGetResponse {
+    pub run: RunSummaryDto,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskListRequest {
+    pub project_id: ProjectId,
+    pub run_id: RunId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub cursor: Option<String>,
+    pub limit: u16,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskGetRequest {
+    pub project_id: ProjectId,
+    pub task_id: TaskId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskGetResponse {
+    pub task: TaskSummaryDto,
+    pub attempts: Vec<AttemptDto>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ResultReadRequest {
+    pub project_id: ProjectId,
+    pub task_id: TaskId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ResultReadResponse {
+    #[ts(type = "1")]
+    pub schema_version: u32,
+    pub project_id: ProjectId,
+    pub run_id: RunId,
+    pub task_id: TaskId,
+    pub relative_path: String,
+    pub result_version: u32,
+    pub markdown: String,
+}
+
 impl From<&DomainRun> for RunSummaryDto {
     fn from(run: &DomainRun) -> Self {
         Self {
@@ -611,6 +679,7 @@ pub struct TaskSummaryDto {
     pub model_snapshot: String,
     pub model_source: TaskValueSource,
     pub has_result: bool,
+    pub result_version: u32,
     pub latest_attempt_id: Option<AttemptId>,
     pub created_at: Rfc3339Timestamp,
     pub started_at: Option<Rfc3339Timestamp>,
@@ -630,6 +699,7 @@ impl From<&DomainTask> for TaskSummaryDto {
             model_snapshot: task.model_snapshot.clone(),
             model_source: task.model_source,
             has_result: task.current_result_path.is_some(),
+            result_version: task.result_version,
             latest_attempt_id: task.latest_attempt_id.clone(),
             created_at: task.created_at.clone(),
             started_at: task.started_at.clone(),
@@ -829,10 +899,18 @@ pub fn export_types(out_dir: &Path) -> Result<(), ExportError> {
     RunCreateResponse::export_all(&config)?;
     RunExecuteRequest::export_all(&config)?;
     RunExecuteResponse::export_all(&config)?;
+    RunListRequest::export_all(&config)?;
+    RunGetRequest::export_all(&config)?;
+    RunGetResponse::export_all(&config)?;
     RunBlockingReasonDto::export_all(&config)?;
     RunPreviewTaskDto::export_all(&config)?;
     TaskSummaryDto::export_all(&config)?;
+    TaskListRequest::export_all(&config)?;
+    TaskGetRequest::export_all(&config)?;
+    TaskGetResponse::export_all(&config)?;
     AttemptDto::export_all(&config)?;
+    ResultReadRequest::export_all(&config)?;
+    ResultReadResponse::export_all(&config)?;
     ContextVersionDto::export_all(&config)?;
     ContextGenerateRequest::export_all(&config)?;
     ContextGenerateResponse::export_all(&config)?;
