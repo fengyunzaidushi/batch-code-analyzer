@@ -25,6 +25,8 @@ export type { ContextVersionId } from "./generated/ContextVersionId";
 export type { ContextVersionSourceFileDto } from "./generated/ContextVersionSourceFileDto";
 export type { DatabaseStatus } from "./generated/DatabaseStatus";
 export type { ErrorCategory } from "./generated/ErrorCategory";
+export type { FileAuthorizeSensitiveRequest } from "./generated/FileAuthorizeSensitiveRequest";
+export type { FileAuthorizeSensitiveResponse } from "./generated/FileAuthorizeSensitiveResponse";
 export type { FileRecordId } from "./generated/FileRecordId";
 export type { FileListRequest } from "./generated/FileListRequest";
 export type { FileRecordSummaryDto } from "./generated/FileRecordSummaryDto";

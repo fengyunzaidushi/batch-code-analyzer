@@ -296,6 +296,12 @@ pub fn mask_secret(value: &str) -> String {
     }
 }
 
+/// Computes the stable content hash used by scanner and authorization flows.
+#[must_use]
+pub fn content_hash(bytes: &[u8]) -> String {
+    format!("blake3:{}", blake3::hash(bytes).to_hex())
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SafePathMapper {
     used: BTreeSet<String>,

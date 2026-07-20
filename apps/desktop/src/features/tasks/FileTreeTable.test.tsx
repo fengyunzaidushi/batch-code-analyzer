@@ -122,4 +122,50 @@ describe("FileTreeTable", () => {
       screen.getByRole("checkbox", { name: "纳入文件 .env" }),
     ).toBeDisabled();
   });
+
+  it("requires explicit confirmation before authorizing a sensitive file", async () => {
+    const user = userEvent.setup();
+    const onAuthorizeSensitive = vi.fn().mockResolvedValue(undefined);
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(
+      <FileTreeTable
+        files={[
+          file({
+            exclusionReason: "sensitive_content",
+            id: "file-secret",
+            included: false,
+            relativePath: "src/config.ts",
+            sourceStatus: "sensitive",
+          }),
+        ]}
+        onAuthorizeSensitive={onAuthorizeSensitive}
+        onSetIncluded={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: "授权并纳入文件 src/config.ts" }),
+    );
+
+    expect(confirm).toHaveBeenCalled();
+    expect(onAuthorizeSensitive).toHaveBeenCalledWith("file-secret");
+    confirm.mockRestore();
+  });
+
+  it("shows an authorized sensitive file as ready for processing", () => {
+    render(
+      <FileTreeTable
+        files={[
+          file({
+            exclusionReason: "user_authorized_sensitive",
+            included: true,
+            relativePath: "src/config.ts",
+            sourceStatus: "sensitive",
+          }),
+        ]}
+      />,
+    );
+
+    expect(screen.getByText("已授权，待处理")).toBeInTheDocument();
+  });
 });

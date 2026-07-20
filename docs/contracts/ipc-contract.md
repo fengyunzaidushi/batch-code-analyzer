@@ -195,6 +195,7 @@ Markdown，再提交 Attempt、Task 和 Run 统计；Provider、源码读取或�
 file_list
 file_update_override
 file_set_included
+file_authorize_sensitive
 ```
 
 `file_list` 接收 `projectId`、可选的数字游标和 `1..=500` 的 `limit`，返回
@@ -206,7 +207,13 @@ file_set_included
 `file_set_included` 接收 `projectId`、`fileId` 和 `included`，返回
 `{ file: FileRecordSummaryDto }`。手动排除会持久化为当前 FileRecord 的用户覆盖，
 并在后续扫描中保留。敏感、二进制、过大、不可读取、编码不支持和已删除文件不能
-通过普通纳入命令绕过安全阻止；敏感文件授权另有独立流程。
+通过普通纳入命令绕过安全阻止。
+
+`file_authorize_sensitive` 接收 `projectId`、`fileId` 和明确的 `confirmed: true`。
+Rust 会重新校验仓库边界、符号链接、文件大小、二进制和编码，计算当前内容哈希并
+只保存脱敏的风险类型与位置。授权不会返回源码或秘密原文，文件仍保留 `sensitive`
+来源状态，但可以进入后续 Run。普通 `file_set_included(false)` 可以撤销授权；重新扫描
+后授权默认失效，需要用户再次确认。
 
 ### 4.7 Task
 

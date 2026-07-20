@@ -24,13 +24,15 @@ use batch_code_analyzer_model_providers::{
     ModelProvider, OpenAiResponsesProvider, ProviderRequest,
 };
 use batch_code_analyzer_persistence::{
-    AttemptRowMetadata, Database, PersistenceError, ProjectRowMetadata, LATEST_SCHEMA_VERSION,
+    AttemptRowMetadata, Database, PersistenceError, ProjectRowMetadata,
+    SensitiveFileAuthorizationMetadata, LATEST_SCHEMA_VERSION,
 };
 use batch_code_analyzer_repository_scanner::{
     FileDecision, ImportReport, ScanCancellation, ScanConfig, ScanError, ScanResult, Scanner,
+    DEFAULT_MAX_FILE_SIZE,
 };
 use batch_code_analyzer_secret_store::SecretRef;
-use batch_code_analyzer_security_core::SafeRoot;
+use batch_code_analyzer_security_core::{content_hash, detect_secrets, SafeRoot};
 use serde::Serialize;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use tokio_util::sync::CancellationToken;
@@ -82,6 +84,7 @@ impl From<PersistenceError> for ProjectServiceError {
 #[derive(Debug, Eq, PartialEq)]
 pub enum FileServiceError {
     NotFound,
+    SensitiveConfirmationRequired,
     SensitiveBlocked,
     Unreadable,
     UnsupportedEncoding,
@@ -97,6 +100,7 @@ impl FileServiceError {
     pub const fn code(&self) -> &'static str {
         match self {
             Self::NotFound | Self::Deleted | Self::RuleExcluded => "validation_invalid_value",
+            Self::SensitiveConfirmationRequired => "security_sensitive_confirmation_required",
             Self::SensitiveBlocked => "security_sensitive_file_blocked",
             Self::Unreadable => "scan_file_unreadable",
             Self::UnsupportedEncoding => "scan_encoding_unsupported",
@@ -745,6 +749,93 @@ impl<'database> ProjectService<'database> {
         self.database
             .repository()
             .set_file_included(project_id, file_id, included, &timestamp_now())
+            .await?
+            .ok_or(FileServiceError::NotFound)
+    }
+
+    /// Revalidates a sensitive file and records explicit user authorization to
+    /// include its current contents in a future Run.
+    ///
+    /// The file remains marked as sensitive. Only a safe hash, encoding, size,
+    /// timestamp, and redacted finding metadata are persisted; source content
+    /// never crosses the application boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable security or file error when confirmation, path safety,
+    /// readability, encoding, binary, or size validation fails.
+    pub async fn authorize_sensitive_file(
+        &self,
+        project_id: &ProjectId,
+        file_id: &FileRecordId,
+        confirmed: bool,
+    ) -> Result<FileRecord, FileServiceError> {
+        if !confirmed {
+            return Err(FileServiceError::SensitiveConfirmationRequired);
+        }
+        let file = self
+            .database
+            .repository()
+            .get_file_record(file_id)
+            .await?
+            .filter(|record| record.project_id == *project_id)
+            .ok_or(FileServiceError::NotFound)?;
+        if file.source_status != FileSourceStatus::Sensitive {
+            return Err(FileServiceError::RuleExcluded);
+        }
+        let project = self
+            .database
+            .repository()
+            .get_project(project_id)
+            .await?
+            .ok_or(FileServiceError::NotFound)?;
+        let root =
+            SafeRoot::new(&project.source_directory).map_err(|_| FileServiceError::Unreadable)?;
+        let relative = root
+            .relative_path(&file.relative_path)
+            .map_err(|_| FileServiceError::RuleExcluded)?;
+        let path = root.path().join(relative);
+        let metadata = fs::symlink_metadata(&path).map_err(|_| FileServiceError::Unreadable)?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(FileServiceError::RuleExcluded);
+        }
+        if metadata.len() > DEFAULT_MAX_FILE_SIZE {
+            return Err(FileServiceError::TooLarge);
+        }
+        let bytes = fs::read(&path).map_err(|_| FileServiceError::Unreadable)?;
+        if bytes.contains(&0) {
+            return Err(FileServiceError::Binary);
+        }
+        let content =
+            std::str::from_utf8(bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&bytes))
+                .map_err(|_| FileServiceError::UnsupportedEncoding)?;
+        let sensitive_findings = detect_secrets(content)
+            .into_iter()
+            .map(|finding| SensitiveFinding {
+                kind: finding.kind,
+                line: Some(finding.line),
+                column: Some(finding.column),
+            })
+            .collect::<Vec<_>>();
+        let modified_at = metadata.modified().ok().and_then(|time| {
+            time.duration_since(UNIX_EPOCH)
+                .ok()
+                .map(|duration| Rfc3339Timestamp::new(format!("unix:{}", duration.as_secs())))
+        });
+        self.database
+            .repository()
+            .authorize_sensitive_file(
+                project_id,
+                file_id,
+                SensitiveFileAuthorizationMetadata {
+                    size_bytes: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+                    modified_at,
+                    content_hash: content_hash(&bytes),
+                    encoding: "utf-8".into(),
+                    sensitive_findings,
+                    updated_at: timestamp_now(),
+                },
+            )
             .await?
             .ok_or(FileServiceError::NotFound)
     }
@@ -2199,6 +2290,27 @@ mod tests {
                 .expect_err("sensitive file should remain blocked"),
             FileServiceError::SensitiveBlocked
         );
+
+        let authorized = ProjectService::new(&database)
+            .authorize_sensitive_file(&project.id, &sensitive.id, true)
+            .await
+            .expect("explicit sensitive authorization should succeed");
+        assert!(authorized.included);
+        assert_eq!(
+            authorized.source_status,
+            batch_code_analyzer_domain::FileSourceStatus::Sensitive
+        );
+        assert_eq!(
+            authorized.exclusion_reason.as_deref(),
+            Some("user_authorized_sensitive")
+        );
+        assert!(authorized.content_hash.is_some());
+
+        let revoked = ProjectService::new(&database)
+            .set_file_included(&project.id, &sensitive.id, false)
+            .await
+            .expect("sensitive authorization should be revocable");
+        assert!(!revoked.included);
 
         let _ = fs::remove_dir_all(path);
     }

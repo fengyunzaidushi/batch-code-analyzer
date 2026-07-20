@@ -288,6 +288,14 @@ pub struct FileSetIncludedRequest {
     pub included: bool,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct FileAuthorizeSensitiveRequest {
+    pub project_id: ProjectId,
+    pub file_id: FileRecordId,
+    pub confirmed: bool,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum ScanOperationStatus {
@@ -440,6 +448,12 @@ impl From<&DomainFileRecord> for FileRecordSummaryDto {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct FileSetIncludedResponse {
+    pub file: FileRecordSummaryDto,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct FileAuthorizeSensitiveResponse {
     pub file: FileRecordSummaryDto,
 }
 
@@ -781,6 +795,8 @@ pub fn export_types(out_dir: &Path) -> Result<(), ExportError> {
     FileListRequest::export_all(&config)?;
     FileSetIncludedRequest::export_all(&config)?;
     FileSetIncludedResponse::export_all(&config)?;
+    FileAuthorizeSensitiveRequest::export_all(&config)?;
+    FileAuthorizeSensitiveResponse::export_all(&config)?;
     FileRecordSummaryDto::export_all(&config)?;
     RunSummaryDto::export_all(&config)?;
     RunPreviewRequest::export_all(&config)?;

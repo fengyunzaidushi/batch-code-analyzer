@@ -293,12 +293,12 @@ fn process_file(
                 .contains(&value.to_ascii_lowercase())
         });
     let ignored = ignored(relative, false, rules) || matches_user_pattern(relative, false, config);
-    let decision = if ignored {
+    let decision = if is_sensitive_filename(relative) {
+        Some("sensitive_filename")
+    } else if ignored {
         Some("gitignore_or_user_pattern")
     } else if excluded_extension {
         Some("builtin_extension")
-    } else if is_sensitive_filename(relative) {
-        Some("sensitive_filename")
     } else if metadata.len() > config.max_file_size {
         Some("file_too_large")
     } else if !config.include_extensions.is_empty()
@@ -688,6 +688,7 @@ mod tests {
         let root = temp_root("filters");
         fs::write(root.join("binary.bin"), [0, 1, 2]).unwrap();
         fs::write(root.join(".env"), "API_KEY=super-secret-value\n").unwrap();
+        fs::write(root.join(".gitignore"), ".env\n").unwrap();
         fs::write(root.join("large.rs"), vec![b'a'; 20]).unwrap();
         let mut config = ScanConfig::new(&root);
         config.max_file_size = 10;

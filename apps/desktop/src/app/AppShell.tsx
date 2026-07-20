@@ -53,6 +53,7 @@ interface AppShellProps {
   healthState?: ShellHealthState;
   activeRun?: ActiveRunSummary | null;
   onAddProject?: () => void;
+  onAuthorizeSensitiveFile?: (fileId: string) => Promise<void>;
   onCancelScan?: () => void;
   onAddTemporaryScanPattern?: (pattern: string) => void;
   onRemoveTemporaryScanPattern?: (pattern: string) => void;
@@ -100,6 +101,7 @@ export function AppShell({
   healthState = "checking",
   activeRun = null,
   onAddProject = () => undefined,
+  onAuthorizeSensitiveFile = async () => undefined,
   onCancelScan = () => undefined,
   onAddTemporaryScanPattern = () => undefined,
   onRemoveTemporaryScanPattern = () => undefined,
@@ -180,6 +182,7 @@ export function AppShell({
           activeRun={activeRun}
           fileRecords={fileRecords}
           fileTotal={fileTotal}
+          onAuthorizeSensitiveFile={onAuthorizeSensitiveFile}
           onCancelScan={onCancelScan}
           onAddTemporaryScanPattern={onAddTemporaryScanPattern}
           onRemoveTemporaryScanPattern={onRemoveTemporaryScanPattern}
@@ -451,6 +454,7 @@ function ProjectWorkspace({
   activeRun,
   fileRecords,
   fileTotal,
+  onAuthorizeSensitiveFile,
   onCancelScan,
   onAddTemporaryScanPattern,
   onRemoveTemporaryScanPattern,
@@ -476,6 +480,7 @@ function ProjectWorkspace({
   activeRun: ActiveRunSummary | null;
   fileRecords: readonly FileRecordSummaryDto[];
   fileTotal: number;
+  onAuthorizeSensitiveFile: (fileId: string) => Promise<void>;
   onCancelScan: () => void;
   onAddTemporaryScanPattern: (pattern: string) => void;
   onRemoveTemporaryScanPattern: (pattern: string) => void;
@@ -524,6 +529,7 @@ function ProjectWorkspace({
         <PromptWorkspace
           fileRecords={fileRecords}
           fileTotal={fileTotal}
+          onAuthorizeSensitiveFile={onAuthorizeSensitiveFile}
           onCancelScan={onCancelScan}
           onAddTemporaryScanPattern={onAddTemporaryScanPattern}
           onRemoveTemporaryScanPattern={onRemoveTemporaryScanPattern}
@@ -631,6 +637,7 @@ function TabButton({
 function PromptWorkspace({
   fileRecords,
   fileTotal,
+  onAuthorizeSensitiveFile,
   onCancelScan,
   onAddTemporaryScanPattern,
   onRemoveTemporaryScanPattern,
@@ -644,6 +651,7 @@ function PromptWorkspace({
   temporaryScanPatterns,
 }: {
   onCancelScan: () => void;
+  onAuthorizeSensitiveFile: (fileId: string) => Promise<void>;
   onAddTemporaryScanPattern: (pattern: string) => void;
   onRemoveTemporaryScanPattern: (pattern: string) => void;
   fileRecords: readonly FileRecordSummaryDto[];
@@ -658,10 +666,9 @@ function PromptWorkspace({
   temporaryScanPatterns: readonly string[];
 }) {
   const hasProject = project !== null;
-  const includedFileCount =
-    scanReport?.status === "completed"
-      ? scanReport.includedFiles
-      : fileRecords.filter((file) => file.included).length;
+  const includedFileCount = fileRecords.length
+    ? fileRecords.filter((file) => file.included).length
+    : (scanReport?.includedFiles ?? 0);
   return (
     <div className="workspace-content">
       <div className="content-intro">
@@ -764,6 +771,7 @@ function PromptWorkspace({
                 : "添加项目后，文件任务会显示在这里"
           }
           files={fileRecords}
+          onAuthorizeSensitive={onAuthorizeSensitiveFile}
           onSetIncluded={async (file, included) =>
             onSetFileIncluded(file.id, included)
           }

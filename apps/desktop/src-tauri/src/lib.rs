@@ -66,6 +66,7 @@ pub fn run() {
             commands::api_profile_delete,
             commands::file_list,
             commands::file_set_included,
+            commands::file_authorize_sensitive,
             commands::scan_start,
             commands::scan_cancel,
             commands::scan_get_report

@@ -19,7 +19,11 @@ import {
   updateProjectRunSettings,
 } from "../ipc/projects";
 import { checkBackendHealth } from "../ipc/health";
-import { listFiles, setFileIncluded } from "../ipc/files";
+import {
+  authorizeSensitiveFile,
+  listFiles,
+  setFileIncluded,
+} from "../ipc/files";
 import {
   cancelScan,
   getScanReport,
@@ -309,6 +313,29 @@ export function App() {
     [selectedProjectId],
   );
 
+  const handleAuthorizeSensitiveFile = useCallback(
+    async (fileId: string) => {
+      if (!selectedProjectId) return;
+      setProjectError(null);
+      try {
+        const response = await authorizeSensitiveFile(
+          selectedProjectId,
+          fileId,
+        );
+        setFileRecords((current) => ({
+          ...current,
+          [selectedProjectId]: (current[selectedProjectId] ?? []).map((file) =>
+            file.id === response.file.id ? response.file : file,
+          ),
+        }));
+      } catch (error) {
+        setProjectError(safeProjectError(error));
+        throw error;
+      }
+    },
+    [selectedProjectId],
+  );
+
   const handleCancelScan = async () => {
     if (!selectedProjectId) return;
     const report = scanReports[selectedProjectId];
@@ -478,6 +505,7 @@ export function App() {
       healthState={healthState}
       isAddingProject={isAddingProject}
       onAddProject={handleAddProject}
+      onAuthorizeSensitiveFile={handleAuthorizeSensitiveFile}
       onCancelScan={handleCancelScan}
       onAddTemporaryScanPattern={handleAddTemporaryScanPattern}
       onRemoveTemporaryScanPattern={handleRemoveTemporaryScanPattern}
@@ -536,6 +564,7 @@ function safeProjectError(error: unknown): string {
       scan_cancelled: "扫描已取消，本次结果未提交。",
       scan_failed: "扫描失败，请检查项目路径和权限。",
       scan_not_found: "扫描操作不存在。",
+      security_sensitive_confirmation_required: "请先确认敏感文件授权。",
       security_sensitive_file_blocked: "敏感文件需要单独确认后才能纳入。",
       scan_file_unreadable: "文件不可读取，暂时不能纳入。",
       scan_encoding_unsupported: "文件编码不支持，暂时不能纳入。",

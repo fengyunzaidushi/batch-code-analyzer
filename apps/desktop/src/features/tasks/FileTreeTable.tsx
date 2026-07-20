@@ -4,6 +4,7 @@ import {
   FileCode2,
   Folder,
   FolderOpen,
+  ShieldCheck,
 } from "lucide-react";
 import { useMemo, useState } from "react";
 import type { FileRecordSummaryDto } from "@batch-code-analyzer/ipc-types";
@@ -17,6 +18,7 @@ interface FileTreeTableProps {
     file: FileRecordSummaryDto,
     included: boolean,
   ) => Promise<void>;
+  onAuthorizeSensitive?: (fileId: string) => Promise<void>;
 }
 
 interface DirectoryNode {
@@ -62,6 +64,7 @@ export function FileTreeTable({
   files,
   emptyLabel = "暂无文件",
   onSetIncluded,
+  onAuthorizeSensitive,
 }: FileTreeTableProps) {
   const [collapsedDirectories, setCollapsedDirectories] = useState<Set<string>>(
     () => new Set(),
@@ -87,6 +90,22 @@ export function FileTreeTable({
     setUpdatingFileId(file.id);
     try {
       await onSetIncluded(file, included);
+    } catch {
+      // The application layer owns the user-facing error; this only clears the busy state.
+    } finally {
+      setUpdatingFileId(null);
+    }
+  };
+
+  const authorizeSensitive = async (file: FileRecordSummaryDto) => {
+    if (!onAuthorizeSensitive || file.included) return;
+    const confirmed = window.confirm(
+      `文件“${file.relativePath}”被检测为敏感文件。授权后其当前内容可能发送给模型，确定继续吗？`,
+    );
+    if (!confirmed) return;
+    setUpdatingFileId(file.id);
+    try {
+      await onAuthorizeSensitive(file.id);
     } catch {
       // The application layer owns the user-facing error; this only clears the busy state.
     } finally {
@@ -185,7 +204,24 @@ export function FileTreeTable({
                 {row.name}
               </span>
             </span>
-            <span>{fileSourceStatusLabel(row.file)}</span>
+            <span className="file-status-cell">
+              {fileSourceStatusLabel(row.file)}
+              {row.file.sourceStatus === "sensitive" &&
+              !row.file.included &&
+              onAuthorizeSensitive ? (
+                <button
+                  aria-label={`授权并纳入文件 ${row.file.relativePath}`}
+                  className="file-sensitive-authorize"
+                  disabled={updatingFileId === row.file.id}
+                  onClick={() => void authorizeSensitive(row.file)}
+                  title="确认后允许将当前敏感文件纳入分析"
+                  type="button"
+                >
+                  <ShieldCheck aria-hidden="true" size={13} />
+                  授权纳入
+                </button>
+              ) : null}
+            </span>
             <span>—</span>
             <span>{fileResultStatusLabel(row.file.resultStatus)}</span>
           </>
@@ -290,6 +326,8 @@ function flattenFileTree(
 }
 
 function fileSourceStatusLabel(file: FileRecordSummaryDto): string {
+  if (file.included && file.sourceStatus === "sensitive")
+    return "已授权，待处理";
   if (file.included)
     return file.sourceStatus === "modified" ? "已修改" : "待处理";
   if (file.exclusionReason) {

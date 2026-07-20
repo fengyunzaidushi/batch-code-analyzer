@@ -835,6 +835,29 @@ button:disabled {
 .file-tree-muted {
   color: #9aa6b1;
 }
+.file-status-cell {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.file-sensitive-authorize {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 24px;
+  padding: 3px 7px;
+  color: #815d1f;
+  background: #fff8e8;
+  border: 1px solid #e7c982;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 650;
+}
+.file-sensitive-authorize:hover {
+  background: #fff1c9;
+}
 .api-workspace .content-intro {
   align-items: center;
 }

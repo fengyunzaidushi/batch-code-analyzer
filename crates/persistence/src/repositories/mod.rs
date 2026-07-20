@@ -3,8 +3,8 @@
 use batch_code_analyzer_domain::{
     ApiProfile, ApiProfileId, ApiRouting, Attempt, AttemptId, ContextVersion, ContextVersionId,
     FileRecord, FileRecordId, FileResultStatus, FileSourceStatus, Project, ProjectId,
-    Rfc3339Timestamp, Run, RunId, RunStateMachine, RunStats, RunStatus, RunTransition, Task,
-    TaskId, TaskStateMachine, TaskStatus, TaskTransition,
+    Rfc3339Timestamp, Run, RunId, RunStateMachine, RunStats, RunStatus, RunTransition,
+    SensitiveFinding, Task, TaskId, TaskStateMachine, TaskStatus, TaskTransition,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
@@ -24,6 +24,15 @@ use crate::{
 #[derive(Clone, Copy, Debug)]
 pub struct Repository<'database> {
     database: &'database Database,
+}
+
+pub struct SensitiveFileAuthorizationMetadata {
+    pub size_bytes: u64,
+    pub modified_at: Option<Rfc3339Timestamp>,
+    pub content_hash: String,
+    pub encoding: String,
+    pub sensitive_findings: Vec<SensitiveFinding>,
+    pub updated_at: Rfc3339Timestamp,
 }
 
 impl Database {
@@ -437,6 +446,57 @@ impl Repository<'_> {
             .bind(included)
             .bind(included)
             .bind(now.as_str())
+            .bind(file_id.as_str())
+            .bind(project_id.as_str())
+            .execute(transaction.connection())
+            .await
+            .map_err(|_| PersistenceError::TransactionFailed)?
+            .rows_affected();
+
+            if affected == 0 {
+                return Ok(None);
+            }
+            load_file_record(&mut transaction, file_id.as_str()).await
+        }
+        .await;
+        finish_write(transaction, result).await
+    }
+
+    /// Records explicit user authorization for a sensitive file after the
+    /// application layer has revalidated and hashed its current contents.
+    ///
+    /// The source status remains `sensitive`; only the inclusion decision and
+    /// safe scan metadata change. The matched secret values are never stored.
+    ///
+    /// # Errors
+    ///
+    /// Returns a persistence error when the transaction or findings encoding
+    /// fails.
+    pub async fn authorize_sensitive_file(
+        &self,
+        project_id: &ProjectId,
+        file_id: &FileRecordId,
+        metadata: SensitiveFileAuthorizationMetadata,
+    ) -> Result<Option<FileRecord>, PersistenceError> {
+        let size_bytes =
+            i64::try_from(metadata.size_bytes).map_err(|_| PersistenceError::InvalidStoredState)?;
+        let findings_json = serde_json::to_string(&metadata.sensitive_findings)
+            .map_err(|_| PersistenceError::InvalidStoredState)?;
+        let mut transaction = self.database.begin_write().await?;
+        let result = async {
+            let affected = sqlx::query(
+                "UPDATE file_records
+                 SET size_bytes = ?, modified_at = ?, content_hash = ?, encoding = ?,
+                     included = 1, exclusion_reason = 'user_authorized_sensitive',
+                     sensitive_findings_json = ?, updated_at = ?
+                 WHERE id = ? AND project_id = ?",
+            )
+            .bind(size_bytes)
+            .bind(metadata.modified_at.as_ref().map(Rfc3339Timestamp::as_str))
+            .bind(metadata.content_hash)
+            .bind(metadata.encoding)
+            .bind(findings_json)
+            .bind(metadata.updated_at.as_str())
             .bind(file_id.as_str())
             .bind(project_id.as_str())
             .execute(transaction.connection())

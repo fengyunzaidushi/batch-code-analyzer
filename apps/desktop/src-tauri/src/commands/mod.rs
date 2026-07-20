@@ -16,9 +16,10 @@ use batch_code_analyzer_ipc_contracts::{
     ApiModelsFetchRequest, ApiModelsFetchResponse, ApiProfileDeleteRequest,
     ApiProfileDeleteResponse, ApiProfileListResponse, ApiProfileSaveRequest,
     ApiProfileSaveResponse, ApiProfileSummaryDto, ApiProfileTestRequest, ApiProfileTestResponse,
-    DatabaseStatus, ErrorCategory, FileListRequest, FileRecordSummaryDto, FileSetIncludedRequest,
-    FileSetIncludedResponse, HealthCheckResponse, HealthStatus, IpcError, PageResponse,
-    ProjectAddRequest, ProjectAddResponse, ProjectDetailDto, ProjectRunSettingsUpdateRequest,
+    DatabaseStatus, ErrorCategory, FileAuthorizeSensitiveRequest, FileAuthorizeSensitiveResponse,
+    FileListRequest, FileRecordSummaryDto, FileSetIncludedRequest, FileSetIncludedResponse,
+    HealthCheckResponse, HealthStatus, IpcError, PageResponse, ProjectAddRequest,
+    ProjectAddResponse, ProjectDetailDto, ProjectRunSettingsUpdateRequest,
     ProjectRunSettingsUpdateResponse, ProjectSummaryDto, RunBlockingReasonDto, RunCreateRequest,
     RunCreateResponse, RunExecuteRequest, RunExecuteResponse, RunPreviewRequest,
     RunPreviewResponse, RunPreviewTaskDto, RunSummaryDto, ScanCancelRequest, ScanCancelResponse,
@@ -551,6 +552,21 @@ pub(crate) async fn file_set_included(
 }
 
 #[tauri::command]
+pub(crate) async fn file_authorize_sensitive(
+    request: FileAuthorizeSensitiveRequest,
+    state: State<'_, PersistenceState>,
+) -> Result<FileAuthorizeSensitiveResponse, IpcError> {
+    let database = state.database.as_ref().ok_or_else(database_unavailable)?;
+    let file = ProjectService::new(database)
+        .authorize_sensitive_file(&request.project_id, &request.file_id, request.confirmed)
+        .await
+        .map_err(file_service_error)?;
+    Ok(FileAuthorizeSensitiveResponse {
+        file: FileRecordSummaryDto::from(&file),
+    })
+}
+
+#[tauri::command]
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn scan_start(
     request: ScanStartRequest,
@@ -865,6 +881,12 @@ fn file_service_error(error: FileServiceError) -> IpcError {
             "敏感文件需要单独确认后才能纳入",
             false,
         ),
+        FileServiceError::SensitiveConfirmationRequired => ipc_error(
+            "security_sensitive_confirmation_required",
+            ErrorCategory::Security,
+            "请先确认敏感文件授权",
+            false,
+        ),
         FileServiceError::Unreadable => ipc_error(
             "scan_file_unreadable",
             ErrorCategory::Scan,
@@ -1054,6 +1076,15 @@ mod tests {
         assert_eq!(sensitive.code, "security_sensitive_file_blocked");
         assert_eq!(sensitive.message, "敏感文件需要单独确认后才能纳入");
         assert!(sensitive.details.is_none());
+
+        let confirmation =
+            super::file_service_error(FileServiceError::SensitiveConfirmationRequired);
+        assert_eq!(
+            confirmation.code,
+            "security_sensitive_confirmation_required"
+        );
+        assert_eq!(confirmation.message, "请先确认敏感文件授权");
+        assert!(confirmation.details.is_none());
 
         let missing = super::file_service_error(FileServiceError::NotFound);
         assert_eq!(missing.code, "validation_invalid_value");
