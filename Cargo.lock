@@ -385,8 +385,11 @@ name = "batch-code-analyzer-secret-store"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "keyring",
+ "ring",
  "serde",
+ "sqlx",
  "tokio",
 ]
 

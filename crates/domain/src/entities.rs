@@ -150,12 +150,24 @@ pub struct ProjectContext {
     pub status: ContextStatus,
 }
 
-/// Scanner-owned settings will be added in the scanner task. Its current empty
-/// representation keeps the persisted Project field stable without predefining
-/// scanning behaviour in the domain foundation.
+/// Project-local filters and prompt presets are persisted in the existing JSON
+/// column so prompt library changes do not require a database migration.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptPreset {
+    pub id: String,
+    pub name: String,
+    pub prompt: String,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
-pub struct FilterRules {}
+pub struct FilterRules {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prompt_presets: Vec<PromptPreset>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_prompt_id: Option<String>,
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]

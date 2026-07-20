@@ -8,6 +8,8 @@ import type {
   ApiProfileListResponse,
   ApiProfileSaveRequest,
   ApiProfileSaveResponse,
+  ApiProfileSecretGetRequest,
+  ApiProfileSecretGetResponse,
   ApiProfileTestRequest,
   ApiProfileTestResponse,
 } from "@batch-code-analyzer/ipc-types";
@@ -31,6 +33,14 @@ export function putApiProfileSecret(
   request: ApiProfileSecretPutRequest,
 ): Promise<ApiProfileSaveResponse> {
   return invoke<ApiProfileSaveResponse>("api_profile_secret_put", { request });
+}
+
+export function getApiProfileSecret(
+  request: ApiProfileSecretGetRequest,
+): Promise<ApiProfileSecretGetResponse> {
+  return invoke<ApiProfileSecretGetResponse>("api_profile_secret_get", {
+    request,
+  });
 }
 
 export function testApiProfile(

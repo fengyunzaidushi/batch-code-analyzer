@@ -92,6 +92,86 @@ describe("AppShell", () => {
     expect(onCancelRun).toHaveBeenCalledOnce();
   });
 
+  it("generates a prompt candidate and applies the edited result", async () => {
+    const user = userEvent.setup();
+    const onGeneratePrompt = vi
+      .fn()
+      .mockResolvedValue("请分析模块职责和关键数据流。");
+    render(
+      <AppShell onGeneratePrompt={onGeneratePrompt} projects={[project()]} />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "生成提示词" }));
+    await user.type(
+      screen.getByLabelText("这次分析希望回答什么问题"),
+      "梳理核心模块",
+    );
+    await user.click(screen.getByRole("button", { name: "生成候选" }));
+    expect(onGeneratePrompt).toHaveBeenCalledWith("梳理核心模块");
+    expect(
+      screen.getByDisplayValue("请分析模块职责和关键数据流。"),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "使用此提示词" }));
+    expect(
+      screen.getByDisplayValue("请分析模块职责和关键数据流。"),
+    ).toBeInTheDocument();
+  });
+
+  it("saves the current prompt as a named project preset", async () => {
+    const user = userEvent.setup();
+    const onSaveProjectPrompt = vi.fn().mockResolvedValue(undefined);
+    render(
+      <AppShell
+        onSaveProjectPrompt={onSaveProjectPrompt}
+        projects={[project()]}
+      />,
+    );
+
+    await user.clear(screen.getByLabelText("提示词名称"));
+    await user.type(screen.getByLabelText("提示词名称"), "架构说明");
+    await user.clear(screen.getByLabelText("项目默认提示词"));
+    await user.type(screen.getByLabelText("项目默认提示词"), "请说明模块边界。");
+    const saveButton = screen.getByRole("button", { name: "保存为项目默认" });
+    expect(saveButton).toBeEnabled();
+    await user.click(saveButton);
+
+    expect(onSaveProjectPrompt).toHaveBeenCalledWith({
+      name: "架构说明",
+      prompt: "请说明模块边界。",
+      projectId: "project-1",
+    });
+  });
+
+  it("selects a saved prompt preset and fills the editor", async () => {
+    const user = userEvent.setup();
+    const onSelectProjectPrompt = vi.fn().mockResolvedValue(undefined);
+    render(
+      <AppShell
+        onSelectProjectPrompt={onSelectProjectPrompt}
+        projects={[
+          project({
+            activePromptId: "prompt-1",
+            defaultPrompt: "解释模块职责。",
+            promptPresets: [
+              { id: "prompt-1", name: "职责说明", prompt: "解释模块职责。" },
+              { id: "prompt-2", name: "影响分析", prompt: "分析修改影响。" },
+            ],
+          }),
+        ]}
+      />,
+    );
+
+    await user.selectOptions(
+      screen.getByLabelText("选择已保存提示词"),
+      "prompt-2",
+    );
+    expect(onSelectProjectPrompt).toHaveBeenCalledWith({
+      projectId: "project-1",
+      promptId: "prompt-2",
+    });
+    expect(screen.getByDisplayValue("分析修改影响。")).toBeInTheDocument();
+  });
+
   it("adds a temporary scan exclusion pattern for the current session", async () => {
     const user = userEvent.setup();
     const onAddTemporaryScanPattern = vi.fn();
@@ -165,6 +245,47 @@ describe("AppShell", () => {
     expect(screen.getByLabelText("名称")).toHaveValue("Local API");
     expect(screen.getByText("已配置密钥")).toBeInTheDocument();
     expect(screen.queryByDisplayValue(/sk-|api-key/i)).not.toBeInTheDocument();
+  });
+
+  it("reveals a configured key only after the eye button is clicked", async () => {
+    const user = userEvent.setup();
+    const profile: ApiProfileSummaryDto = {
+      baseUrl: "https://example.test/v1",
+      defaultModel: "gpt-5",
+      hasSecret: true,
+      id: "profile-1",
+      lastConnectionStatus: "unknown",
+      lastErrorCode: null,
+      lastTestedAt: null,
+      modelCache: [],
+      modelCacheUpdatedAt: null,
+      name: "Local API",
+      protocol: "openai-responses",
+      schemaVersion: 1,
+    };
+    const onGetApiProfileSecret = vi
+      .fn()
+      .mockResolvedValue("test-only-key-value");
+    render(
+      <AppShell
+        apiProfiles={[profile]}
+        onGetApiProfileSecret={onGetApiProfileSecret}
+        projects={[project()]}
+      />,
+    );
+
+    await user.click(screen.getByRole("tab", { name: "API 配置" }));
+    const input = screen.getByLabelText("API Key");
+    expect(input).toHaveAttribute("type", "password");
+    expect(input).toHaveValue("");
+    await user.click(screen.getByRole("button", { name: "显示 API Key" }));
+    expect(onGetApiProfileSecret).toHaveBeenCalledWith("profile-1");
+    expect(input).toHaveAttribute("type", "text");
+    expect(input).toHaveValue("test-only-key-value");
+
+    await user.click(screen.getByRole("button", { name: "隐藏 API Key" }));
+    expect(input).toHaveAttribute("type", "password");
+    expect(input).toHaveValue("");
   });
 
   it("saves the selected project API route and default model", async () => {

@@ -1,9 +1,9 @@
 use batch_code_analyzer_app_core::RunCancellationRegistry;
 use batch_code_analyzer_persistence::{Database, DatabaseHealth, DatabaseStartup};
 use batch_code_analyzer_secret_store::{
-    KeyringSecretStore, MemorySecretStore, SecretStore, SecretStoreAvailability,
+    KeyringSecretStore, MemorySecretStore, SecretStore, SecretStoreAvailability, SqliteSecretStore,
 };
-use std::sync::Arc;
+use std::{path::Path, sync::Arc};
 use tauri::Manager;
 
 mod commands;
@@ -28,6 +28,13 @@ fn secret_store() -> Arc<dyn SecretStore> {
     }
 }
 
+fn sqlite_secret_store(path: &Path) -> Arc<dyn SecretStore> {
+    match tauri::async_runtime::block_on(SqliteSecretStore::open(path)) {
+        Ok(store) => Arc::new(store),
+        Err(_) => secret_store(),
+    }
+}
+
 /// Starts the desktop application and registers its IPC commands.
 ///
 /// # Panics
@@ -38,13 +45,14 @@ pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             let database_path = app.path().app_data_dir()?.join("app.db");
-            let startup = tauri::async_runtime::block_on(Database::open_for_startup(database_path));
+            let startup =
+                tauri::async_runtime::block_on(Database::open_for_startup(&database_path));
             let state = match startup {
                 DatabaseStartup::Ready(database) => PersistenceState {
                     health: database.health(),
                     database: Some(database),
                     scans: ScanState::default(),
-                    secret_store: secret_store(),
+                    secret_store: sqlite_secret_store(&database_path),
                     run_cancellations: RunCancellationRegistry::default(),
                 },
                 DatabaseStartup::Recovery(recovery) => PersistenceState {
@@ -66,8 +74,11 @@ pub fn run() {
             commands::project_add,
             commands::project_get,
             commands::project_update_run_settings,
+            commands::project_prompt_save,
+            commands::project_prompt_select,
             commands::context_generate,
             commands::context_get,
+            commands::prompt_generate,
             commands::run_preview,
             commands::run_create,
             commands::run_execute,
@@ -80,6 +91,7 @@ pub fn run() {
             commands::api_profile_list,
             commands::api_profile_save,
             commands::api_profile_secret_put,
+            commands::api_profile_secret_get,
             commands::api_profile_test,
             commands::api_models_fetch,
             commands::api_profile_delete,

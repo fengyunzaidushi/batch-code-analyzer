@@ -160,6 +160,8 @@ function projectDetail() {
     contextModel: null,
     defaultModel: null,
     defaultPrompt: "prompt",
+    promptPresets: [],
+    activePromptId: null,
     id: "project-scan",
     lastOpenedAt: "2026-07-18T12:00:00Z",
     name: "Scan Demo",

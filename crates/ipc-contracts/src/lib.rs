@@ -9,9 +9,9 @@ use batch_code_analyzer_domain::{
     Attempt as DomainAttempt, AttemptError as DomainAttemptError, AttemptId, AttemptStatus,
     ContextStatus, ContextVersion as DomainContextVersion, ContextVersionId,
     FileRecord as DomainFileRecord, FileRecordId, FileResultStatus, FileSourceStatus,
-    Project as DomainProject, ProjectId, ProjectPathStatus, Rfc3339Timestamp, Run as DomainRun,
-    RunId, RunStats, RunStatus, RunTransition, Task as DomainTask, TaskId, TaskStatus,
-    TaskTransition, TaskValueSource,
+    Project as DomainProject, ProjectId, ProjectPathStatus, PromptPreset as DomainPromptPreset,
+    Rfc3339Timestamp, Run as DomainRun, RunId, RunStats, RunStatus, RunTransition,
+    Task as DomainTask, TaskId, TaskStatus, TaskTransition, TaskValueSource,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -173,6 +173,20 @@ pub struct ApiProfileListResponse {
     pub items: Vec<ApiProfileSummaryDto>,
 }
 
+/// One-shot response used only after an explicit reveal action. The value must
+/// not be logged, cached, persisted, or included in ordinary profile DTOs.
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiProfileSecretGetRequest {
+    pub profile_id: ApiProfileId,
+}
+
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiProfileSecretGetResponse {
+    pub secret: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiProfileTestRequest {
@@ -229,6 +243,14 @@ pub struct ProjectAddRequest {
     pub source_directory: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptPresetDto {
+    pub id: String,
+    pub name: String,
+    pub prompt: String,
+}
+
 /// Detail DTO intentionally exposes the selected project's path only on demand.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -240,6 +262,8 @@ pub struct ProjectDetailDto {
     pub source_directory: String,
     pub path_status: ProjectPathStatus,
     pub default_prompt: String,
+    pub prompt_presets: Vec<PromptPresetDto>,
+    pub active_prompt_id: Option<String>,
     pub default_model: Option<String>,
     pub context_model: Option<String>,
     pub api_routing: batch_code_analyzer_domain::ApiRouting,
@@ -266,6 +290,35 @@ pub struct ProjectRunSettingsUpdateRequest {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectRunSettingsUpdateResponse {
+    pub project: ProjectDetailDto,
+    pub config_mirror_warning: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectPromptSaveRequest {
+    pub project_id: ProjectId,
+    pub name: String,
+    pub prompt: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectPromptSaveResponse {
+    pub project: ProjectDetailDto,
+    pub config_mirror_warning: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectPromptSelectRequest {
+    pub project_id: ProjectId,
+    pub prompt_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectPromptSelectResponse {
     pub project: ProjectDetailDto,
     pub config_mirror_warning: bool,
 }
@@ -400,11 +453,28 @@ impl From<&DomainProject> for ProjectDetailDto {
             source_directory: project.source_directory.clone(),
             path_status: project.path_status,
             default_prompt: project.default_prompt.clone(),
+            prompt_presets: project
+                .filter_rules
+                .prompt_presets
+                .iter()
+                .map(PromptPresetDto::from)
+                .collect(),
+            active_prompt_id: project.filter_rules.active_prompt_id.clone(),
             default_model: project.default_model.clone(),
             context_model: project.context_model.clone(),
             api_routing: project.api_routing.clone(),
             output_root: project.output_root.clone(),
             last_opened_at: project.last_opened_at.clone(),
+        }
+    }
+}
+
+impl From<&DomainPromptPreset> for PromptPresetDto {
+    fn from(preset: &DomainPromptPreset) -> Self {
+        Self {
+            id: preset.id.clone(),
+            name: preset.name.clone(),
+            prompt: preset.prompt.clone(),
         }
     }
 }
@@ -863,6 +933,19 @@ pub struct ContextGetResponse {
     pub context: Option<ContextVersionDto>,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptGenerateRequest {
+    pub project_id: ProjectId,
+    pub goal: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptGenerateResponse {
+    pub prompt: String,
+}
+
 /// Exports all currently stable Rust DTOs to individual TypeScript modules.
 ///
 /// # Errors
@@ -877,6 +960,8 @@ pub fn export_types(out_dir: &Path) -> Result<(), ExportError> {
     ApiProfileSaveRequest::export_all(&config)?;
     ApiProfileSaveResponse::export_all(&config)?;
     ApiProfileListResponse::export_all(&config)?;
+    ApiProfileSecretGetRequest::export_all(&config)?;
+    ApiProfileSecretGetResponse::export_all(&config)?;
     ApiProfileTestRequest::export_all(&config)?;
     ApiProfileTestResponse::export_all(&config)?;
     ApiProfileDeleteRequest::export_all(&config)?;
@@ -887,11 +972,16 @@ pub fn export_types(out_dir: &Path) -> Result<(), ExportError> {
     PageResponse::<String>::export_all(&config)?;
     HealthCheckResponse::export_all(&config)?;
     ProjectSummaryDto::export_all(&config)?;
+    PromptPresetDto::export_all(&config)?;
     ProjectAddRequest::export_all(&config)?;
     ProjectDetailDto::export_all(&config)?;
     ProjectAddResponse::export_all(&config)?;
     ProjectRunSettingsUpdateRequest::export_all(&config)?;
     ProjectRunSettingsUpdateResponse::export_all(&config)?;
+    ProjectPromptSaveRequest::export_all(&config)?;
+    ProjectPromptSaveResponse::export_all(&config)?;
+    ProjectPromptSelectRequest::export_all(&config)?;
+    ProjectPromptSelectResponse::export_all(&config)?;
     ScanStartRequest::export_all(&config)?;
     ScanStartResponse::export_all(&config)?;
     ScanCancelRequest::export_all(&config)?;
@@ -930,6 +1020,8 @@ pub fn export_types(out_dir: &Path) -> Result<(), ExportError> {
     ContextGenerateResponse::export_all(&config)?;
     ContextGetRequest::export_all(&config)?;
     ContextGetResponse::export_all(&config)?;
+    PromptGenerateRequest::export_all(&config)?;
+    PromptGenerateResponse::export_all(&config)?;
     ProjectId::export_all(&config)?;
     FileRecordId::export_all(&config)?;
     RunId::export_all(&config)?;

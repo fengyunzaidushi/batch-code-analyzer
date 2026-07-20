@@ -12,26 +12,29 @@ use batch_code_analyzer_app_core::{
         RunTransition,
     },
     timestamp_now, ApiProfileService, ApiProfileServiceError, ContextService, ContextServiceError,
-    FileServiceError, ProjectService, ProjectServiceError, RunCancellationError,
-    RunExecutionService, RunPreparationInput, RunResultService, RunResultServiceError, RunService,
-    RunServiceError, ScanService,
+    FileServiceError, ProjectService, ProjectServiceError, PromptGenerationError,
+    PromptGenerationService, RunCancellationError, RunExecutionService, RunPreparationInput,
+    RunResultService, RunResultServiceError, RunService, RunServiceError, ScanService,
 };
 use batch_code_analyzer_ipc_contracts::{
     ApiModelsFetchRequest, ApiModelsFetchResponse, ApiProfileDeleteRequest,
     ApiProfileDeleteResponse, ApiProfileListResponse, ApiProfileSaveRequest,
-    ApiProfileSaveResponse, ApiProfileSummaryDto, ApiProfileTestRequest, ApiProfileTestResponse,
-    AttemptDto, ContextGenerateRequest, ContextGenerateResponse, ContextGetRequest,
-    ContextGetResponse, DatabaseStatus, ErrorCategory, FileAuthorizeSensitiveRequest,
-    FileAuthorizeSensitiveResponse, FileListRequest, FileRecordSummaryDto, FileSetIncludedRequest,
-    FileSetIncludedResponse, HealthCheckResponse, HealthStatus, IpcError, PageResponse,
-    ProjectAddRequest, ProjectAddResponse, ProjectDetailDto, ProjectRunSettingsUpdateRequest,
-    ProjectRunSettingsUpdateResponse, ProjectSummaryDto, ResultReadRequest, ResultReadResponse,
-    RunBlockingReasonDto, RunCancelRequest, RunCancelResponse, RunCreateRequest, RunCreateResponse,
-    RunExecuteRequest, RunExecuteResponse, RunGetRequest, RunGetResponse, RunListRequest,
-    RunPreviewRequest, RunPreviewResponse, RunPreviewTaskDto, RunSummaryDto, ScanCancelRequest,
-    ScanCancelResponse, ScanOperationStatus, ScanReportDto, ScanRuleSummaryDto, ScanStartRequest,
-    ScanStartResponse, TaskGetRequest, TaskGetResponse, TaskListRequest, TaskSummaryDto,
-    DTO_SCHEMA_VERSION, HEALTH_CHECK_SCHEMA_VERSION,
+    ApiProfileSaveResponse, ApiProfileSecretGetRequest, ApiProfileSecretGetResponse,
+    ApiProfileSummaryDto, ApiProfileTestRequest, ApiProfileTestResponse, AttemptDto,
+    ContextGenerateRequest, ContextGenerateResponse, ContextGetRequest, ContextGetResponse,
+    DatabaseStatus, ErrorCategory, FileAuthorizeSensitiveRequest, FileAuthorizeSensitiveResponse,
+    FileListRequest, FileRecordSummaryDto, FileSetIncludedRequest, FileSetIncludedResponse,
+    HealthCheckResponse, HealthStatus, IpcError, PageResponse, ProjectAddRequest,
+    ProjectAddResponse, ProjectDetailDto, ProjectPromptSaveRequest, ProjectPromptSaveResponse,
+    ProjectPromptSelectRequest, ProjectPromptSelectResponse, ProjectRunSettingsUpdateRequest,
+    ProjectRunSettingsUpdateResponse, ProjectSummaryDto, PromptGenerateRequest,
+    PromptGenerateResponse, ResultReadRequest, ResultReadResponse, RunBlockingReasonDto,
+    RunCancelRequest, RunCancelResponse, RunCreateRequest, RunCreateResponse, RunExecuteRequest,
+    RunExecuteResponse, RunGetRequest, RunGetResponse, RunListRequest, RunPreviewRequest,
+    RunPreviewResponse, RunPreviewTaskDto, RunSummaryDto, ScanCancelRequest, ScanCancelResponse,
+    ScanOperationStatus, ScanReportDto, ScanRuleSummaryDto, ScanStartRequest, ScanStartResponse,
+    TaskGetRequest, TaskGetResponse, TaskListRequest, TaskSummaryDto, DTO_SCHEMA_VERSION,
+    HEALTH_CHECK_SCHEMA_VERSION,
 };
 use batch_code_analyzer_model_providers::{ModelProvider, OpenAiResponsesProvider, ProviderError};
 use batch_code_analyzer_persistence::DatabaseHealth;
@@ -134,6 +137,27 @@ pub(crate) async fn context_get(
 }
 
 #[tauri::command]
+pub(crate) async fn prompt_generate(
+    request: PromptGenerateRequest,
+    state: State<'_, PersistenceState>,
+) -> Result<PromptGenerateResponse, IpcError> {
+    let database = state.database.as_ref().ok_or_else(database_unavailable)?;
+    let provider = OpenAiResponsesProvider::new(state.secret_store.clone()).map_err(|_| {
+        ipc_error(
+            "provider_connection_failed",
+            ErrorCategory::Provider,
+            "模型 Provider 暂不可用",
+            true,
+        )
+    })?;
+    let prompt = PromptGenerationService::new(database, provider)
+        .generate(&request.project_id, &request.goal)
+        .await
+        .map_err(prompt_generation_error)?;
+    Ok(PromptGenerateResponse { prompt })
+}
+
+#[tauri::command]
 pub(crate) async fn project_update_run_settings(
     request: ProjectRunSettingsUpdateRequest,
     state: State<'_, PersistenceState>,
@@ -148,6 +172,38 @@ pub(crate) async fn project_update_run_settings(
         .await
         .map_err(project_service_error)?;
     Ok(ProjectRunSettingsUpdateResponse {
+        project: ProjectDetailDto::from(&result.project),
+        config_mirror_warning: result.config_mirror_warning,
+    })
+}
+
+#[tauri::command]
+pub(crate) async fn project_prompt_save(
+    request: ProjectPromptSaveRequest,
+    state: State<'_, PersistenceState>,
+) -> Result<ProjectPromptSaveResponse, IpcError> {
+    let database = state.database.as_ref().ok_or_else(database_unavailable)?;
+    let result = ProjectService::new(database)
+        .save_prompt(&request.project_id, &request.name, &request.prompt)
+        .await
+        .map_err(project_service_error)?;
+    Ok(ProjectPromptSaveResponse {
+        project: ProjectDetailDto::from(&result.project),
+        config_mirror_warning: result.config_mirror_warning,
+    })
+}
+
+#[tauri::command]
+pub(crate) async fn project_prompt_select(
+    request: ProjectPromptSelectRequest,
+    state: State<'_, PersistenceState>,
+) -> Result<ProjectPromptSelectResponse, IpcError> {
+    let database = state.database.as_ref().ok_or_else(database_unavailable)?;
+    let result = ProjectService::new(database)
+        .select_prompt(&request.project_id, &request.prompt_id)
+        .await
+        .map_err(project_service_error)?;
+    Ok(ProjectPromptSelectResponse {
         project: ProjectDetailDto::from(&result.project),
         config_mirror_warning: result.config_mirror_warning,
     })
@@ -471,6 +527,34 @@ pub(crate) async fn api_profile_secret_put(
     };
     Ok(ApiProfileSaveResponse {
         profile: profile_summary(&state, &profile).await,
+    })
+}
+
+#[tauri::command]
+pub(crate) async fn api_profile_secret_get(
+    request: ApiProfileSecretGetRequest,
+    state: State<'_, PersistenceState>,
+) -> Result<ApiProfileSecretGetResponse, IpcError> {
+    let database = state.database.as_ref().ok_or_else(database_unavailable)?;
+    let profile = ApiProfileService::new(database)
+        .get(&request.profile_id)
+        .await
+        .map_err(api_profile_service_error)?;
+    let reference = profile.secret_ref.ok_or_else(|| {
+        ipc_error(
+            "security_secret_not_found",
+            ErrorCategory::Security,
+            "API Key 尚未配置",
+            false,
+        )
+    })?;
+    let secret = state
+        .secret_store
+        .get(&SecretRef::new(reference))
+        .await
+        .map_err(secret_store_error)?;
+    Ok(ApiProfileSecretGetResponse {
+        secret: secret.as_str().to_owned(),
     })
 }
 
@@ -1044,6 +1128,18 @@ fn project_service_error(error: ProjectServiceError) -> IpcError {
             "主 API Profile 不存在",
             false,
         ),
+        ProjectServiceError::PromptNotFound => ipc_error(
+            "prompt_not_found",
+            ErrorCategory::Validation,
+            "提示词不存在",
+            false,
+        ),
+        ProjectServiceError::InvalidPrompt => ipc_error(
+            "validation_required_field",
+            ErrorCategory::Validation,
+            "提示词名称和内容不能为空",
+            false,
+        ),
         ProjectServiceError::PathUnavailable => ipc_error(
             "project_path_unavailable",
             ErrorCategory::Project,
@@ -1070,6 +1166,47 @@ fn context_service_error(error: ContextServiceError) -> IpcError {
             true,
         ),
         ContextServiceError::Persistence(error) => persistence_error(&error),
+    }
+}
+
+fn prompt_generation_error(error: PromptGenerationError) -> IpcError {
+    match error {
+        PromptGenerationError::GoalMissing => ipc_error(
+            "validation_required_field",
+            ErrorCategory::Validation,
+            "请先描述这次分析希望回答的问题",
+            false,
+        ),
+        PromptGenerationError::ProjectNotFound => project_not_found(""),
+        PromptGenerationError::ApiProfileMissing => ipc_error(
+            "validation_api_profile_missing",
+            ErrorCategory::Validation,
+            "尚未配置主 API Profile",
+            false,
+        ),
+        PromptGenerationError::SecretMissing => ipc_error(
+            "security_secret_not_found",
+            ErrorCategory::Security,
+            "主 API Profile 密钥不可用，请重新配置",
+            false,
+        ),
+        PromptGenerationError::ModelMissing => ipc_error(
+            "validation_model_missing",
+            ErrorCategory::Validation,
+            "无法解析项目默认模型",
+            false,
+        ),
+        PromptGenerationError::InvalidResponse => ipc_error(
+            "provider_invalid_response",
+            ErrorCategory::Provider,
+            "模型没有返回有效的提示词",
+            true,
+        ),
+        PromptGenerationError::Provider(ProviderError::SecretStoreUnavailable) => {
+            secret_not_available_error()
+        }
+        PromptGenerationError::Provider(error) => provider_error(&error),
+        PromptGenerationError::Persistence(error) => persistence_error(&error),
     }
 }
 

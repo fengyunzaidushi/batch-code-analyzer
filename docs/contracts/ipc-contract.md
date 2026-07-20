@@ -59,6 +59,8 @@ project_list
 project_add
 project_get
 project_update_run_settings
+project_prompt_save
+project_prompt_select
 project_update
 project_remove
 project_relocate
@@ -70,6 +72,8 @@ project_relocate
 - `project_get`：按需返回当前项目详情；绝对仓库路径不进入项目列表摘要。
 - `project_update_run_settings`：更新未来 Run 使用的主 API Profile 和项目默认模型；
   Profile 引用必须存在，响应返回更新后的 `ProjectDetailDto` 和配置镜像写入警告。
+- `project_prompt_save`：将命名提示词保存到当前项目的提示词库，并立即设为项目默认；
+- `project_prompt_select`：从当前项目提示词库选择一个预设，并将其内容设为项目默认；
 - `project_remove`：只移除客户端登记，不删除仓库或历史输出。
 - `project_relocate`：重新绑定不可用项目，必须校验项目 ID 或仓库配置的一致性。
 
@@ -138,6 +142,7 @@ interface ScanRuleSummaryDto {
 context_generate
 context_update_manual
 context_get
+prompt_generate
 ```
 
 `context_generate` 接收 `projectId`，在仓库根目录发现 `README*` 与 `AGENTS.md`，生成
@@ -145,23 +150,35 @@ context_get
 模型，也不返回源码原文。`context_get` 返回当前项目版本或 `null`。上下文生成是独立
 辅助请求，不计入文件任务成功/失败统计。
 
+`prompt_generate` 接收当前项目和用户的分析目标，使用项目主 API Profile、实际可读取的
+密钥、项目默认模型和当前上下文摘要生成一个可编辑候选。命令只返回候选提示词，不保存
+项目配置，也不创建 Run；用户确认后由前端回填当前提示词输入框，再可通过
+`project_prompt_save` 保存为项目预设。
+
 ### 4.4 API Profile
 
 ```text
 api_profile_list
 api_profile_save
+api_profile_secret_put
+api_profile_secret_get
 api_profile_test
 api_profile_delete
 api_models_fetch
 ```
 
-- API Key 只通过 SecretStore 写入，不通过读取命令返回前端。
+- API Key 只通过 SecretStore 持久化；SQLite、项目 JSON 和普通配置只保存不透明
+  `SecretRef`，不得保存 API Key 明文。
 - `api_profile_list` 只返回是否已配置密钥和脱敏摘要。
+- `api_profile_secret_get` 只允许在用户明确点击“显示 API Key”后调用。它从 SecretStore
+  读取并通过专用一次性响应返回当前值；不得记录日志、写入缓存、并入普通 Profile DTO
+  或跨 Profile 保留。隐藏、切换 Profile 或保存完成后，前端应清除未编辑的回显值。
 - 删除仍被项目引用的档案必须失败并返回稳定错误码。
 
 `api_profile_save` 只保存名称、Base URL、协议和默认模型等非敏感元数据。
-`api_profile_secret_put` 是一次性写入命令：密钥只进入 SecretStore，命令不返回密钥，
-也不生成包含密钥字段的 TypeScript 公共 DTO。`api_profile_test` 与 `api_models_fetch`
+`api_profile_secret_put` 是一次性写入命令：密钥只进入 SecretStore，命令不返回密钥。
+`api_profile_secret_get` 的专用响应是“显式用户回显”的唯一例外，不得复用于列表、保存、
+测试或模型请求 DTO。`api_profile_test` 与 `api_models_fetch`
 通过 Provider 的模型列表请求验证连接并缓存脱敏模型元数据。
 
 ### 4.5 Run

@@ -48,6 +48,7 @@ interface MutableDirectory extends DirectoryNode {
 const EXCLUSION_LABELS: Record<string, string> = {
   binary: "二进制文件",
   builtin_extension: "不支持的文件类型",
+  builtin_filename: "低价值文件",
   file_too_large: "文件过大",
   gitignore_or_user_pattern: "被忽略规则排除",
   not_included_extension: "不在纳入扩展名内",

@@ -18,7 +18,7 @@ use sqlx::{
 
 use crate::PersistenceError;
 
-pub const LATEST_SCHEMA_VERSION: u32 = 1;
+pub const LATEST_SCHEMA_VERSION: u32 = 2;
 const DEFAULT_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -477,7 +477,8 @@ mod tests {
         let table_count: i64 = query_scalar(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN (
                 'projects', 'api_profiles', 'file_records', 'context_versions',
-                'runs', 'tasks', 'attempts', 'prompt_library', 'app_settings'
+                'runs', 'tasks', 'attempts', 'prompt_library', 'app_settings',
+                'encrypted_secrets', 'secret_store_metadata'
             )",
         )
         .fetch_one(&database.pool)
@@ -485,7 +486,7 @@ mod tests {
         .expect("core tables should exist");
 
         assert_eq!(database.schema_version(), LATEST_SCHEMA_VERSION);
-        assert_eq!(table_count, 9);
+        assert_eq!(table_count, 11);
     }
 
     #[tokio::test]
@@ -503,7 +504,7 @@ mod tests {
             .expect("migration history should be readable");
 
         assert_eq!(version, LATEST_SCHEMA_VERSION);
-        assert_eq!(migration_count, 1);
+        assert_eq!(migration_count, 2);
     }
 
     #[tokio::test]

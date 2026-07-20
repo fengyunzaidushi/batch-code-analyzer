@@ -6,6 +6,10 @@ import type {
   ProjectAddResponse,
   ProjectDetailDto,
   ProjectId,
+  ProjectPromptSaveRequest,
+  ProjectPromptSaveResponse,
+  ProjectPromptSelectRequest,
+  ProjectPromptSelectResponse,
   ProjectRunSettingsUpdateRequest,
   ProjectRunSettingsUpdateResponse,
 } from "@batch-code-analyzer/ipc-types";
@@ -41,4 +45,18 @@ export function updateProjectRunSettings(
     "project_update_run_settings",
     { request },
   );
+}
+
+export function saveProjectPrompt(
+  request: ProjectPromptSaveRequest,
+): Promise<ProjectPromptSaveResponse> {
+  return invoke<ProjectPromptSaveResponse>("project_prompt_save", { request });
+}
+
+export function selectProjectPrompt(
+  request: ProjectPromptSelectRequest,
+): Promise<ProjectPromptSelectResponse> {
+  return invoke<ProjectPromptSelectResponse>("project_prompt_select", {
+    request,
+  });
 }

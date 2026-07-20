@@ -6,6 +6,9 @@ import type {
   ContextVersionDto,
   FileRecordSummaryDto,
   IpcError,
+  ProjectDetailDto,
+  ProjectPromptSaveRequest,
+  ProjectPromptSelectRequest,
   ProjectRunSettingsUpdateRequest,
   ProjectSummaryDto,
   RunPreviewRequest,
@@ -21,6 +24,8 @@ import {
   chooseProjectDirectory,
   getProject,
   listProjects,
+  saveProjectPrompt as savePromptPreset,
+  selectProjectPrompt as selectPromptPreset,
   updateProjectRunSettings,
 } from "../ipc/projects";
 import { checkBackendHealth } from "../ipc/health";
@@ -39,6 +44,7 @@ import {
 import {
   deleteApiProfile,
   fetchApiModels,
+  getApiProfileSecret,
   listApiProfiles,
   putApiProfileSecret,
   saveApiProfile,
@@ -55,6 +61,7 @@ import {
   previewRun,
   readResult,
 } from "../ipc/runs";
+import { generatePrompt } from "../ipc/prompt";
 import { AppShell, type ShellHealthState, type ShellProject } from "./AppShell";
 
 export function App() {
@@ -248,6 +255,9 @@ export function App() {
                   rootDirectory: detail.sourceDirectory,
                   primaryProfileId: detail.apiRouting.primaryProfileId,
                   defaultModel: detail.defaultModel,
+                  defaultPrompt: detail.defaultPrompt,
+                  promptPresets: detail.promptPresets,
+                  activePromptId: detail.activePromptId,
                 }
               : project,
           ),
@@ -578,6 +588,18 @@ export function App() {
     }
   };
 
+  const handleGetApiProfileSecret = async (profileId: string): Promise<string> => {
+    setApiProfileError(null);
+    try {
+      const response = await getApiProfileSecret({ profileId });
+      return response.secret;
+    } catch (error) {
+      const message = safeApiProfileError(error);
+      setApiProfileError(message);
+      throw new Error(message, { cause: error });
+    }
+  };
+
   const handleTestApiProfile = async (id: string) => {
     setApiProfileError(null);
     try {
@@ -648,6 +670,58 @@ export function App() {
     }
   };
 
+  const applyProjectDetail = (detail: ProjectDetailDto) => {
+    setProjects((current) =>
+      current.map((project) =>
+        project.id === detail.id
+          ? {
+              ...project,
+              rootDirectory: detail.sourceDirectory,
+              primaryProfileId: detail.apiRouting.primaryProfileId,
+              defaultModel: detail.defaultModel,
+              defaultPrompt: detail.defaultPrompt,
+              promptPresets: detail.promptPresets,
+              activePromptId: detail.activePromptId,
+            }
+          : project,
+      ),
+    );
+  };
+
+  const handleSaveProjectPrompt = async (
+    request: ProjectPromptSaveRequest,
+  ): Promise<void> => {
+    try {
+      const response = await savePromptPreset(request);
+      applyProjectDetail(response.project);
+      if (response.configMirrorWarning) {
+        setProjectError("提示词已保存，但项目配置镜像暂时无法写入。");
+      } else {
+        setProjectError(null);
+      }
+    } catch (error) {
+      setProjectError(safeProjectError(error));
+      throw new Error(safeProjectError(error), { cause: error });
+    }
+  };
+
+  const handleSelectProjectPrompt = async (
+    request: ProjectPromptSelectRequest,
+  ): Promise<void> => {
+    try {
+      const response = await selectPromptPreset(request);
+      applyProjectDetail(response.project);
+      if (response.configMirrorWarning) {
+        setProjectError("提示词已切换，但项目配置镜像暂时无法写入。");
+      } else {
+        setProjectError(null);
+      }
+    } catch (error) {
+      setProjectError(safeProjectError(error));
+      throw new Error(safeProjectError(error), { cause: error });
+    }
+  };
+
   const handleRunPreview = async (input: { prompt: string }) => {
     if (!selectedProjectId) return;
     setRunError(null);
@@ -660,6 +734,19 @@ export function App() {
       setRunPreview(response);
     } catch (error) {
       setRunError(safeRunError(error));
+    }
+  };
+
+  const handleGeneratePrompt = async (goal: string): Promise<string> => {
+    if (!selectedProjectId) throw new Error("请先选择项目");
+    try {
+      const response = await generatePrompt({
+        projectId: selectedProjectId,
+        goal,
+      });
+      return response.prompt;
+    } catch (error) {
+      throw new Error(safePromptGenerationError(error), { cause: error });
     }
   };
 
@@ -787,6 +874,9 @@ export function App() {
       onSetFileIncluded={handleSetFileIncluded}
       onPreviewRun={handleRunPreview}
       onCreateRun={handleRunCreate}
+      onGeneratePrompt={handleGeneratePrompt}
+      onSaveProjectPrompt={handleSaveProjectPrompt}
+      onSelectProjectPrompt={handleSelectProjectPrompt}
       onCloseRunPreview={() => {
         setRunPreview(null);
         setRunError(null);
@@ -810,6 +900,7 @@ export function App() {
       apiProfiles={apiProfiles}
       onDeleteApiProfile={handleDeleteApiProfile}
       onFetchApiModels={handleFetchApiModels}
+      onGetApiProfileSecret={handleGetApiProfileSecret}
       onPutApiProfileSecret={handlePutApiProfileSecret}
       onSaveApiProfile={handleSaveApiProfile}
       onTestApiProfile={handleTestApiProfile}
@@ -841,6 +932,8 @@ function safeProjectError(error: unknown): string {
       persistence_transaction_failed: "项目数据暂时无法保存。",
       project_path_duplicate: "该目录已经登记，已保留原项目。",
       project_path_unavailable: "所选目录不可用。",
+      prompt_not_found: "保存的提示词不存在。",
+      validation_required_field: "提示词名称和内容不能为空。",
       scan_already_running: "当前项目已有扫描。",
       scan_cancelled: "扫描已取消，本次结果未提交。",
       scan_failed: "扫描失败，请检查项目路径和权限。",
@@ -873,6 +966,7 @@ function safeApiProfileError(error: unknown): string {
       provider_server_error: "API 服务暂时不可用。",
       provider_timeout: "API 连接超时。",
       security_invalid_secret_reference: "API Profile 密钥引用无效。",
+      security_secret_not_found: "API Key 不存在，请重新配置。",
       security_secret_store_failure: "安全存储操作失败。",
       security_secret_store_unavailable: "安全存储不可用。",
       validation_invalid_value: "API Profile 配置无效。",
@@ -911,6 +1005,26 @@ function safeRunError(error: unknown): string {
     return messages[error.code] ?? "Run 操作失败。";
   }
   return "Run 操作失败。";
+}
+
+function safePromptGenerationError(error: unknown): string {
+  if (isIpcError(error)) {
+    const messages: Record<string, string> = {
+      validation_required_field: "请先描述这次分析希望回答的问题。",
+      validation_api_profile_missing: "尚未配置主 API Profile。",
+      validation_model_missing: "请先配置项目默认模型。",
+      security_secret_not_found: "API Key 当前不可用，请重新配置。",
+      provider_connection_failed: "无法连接模型服务。",
+      provider_timeout: "提示词生成超时，请重试。",
+      provider_rate_limited: "模型服务当前受到限流，请稍后重试。",
+      provider_server_error: "模型服务暂时异常，请稍后重试。",
+      provider_invalid_response: "模型没有返回有效的提示词。",
+      persistence_database_unavailable: "本地数据库暂不可用。",
+      persistence_transaction_failed: "项目数据暂时无法读取。",
+    };
+    return messages[error.code] ?? "提示词生成失败，请重试。";
+  }
+  return error instanceof Error ? error.message : "提示词生成失败，请重试。";
 }
 
 function safeRunExecutionError(error: unknown): string {

@@ -2,6 +2,8 @@ import {
   Activity,
   ChevronRight,
   CircleAlert,
+  Eye,
+  EyeOff,
   FolderPlus,
   GitBranch,
   LayoutGrid,
@@ -20,7 +22,10 @@ import type {
   ContextVersionDto,
   FileRecordSummaryDto,
   ProjectPathStatus,
+  ProjectPromptSaveRequest,
+  ProjectPromptSelectRequest,
   ProjectRunSettingsUpdateRequest,
+  PromptPresetDto,
   ProjectSummaryDto,
   ResultReadResponse,
   RunPreviewResponse,
@@ -39,6 +44,9 @@ export type ShellProject = ProjectSummaryDto & {
   rootDirectory?: string;
   primaryProfileId?: string | null;
   defaultModel?: string | null;
+  defaultPrompt?: string;
+  promptPresets?: readonly PromptPresetDto[];
+  activePromptId?: string | null;
   runningTaskCount?: number;
   failedTaskCount?: number;
 };
@@ -71,6 +79,9 @@ interface AppShellProps {
   onRetryHealth?: () => void;
   onSetFileIncluded?: (fileId: string, included: boolean) => Promise<void>;
   onPreviewRun?: (input: { prompt: string }) => void;
+  onGeneratePrompt?: (goal: string) => Promise<string>;
+  onSaveProjectPrompt?: (request: ProjectPromptSaveRequest) => Promise<void>;
+  onSelectProjectPrompt?: (request: ProjectPromptSelectRequest) => Promise<void>;
   onCreateRun?: () => Promise<void> | void;
   onCloseRunPreview?: () => void;
   runPreview?: RunPreviewResponse | null;
@@ -94,6 +105,7 @@ interface AppShellProps {
     profileId: string;
     secret: string;
   }) => Promise<ApiProfileSummaryDto>;
+  onGetApiProfileSecret?: (profileId: string) => Promise<string>;
   onSaveApiProfile?: (
     request: ApiProfileSaveRequest,
   ) => Promise<ApiProfileSummaryDto>;
@@ -135,6 +147,9 @@ export function AppShell({
   onRetryHealth = () => undefined,
   onSetFileIncluded = async () => undefined,
   onPreviewRun = () => undefined,
+  onGeneratePrompt = async () => "",
+  onSaveProjectPrompt = async () => undefined,
+  onSelectProjectPrompt = async () => undefined,
   onCreateRun = async () => undefined,
   onCloseRunPreview = () => undefined,
   runPreview = null,
@@ -157,6 +172,9 @@ export function AppShell({
   onPutApiProfileSecret = async () => {
     throw new Error("API Profile secret handler is unavailable");
   },
+  onGetApiProfileSecret = async () => {
+    throw new Error("API Profile secret reveal handler is unavailable");
+  },
   onSaveApiProfile = async () => {
     throw new Error("API Profile save handler is unavailable");
   },
@@ -177,7 +195,10 @@ export function AppShell({
   >(projects[0]?.id ?? null);
   const [search, setSearch] = useState("");
   const [tab, setTab] = useState<WorkspaceTab>("prompt");
-  const [prompt, setPrompt] = useState(DEFAULT_PROMPT);
+  const [promptDraft, setPromptDraft] = useState({
+    projectId: null as string | null,
+    value: DEFAULT_PROMPT,
+  });
   const selectedProjectId =
     controlledSelectedProjectId === undefined
       ? (internalSelectedProjectId ?? projects[0]?.id ?? null)
@@ -199,6 +220,14 @@ export function AppShell({
   }, [projects, search]);
   const selectedProject =
     projects.find((project) => project.id === selectedProjectId) ?? null;
+
+  const prompt =
+    promptDraft.projectId === selectedProjectId
+      ? promptDraft.value
+      : (selectedProject?.defaultPrompt ?? DEFAULT_PROMPT);
+  const setPrompt = (value: string) => {
+    setPromptDraft({ projectId: selectedProjectId, value });
+  };
 
   return (
     <div className="desktop-shell">
@@ -233,6 +262,9 @@ export function AppShell({
           onRemoveTemporaryScanPattern={onRemoveTemporaryScanPattern}
           onSetFileIncluded={onSetFileIncluded}
           onPreviewRun={() => onPreviewRun({ prompt })}
+          onGeneratePrompt={onGeneratePrompt}
+          onSaveProjectPrompt={onSaveProjectPrompt}
+          onSelectProjectPrompt={onSelectProjectPrompt}
           onPromptChange={setPrompt}
           prompt={prompt}
           onStartScan={onStartScan}
@@ -245,6 +277,7 @@ export function AppShell({
           apiProfiles={apiProfiles}
           onDeleteApiProfile={onDeleteApiProfile}
           onFetchApiModels={onFetchApiModels}
+          onGetApiProfileSecret={onGetApiProfileSecret}
           onPutApiProfileSecret={onPutApiProfileSecret}
           onSaveApiProfile={onSaveApiProfile}
           onTestApiProfile={onTestApiProfile}
@@ -538,6 +571,9 @@ function ProjectWorkspace({
   onAddTemporaryScanPattern,
   onRemoveTemporaryScanPattern,
   onPreviewRun,
+  onGeneratePrompt,
+  onSaveProjectPrompt,
+  onSelectProjectPrompt,
   onPromptChange,
   prompt,
   onSetFileIncluded,
@@ -549,6 +585,7 @@ function ProjectWorkspace({
   setTab,
   onDeleteApiProfile,
   onFetchApiModels,
+  onGetApiProfileSecret,
   onPutApiProfileSecret,
   onSaveApiProfile,
   onTestApiProfile,
@@ -577,6 +614,11 @@ function ProjectWorkspace({
   onAddTemporaryScanPattern: (pattern: string) => void;
   onRemoveTemporaryScanPattern: (pattern: string) => void;
   onPreviewRun: () => void;
+  onGeneratePrompt: (goal: string) => Promise<string>;
+  onSaveProjectPrompt: (request: ProjectPromptSaveRequest) => Promise<void>;
+  onSelectProjectPrompt: (
+    request: ProjectPromptSelectRequest,
+  ) => Promise<void>;
   onPromptChange: (value: string) => void;
   prompt: string;
   onSetFileIncluded: (fileId: string, included: boolean) => Promise<void>;
@@ -588,6 +630,7 @@ function ProjectWorkspace({
   setTab: (tab: WorkspaceTab) => void;
   onDeleteApiProfile: (id: string) => Promise<void>;
   onFetchApiModels: (id: string) => Promise<void>;
+  onGetApiProfileSecret: (profileId: string) => Promise<string>;
   onPutApiProfileSecret: (request: {
     profileId: string;
     secret: string;
@@ -639,6 +682,9 @@ function ProjectWorkspace({
           onAddTemporaryScanPattern={onAddTemporaryScanPattern}
           onRemoveTemporaryScanPattern={onRemoveTemporaryScanPattern}
           onPreviewRun={onPreviewRun}
+          onGeneratePrompt={onGeneratePrompt}
+          onSaveProjectPrompt={onSaveProjectPrompt}
+          onSelectProjectPrompt={onSelectProjectPrompt}
           onPromptChange={onPromptChange}
           prompt={prompt}
           onSetFileIncluded={onSetFileIncluded}
@@ -662,6 +708,7 @@ function ProjectWorkspace({
           error={apiProfileError}
           onDelete={onDeleteApiProfile}
           onFetchModels={onFetchApiModels}
+          onGetSecret={onGetApiProfileSecret}
           onPutSecret={onPutApiProfileSecret}
           onSave={onSaveApiProfile}
           onTest={onTestApiProfile}
@@ -760,6 +807,9 @@ function PromptWorkspace({
   onAddTemporaryScanPattern,
   onRemoveTemporaryScanPattern,
   onPreviewRun,
+  onGeneratePrompt,
+  onSaveProjectPrompt,
+  onSelectProjectPrompt,
   onPromptChange,
   onSetFileIncluded,
   onStartScan,
@@ -788,6 +838,11 @@ function PromptWorkspace({
   fileRecords: readonly FileRecordSummaryDto[];
   fileTotal: number;
   onPreviewRun: () => void;
+  onGeneratePrompt: (goal: string) => Promise<string>;
+  onSaveProjectPrompt: (request: ProjectPromptSaveRequest) => Promise<void>;
+  onSelectProjectPrompt: (
+    request: ProjectPromptSelectRequest,
+  ) => Promise<void>;
   onPromptChange: (value: string) => void;
   onSetFileIncluded: (fileId: string, included: boolean) => Promise<void>;
   onStartScan: () => void;
@@ -807,6 +862,28 @@ function PromptWorkspace({
   onSelectRun: (runId: string) => void;
 }) {
   const hasProject = project !== null;
+  const [generatorOpen, setGeneratorOpen] = useState(false);
+  const [generatorGoal, setGeneratorGoal] = useState("");
+  const [generatorCandidate, setGeneratorCandidate] = useState("");
+  const [generatorError, setGeneratorError] = useState<string | null>(null);
+  const [isGeneratingPrompt, setIsGeneratingPrompt] = useState(false);
+  const [promptNameDraft, setPromptNameDraft] = useState({
+    projectId: null as string | null,
+    value: "新的提示词",
+  });
+  const [promptSaveError, setPromptSaveError] = useState<string | null>(null);
+  const promptPresets = project?.promptPresets ?? [];
+  const activePromptId = project?.activePromptId ?? "";
+  const activePreset = promptPresets.find(
+    (preset) => preset.id === activePromptId,
+  );
+  const promptName =
+    promptNameDraft.projectId === project?.id
+      ? promptNameDraft.value
+      : (activePreset?.name ?? "新的提示词");
+  const setPromptName = (value: string) => {
+    setPromptNameDraft({ projectId: project?.id ?? null, value });
+  };
   const includedFileCount = fileRecords.length
     ? fileRecords.filter((file) => file.included).length
     : (scanReport?.includedFiles ?? 0);
@@ -820,7 +897,52 @@ function PromptWorkspace({
         <span className="content-counter">{prompt.length} 字符</span>
       </div>
       <section className="prompt-band">
-        <label htmlFor="project-prompt">项目默认提示词</label>
+        <div className="prompt-band-heading">
+          <label htmlFor="project-prompt">项目默认提示词</label>
+          <span>{promptPresets.length} 个已保存</span>
+        </div>
+        <div className="prompt-library-controls">
+          <label htmlFor="prompt-name">提示词名称</label>
+          <input
+            disabled={!hasProject}
+            id="prompt-name"
+            onChange={(event) => setPromptName(event.target.value)}
+            placeholder="例如：架构说明"
+            value={promptName}
+          />
+          <label htmlFor="prompt-preset-select">选择已保存提示词</label>
+          <select
+            disabled={!hasProject || promptPresets.length === 0}
+            id="prompt-preset-select"
+            onChange={(event) => {
+              const nextId = event.target.value;
+              const preset = promptPresets.find((item) => item.id === nextId);
+              if (!preset || !project) return;
+              setPromptSaveError(null);
+              void onSelectProjectPrompt({
+                projectId: project.id,
+                promptId: preset.id,
+              })
+                .then(() => {
+                  onPromptChange(preset.prompt);
+                  setPromptName(preset.name);
+                })
+                .catch((error: unknown) => {
+                  setPromptSaveError(
+                    error instanceof Error ? error.message : "提示词选择失败。",
+                  );
+                });
+            }}
+            value={activePromptId}
+          >
+            <option value="">当前编辑（未保存）</option>
+            {promptPresets.map((preset) => (
+              <option key={preset.id} value={preset.id}>
+                {preset.name}
+              </option>
+            ))}
+          </select>
+        </div>
         <textarea
           disabled={!hasProject}
           id="project-prompt"
@@ -829,17 +951,39 @@ function PromptWorkspace({
         />
         <div className="prompt-actions">
           <span>
-            {hasProject
-              ? "未保存的编辑只在当前会话保留"
-              : "添加项目后可以编辑提示词"}
+            {promptSaveError ??
+              (hasProject
+                ? "保存后可在下拉菜单中切换提示词"
+                : "添加项目后可以编辑提示词")}
           </span>
           <div>
-            <button className="outline-button" disabled type="button">
+            <button
+              className="outline-button"
+              disabled={!hasProject || !promptName.trim() || !prompt.trim()}
+              onClick={() => {
+                if (!project) return;
+                setPromptSaveError(null);
+                void onSaveProjectPrompt({
+                  projectId: project.id,
+                  name: promptName,
+                  prompt,
+                }).catch((error: unknown) => {
+                  setPromptSaveError(
+                    error instanceof Error ? error.message : "提示词保存失败。",
+                  );
+                });
+              }}
+              type="button"
+            >
               保存为项目默认
             </button>
             <button
               className="primary-button"
               disabled={!hasProject}
+              onClick={() => {
+                setGeneratorError(null);
+                setGeneratorOpen(true);
+              }}
               type="button"
             >
               <Sparkles size={15} />
@@ -848,6 +992,38 @@ function PromptWorkspace({
           </div>
         </div>
       </section>
+      {generatorOpen ? (
+        <PromptGeneratorPanel
+          candidate={generatorCandidate}
+          error={generatorError}
+          goal={generatorGoal}
+          isGenerating={isGeneratingPrompt}
+          onChangeCandidate={setGeneratorCandidate}
+          onChangeGoal={setGeneratorGoal}
+          onClose={() => setGeneratorOpen(false)}
+          onGenerate={async () => {
+            setGeneratorError(null);
+            setIsGeneratingPrompt(true);
+            try {
+              const generated = await onGeneratePrompt(generatorGoal);
+              setGeneratorCandidate(generated);
+            } catch (error) {
+              setGeneratorError(
+                error instanceof Error
+                  ? error.message
+                  : "提示词生成失败，请重试。",
+              );
+            } finally {
+              setIsGeneratingPrompt(false);
+            }
+          }}
+          onUse={() => {
+            if (!generatorCandidate.trim()) return;
+            onPromptChange(generatorCandidate.trim());
+            setGeneratorOpen(false);
+          }}
+        />
+      ) : null}
       <ContextPanel
         contextVersion={contextVersion}
         isGenerating={isGeneratingContext}
@@ -1270,6 +1446,102 @@ function SummaryMetric({ label, value }: { label: string; value: string }) {
   );
 }
 
+function PromptGeneratorPanel({
+  candidate,
+  error,
+  goal,
+  isGenerating,
+  onChangeCandidate,
+  onChangeGoal,
+  onClose,
+  onGenerate,
+  onUse,
+}: {
+  candidate: string;
+  error: string | null;
+  goal: string;
+  isGenerating: boolean;
+  onChangeCandidate: (value: string) => void;
+  onChangeGoal: (value: string) => void;
+  onClose: () => void;
+  onGenerate: () => Promise<void>;
+  onUse: () => void;
+}) {
+  return (
+    <div className="prompt-generator-backdrop">
+      <section
+        aria-labelledby="prompt-generator-title"
+        aria-modal="true"
+        className="prompt-generator-panel"
+        role="dialog"
+      >
+        <div className="prompt-generator-heading">
+          <div>
+            <p className="eyebrow">PROMPT BUILDER</p>
+            <h2 id="prompt-generator-title">生成提示词</h2>
+          </div>
+          <button
+            aria-label="关闭提示词生成"
+            className="icon-button"
+            onClick={onClose}
+            title="关闭提示词生成"
+            type="button"
+          >
+            <X aria-hidden="true" size={17} />
+          </button>
+        </div>
+        <label htmlFor="prompt-generator-goal">这次分析希望回答什么问题</label>
+        <textarea
+          id="prompt-generator-goal"
+          onChange={(event) => onChangeGoal(event.target.value)}
+          placeholder="例如：梳理核心模块的职责、数据流和修改风险"
+          value={goal}
+        />
+        {error ? (
+          <div className="prompt-generator-error" role="alert">
+            {error}
+          </div>
+        ) : null}
+        <div className="prompt-generator-actions">
+          <button className="outline-button" onClick={onClose} type="button">
+            返回编辑
+          </button>
+          <button
+            className="primary-button"
+            disabled={isGenerating || !goal.trim()}
+            onClick={() => void onGenerate()}
+            type="button"
+          >
+            <Sparkles aria-hidden="true" size={15} />
+            {isGenerating ? "正在生成" : "生成候选"}
+          </button>
+        </div>
+        {candidate ? (
+          <>
+            <label htmlFor="prompt-generator-candidate">候选提示词</label>
+            <textarea
+              id="prompt-generator-candidate"
+              onChange={(event) => onChangeCandidate(event.target.value)}
+              value={candidate}
+            />
+            <div className="prompt-generator-actions prompt-generator-confirm">
+              <span>候选内容仍可继续编辑</span>
+              <button
+                className="primary-button"
+                disabled={!candidate.trim()}
+                onClick={onUse}
+                type="button"
+              >
+                使用此提示词
+              </button>
+            </div>
+          </>
+        ) : null}
+      </section>
+    </div>
+  );
+}
+
 function ContextPanel({
   contextVersion,
   isGenerating,
@@ -1473,6 +1745,7 @@ function ApiWorkspace({
   error,
   onDelete,
   onFetchModels,
+  onGetSecret,
   onPutSecret,
   onSave,
   onTest,
@@ -1483,6 +1756,7 @@ function ApiWorkspace({
   error: string | null;
   onDelete: (id: string) => Promise<void>;
   onFetchModels: (id: string) => Promise<void>;
+  onGetSecret: (profileId: string) => Promise<string>;
   onPutSecret: (request: {
     profileId: string;
     secret: string;
@@ -1560,6 +1834,7 @@ function ApiWorkspace({
           key={creatingNew ? "new" : (selected?.id ?? "new")}
           onDelete={onDelete}
           onFetchModels={onFetchModels}
+          onGetSecret={onGetSecret}
           onPutSecret={onPutSecret}
           onSave={async (request) => {
             const profile = await onSave(request);
@@ -1677,6 +1952,7 @@ function ProjectRunSettings({
 function ApiProfileEditor({
   onDelete,
   onFetchModels,
+  onGetSecret,
   onPutSecret,
   onSave,
   onTest,
@@ -1684,6 +1960,7 @@ function ApiProfileEditor({
 }: {
   onDelete: (id: string) => Promise<void>;
   onFetchModels: (id: string) => Promise<void>;
+  onGetSecret: (profileId: string) => Promise<string>;
   onPutSecret: (request: {
     profileId: string;
     secret: string;
@@ -1698,6 +1975,10 @@ function ApiProfileEditor({
   );
   const [defaultModel, setDefaultModel] = useState(profile?.defaultModel ?? "");
   const [secret, setSecret] = useState("");
+  const [secretDirty, setSecretDirty] = useState(false);
+  const [secretVisible, setSecretVisible] = useState(false);
+  const [secretError, setSecretError] = useState<string | null>(null);
+  const [revealingSecret, setRevealingSecret] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const save = async () => {
@@ -1709,10 +1990,13 @@ function ApiProfileEditor({
         defaultModel: defaultModel.trim() || null,
         name,
       });
-      if (secret.trim()) {
+      if (secretDirty && secret.trim()) {
         await onPutSecret({ profileId: savedProfile.id, secret });
-        setSecret("");
       }
+      setSecret("");
+      setSecretDirty(false);
+      setSecretVisible(false);
+      setSecretError(null);
     } finally {
       setBusy(false);
     }
@@ -1745,6 +2029,33 @@ function ApiProfileEditor({
       await onDelete(profile.id);
     } finally {
       setBusy(false);
+    }
+  };
+
+  const toggleSecretVisibility = async () => {
+    if (secretVisible) {
+      setSecretVisible(false);
+      if (!secretDirty) setSecret("");
+      return;
+    }
+    if (secret) {
+      setSecretVisible(true);
+      return;
+    }
+    if (!profile?.hasSecret) return;
+    setSecretError(null);
+    setRevealingSecret(true);
+    try {
+      const value = await onGetSecret(profile.id);
+      setSecret(value);
+      setSecretDirty(false);
+      setSecretVisible(true);
+    } catch (error) {
+      setSecretError(
+        error instanceof Error ? error.message : "API Key 读取失败。",
+      );
+    } finally {
+      setRevealingSecret(false);
     }
   };
 
@@ -1787,21 +2098,46 @@ function ApiProfileEditor({
       </label>
       <label>
         API Key
-        <input
-          autoComplete="new-password"
-          onChange={(event) => setSecret(event.target.value)}
-          placeholder={
-            profile?.hasSecret
-              ? "已配置，输入新值可替换"
-              : "只写入安全存储，不会回显"
-          }
-          type="password"
-          value={secret}
-        />
+        <div className="api-key-input">
+          <input
+            autoComplete="new-password"
+            onChange={(event) => {
+              setSecret(event.target.value);
+              setSecretDirty(true);
+              setSecretError(null);
+            }}
+            placeholder={
+              profile?.hasSecret
+                ? "已配置，可点击右侧按钮显示"
+                : "写入操作系统安全存储"
+            }
+            type={secretVisible ? "text" : "password"}
+            value={secret}
+          />
+          <button
+            aria-label={secretVisible ? "隐藏 API Key" : "显示 API Key"}
+            className="icon-button api-key-toggle"
+            disabled={
+              busy || revealingSecret || (!secret && !profile?.hasSecret)
+            }
+            onClick={() => void toggleSecretVisibility()}
+            title={secretVisible ? "隐藏 API Key" : "显示 API Key"}
+            type="button"
+          >
+            {secretVisible ? (
+              <EyeOff aria-hidden="true" size={16} />
+            ) : (
+              <Eye aria-hidden="true" size={16} />
+            )}
+          </button>
+        </div>
       </label>
       <div className="api-form-note">
         <span>
-          {profile?.hasSecret ? "密钥已由会话安全存储托管" : "尚未配置密钥"}
+          {secretError ??
+            (profile?.hasSecret
+              ? "密钥由操作系统安全存储托管"
+              : "尚未配置密钥")}
         </span>
         <span>协议：openai-responses</span>
       </div>

@@ -53,6 +53,7 @@ pub struct ScanConfig {
     pub max_files: usize,
     pub include_extensions: BTreeSet<String>,
     pub excluded_directories: BTreeSet<String>,
+    pub excluded_filenames: BTreeSet<String>,
     pub excluded_extensions: BTreeSet<String>,
     pub excluded_patterns: Vec<String>,
     pub use_gitignore: bool,
@@ -69,6 +70,7 @@ impl ScanConfig {
             max_files: DEFAULT_MAX_FILES,
             include_extensions: BTreeSet::new(),
             excluded_directories: default_excluded_directories(),
+            excluded_filenames: default_excluded_filenames(),
             excluded_extensions: default_excluded_extensions(),
             excluded_patterns: Vec::new(),
             use_gitignore: true,
@@ -284,6 +286,14 @@ fn process_file(
     report: &mut ImportReport,
 ) {
     let relative_path = normalize_display_path(relative);
+    let excluded_filename = relative
+        .file_name()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| {
+            config
+                .excluded_filenames
+                .contains(&value.to_ascii_lowercase())
+        });
     let excluded_extension = relative
         .extension()
         .and_then(|value| value.to_str())
@@ -297,6 +307,8 @@ fn process_file(
         Some("sensitive_filename")
     } else if ignored {
         Some("gitignore_or_user_pattern")
+    } else if excluded_filename {
+        Some("builtin_filename")
     } else if excluded_extension {
         Some("builtin_extension")
     } else if metadata.len() > config.max_file_size {
@@ -610,6 +622,86 @@ fn default_excluded_directories() -> BTreeSet<String> {
         ".idea",
         ".vscode",
         ".batch-analysis",
+        ".angular",
+        ".dart_tool",
+        ".expo",
+        ".gradle",
+        ".parcel-cache",
+        ".serverless",
+        ".svelte-kit",
+        ".terraform",
+        ".turbo",
+        ".venv",
+        ".webpack",
+        ".yarn",
+        "__pypackages__",
+        "storybook-static",
+        "venv",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
+
+fn default_excluded_filenames() -> BTreeSet<String> {
+    [
+        // Dependency lock and resolver outputs are usually large and contain
+        // little source-level context for file-by-file analysis.
+        "cargo.lock",
+        "cartfile.resolved",
+        "composer.lock",
+        "gemfile.lock",
+        "gradle.lockfile",
+        "mix.lock",
+        "npm-shrinkwrap.json",
+        "package-lock.json",
+        "packages.lock.json",
+        "pipfile.lock",
+        "pnpm-lock.yaml",
+        "pnpm-lock.yml",
+        "podfile.lock",
+        "poetry.lock",
+        "project.assets.json",
+        "pubspec.lock",
+        "uv.lock",
+        "yarn.lock",
+        "bun.lock",
+        "bun.lockb",
+        "flake.lock",
+        "go.sum",
+        "go.work.sum",
+        "package.resolved",
+        // Repository metadata and legal boilerplate do not provide source
+        // implementation context and are safe to omit by default.
+        ".gitattributes",
+        ".gitignore",
+        ".gitmodules",
+        "copying",
+        "copying.md",
+        "copying.rst",
+        "copying.txt",
+        "desktop.ini",
+        ".ds_store",
+        ".eslintcache",
+        "licence",
+        "licence.md",
+        "licence.rst",
+        "licence.txt",
+        "license",
+        "license-apache",
+        "license-mit",
+        "license.md",
+        "license.rst",
+        "license.txt",
+        "notice",
+        "notice.md",
+        "notice.rst",
+        "notice.txt",
+        "npm-debug.log",
+        "pnpm-debug.log",
+        "thumbs.db",
+        "unlicense",
+        "yarn-error.log",
     ]
     .into_iter()
     .map(str::to_owned)
@@ -619,8 +711,10 @@ fn default_excluded_directories() -> BTreeSet<String> {
 fn default_excluded_extensions() -> BTreeSet<String> {
     [
         "zip", "tar", "gz", "rar", "7z", "exe", "dll", "so", "dylib", "bin", "png", "jpg", "jpeg",
-        "gif", "webp", "ico", "mp3", "mp4", "mov", "pdf", "woff", "woff2", "ttf", "otf", "lock",
-        "db", "sqlite", "sqlite3",
+        "gif", "webp", "ico", "mp3", "mp4", "mov", "avi", "mkv", "webm", "wav", "flac", "pdf",
+        "woff", "woff2", "ttf", "otf", "lock", "map", "class", "pyc", "pyo", "wasm", "o", "a",
+        "lib", "log", "tmp", "bak", "swp", "swo", "orig", "rej", "dmp", "trace", "db", "sqlite",
+        "sqlite3",
     ]
     .into_iter()
     .map(str::to_owned)
@@ -680,6 +774,68 @@ mod tests {
                         reason: "gitignore_or_user_pattern".into(),
                     }
         }));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn default_filename_filters_skip_metadata_without_skipping_source_context() {
+        let root = temp_root("default-filenames");
+        for (name, contents) in [
+            ("Cargo.lock", "[[package]]\nname = \"demo\"\n"),
+            ("package-lock.json", "{\"lockfileVersion\": 3}\n"),
+            ("pnpm-lock.yaml", "lockfileVersion: '9.0'\n"),
+            (".gitignore", "target/\n"),
+            ("LICENSE", "Copyright 2026\n"),
+            ("source.map", "{\"version\": 3, \"sources\": []}\n"),
+            ("package.json", "{\"name\": \"demo\"}\n"),
+            ("Cargo.toml", "[package]\nname = \"demo\"\n"),
+            ("src.rs", "fn main() {}\n"),
+        ] {
+            fs::write(root.join(name), contents).unwrap();
+        }
+
+        let mut config = ScanConfig::new(&root);
+        // Keep the assertion focused on filename rules rather than the
+        // existing generic `.lock` extension rule while retaining other
+        // generated-artifact filters such as source maps.
+        config.excluded_extensions.remove("lock");
+        let result = Scanner::new(config).scan().unwrap();
+
+        for name in [
+            "Cargo.lock",
+            "package-lock.json",
+            "pnpm-lock.yaml",
+            ".gitignore",
+            "LICENSE",
+        ] {
+            let file = result
+                .files
+                .iter()
+                .find(|file| file.relative_path == name)
+                .unwrap_or_else(|| panic!("missing scan record for {name}"));
+            assert_eq!(
+                file.decision,
+                FileDecision::Excluded {
+                    reason: "builtin_filename".into()
+                }
+            );
+        }
+        assert!(result.files.iter().any(|file| {
+            file.relative_path == "source.map"
+                && file.decision
+                    == FileDecision::Excluded {
+                        reason: "builtin_extension".into(),
+                    }
+        }));
+        for name in ["package.json", "Cargo.toml", "src.rs"] {
+            assert!(result.files.iter().any(|file| {
+                file.relative_path == name && file.decision == FileDecision::Included
+            }));
+        }
+        assert_eq!(
+            result.report.excluded_by_reason.get("builtin_filename"),
+            Some(&5)
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
