@@ -7,6 +7,7 @@ license = "UNLICENSED"
 
 [dependencies]
 async-trait = "0.1.89"
+keyring = "4.1.5"
 serde = { version = "1.0.228", features = ["derive"] }
 tokio = { version = "1.52.3", features = ["macros", "rt-multi-thread", "sync"] }
 
