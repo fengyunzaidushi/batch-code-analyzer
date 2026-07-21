@@ -435,6 +435,7 @@ pub(crate) async fn task_get(
         .map_err(run_result_service_error)?;
     Ok(TaskGetResponse {
         task: TaskSummaryDto::from(&task),
+        prompt_snapshot: task.prompt_snapshot,
         attempts: attempts.iter().map(AttemptDto::from).collect(),
     })
 }

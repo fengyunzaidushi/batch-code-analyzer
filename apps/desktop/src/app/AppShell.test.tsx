@@ -515,7 +515,11 @@ describe("AppShell", () => {
     const run = runSummary();
     const task = taskSummary();
     const attempt = attemptDto();
-    const detail: TaskGetResponse = { attempts: [attempt], task };
+    const detail: TaskGetResponse = {
+      attempts: [attempt],
+      promptSnapshot: "请解释这个文件的职责。",
+      task,
+    };
     render(
       <AppShell
         onLoadTaskDetail={onLoadTaskDetail}
@@ -532,6 +536,15 @@ describe("AppShell", () => {
     expect(screen.getAllByText("src/main.ts")).not.toHaveLength(0);
     expect(screen.getByText("1 次尝试")).toBeInTheDocument();
     expect(screen.getByText("Local API")).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "查看提示词 src/main.ts" }),
+    );
+    expect(
+      screen.getByRole("dialog", {
+        name: "发送给 AI 的提示词：src/main.ts",
+      }),
+    ).toHaveTextContent("请解释这个文件的职责。");
+    await user.click(screen.getByRole("button", { name: "关闭提示词预览" }));
     await user.click(screen.getByRole("button", { name: "查看结果" }));
     await user.click(screen.getByRole("button", { name: "1 次尝试" }));
     expect(onOpenResult).toHaveBeenCalledWith(task.id);

@@ -2,4 +2,4 @@
 import type { AttemptDto } from "./AttemptDto";
 import type { TaskSummaryDto } from "./TaskSummaryDto";
 
-export type TaskGetResponse = { task: TaskSummaryDto, attempts: Array<AttemptDto>, };
+export type TaskGetResponse = { task: TaskSummaryDto, promptSnapshot: string, attempts: Array<AttemptDto>, };

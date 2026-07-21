@@ -708,6 +708,7 @@ pub struct TaskGetRequest {
 #[serde(rename_all = "camelCase")]
 pub struct TaskGetResponse {
     pub task: TaskSummaryDto,
+    pub prompt_snapshot: String,
     pub attempts: Vec<AttemptDto>,
 }
 
@@ -1092,6 +1093,10 @@ mod tests {
         assert!(task_summary.contains("TaskValueSource"));
         assert!(task_summary.contains("hasResult: boolean"));
         assert!(!task_summary.contains("currentResultPath"));
+
+        let task_get = fs::read_to_string(out_dir.join("TaskGetResponse.ts"))
+            .expect("task detail declaration should be generated");
+        assert!(task_get.contains("promptSnapshot: string"));
 
         let file_summary = fs::read_to_string(out_dir.join("FileRecordSummaryDto.ts"))
             .expect("file summary declaration should be generated");

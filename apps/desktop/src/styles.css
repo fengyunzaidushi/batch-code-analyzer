@@ -878,6 +878,12 @@ button:disabled {
 .task-table-row:last-child {
   border-bottom: 0;
 }
+.run-results-task-table .task-table-header,
+.run-results-task-table .task-table-row {
+  grid-template-columns:
+    minmax(220px, 2fr) minmax(90px, 0.7fr) minmax(100px, 0.8fr)
+    minmax(100px, 0.8fr) minmax(150px, 1.2fr);
+}
 .task-table-viewport {
   overflow-y: auto;
 }
@@ -951,6 +957,10 @@ button:disabled {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.run-task-prompt {
+  min-width: 0;
+  overflow: hidden;
 }
 .run-task-actions {
   display: flex;
@@ -1409,6 +1419,29 @@ button:disabled {
   line-height: 1.7;
   white-space: pre-wrap;
 }
+.prompt-detail-path {
+  display: block;
+  max-width: min(560px, 70vw);
+  margin-top: 6px;
+  overflow: hidden;
+  color: #82909e;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.prompt-detail-content {
+  min-height: 180px;
+  max-height: min(560px, 70vh);
+  overflow: auto;
+  margin: 0;
+  padding: 22px;
+  color: #344454;
+  background: #fbfcfd;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+}
 
 @media (max-width: 820px) {
   .shell-body {
@@ -1494,6 +1527,10 @@ button:disabled {
   .task-table-header,
   .task-table-row {
     min-width: 620px;
+  }
+  .run-results-task-table .task-table-header,
+  .run-results-task-table .task-table-row {
+    min-width: 760px;
   }
   .api-config-band {
     display: block;

@@ -1197,8 +1197,28 @@ function RunResultsPanel({
   selectedTaskId: string | null;
   taskDetails: Readonly<Record<string, TaskGetResponse>>;
 }) {
+  const [promptTaskId, setPromptTaskId] = useState<string | null>(null);
+  const [loadingPromptTaskId, setLoadingPromptTaskId] = useState<string | null>(
+    null,
+  );
   const selectedTask = runTasks.find((task) => task.id === selectedTaskId);
   const selectedDetail = selectedTaskId ? taskDetails[selectedTaskId] : null;
+  const promptDetail = promptTaskId ? taskDetails[promptTaskId] : null;
+  const selectRun = (runId: string) => {
+    setPromptTaskId(null);
+    setLoadingPromptTaskId(null);
+    onSelectRun(runId);
+  };
+  const openPrompt = (taskId: string) => {
+    setPromptTaskId(taskId);
+    if (taskDetails[taskId]) return;
+    setLoadingPromptTaskId(taskId);
+    void onLoadTaskDetail(taskId).finally(() => {
+      setLoadingPromptTaskId((current) =>
+        current === taskId ? null : current,
+      );
+    });
+  };
   return (
     <section className="run-results-panel" aria-label="运行结果">
       <div className="run-results-heading">
@@ -1220,7 +1240,7 @@ function RunResultsPanel({
           选择 Run
           <select
             aria-label="选择 Run"
-            onChange={(event) => onSelectRun(event.target.value)}
+            onChange={(event) => selectRun(event.target.value)}
             value={selectedRunId ?? ""}
           >
             {runHistory.map((run) => (
@@ -1242,6 +1262,7 @@ function RunResultsPanel({
               )}
           </div>
           <VirtualTaskTable
+            className="run-results-task-table"
             emptyLabel="该 Run 没有 Task"
             getRowKey={(task) => task.id}
             header={
@@ -1249,6 +1270,7 @@ function RunResultsPanel({
                 <span>文件</span>
                 <span>状态</span>
                 <span>模型</span>
+                <span>提示词</span>
                 <span>结果 / Attempt</span>
               </>
             }
@@ -1262,6 +1284,19 @@ function RunResultsPanel({
                   </span>
                   <span>{taskStatusLabel(task.status)}</span>
                   <span title={task.modelSnapshot}>{task.modelSnapshot}</span>
+                  <span className="run-task-prompt">
+                    <button
+                      aria-busy={loadingPromptTaskId === task.id}
+                      aria-label={`查看提示词 ${task.relativePath}`}
+                      className="text-button"
+                      disabled={loadingPromptTaskId === task.id}
+                      onClick={() => openPrompt(task.id)}
+                      title="查看发送给 AI 的提示词"
+                      type="button"
+                    >
+                      查看提示词
+                    </button>
+                  </span>
                   <span className="run-task-actions">
                     {task.hasResult ? (
                       <button
@@ -1290,6 +1325,13 @@ function RunResultsPanel({
             <AttemptDetailPanel
               attempts={selectedDetail.attempts}
               path={selectedTask.relativePath}
+            />
+          ) : null}
+          {promptDetail ? (
+            <PromptDetailPanel
+              onClose={() => setPromptTaskId(null)}
+              path={promptDetail.task.relativePath}
+              prompt={promptDetail.promptSnapshot}
             />
           ) : null}
         </>
@@ -1327,6 +1369,48 @@ function AttemptDetailPanel({
       ) : (
         <span className="file-tree-muted">尚未产生请求尝试</span>
       )}
+    </div>
+  );
+}
+
+function PromptDetailPanel({
+  onClose,
+  path,
+  prompt,
+}: {
+  onClose: () => void;
+  path: string;
+  prompt: string;
+}) {
+  return (
+    <div className="preview-backdrop" role="presentation" onMouseDown={onClose}>
+      <section
+        aria-label={`发送给 AI 的提示词：${path}`}
+        aria-modal="true"
+        className="preview-dialog"
+        role="dialog"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <div className="preview-dialog-header">
+          <div>
+            <p className="eyebrow">REQUEST PROMPT</p>
+            <h2>发送给 AI 的提示词</h2>
+            <span className="prompt-detail-path" title={path}>
+              {path}
+            </span>
+          </div>
+          <button
+            aria-label="关闭提示词预览"
+            className="icon-button"
+            onClick={onClose}
+            title="关闭提示词预览"
+            type="button"
+          >
+            <X aria-hidden="true" size={18} />
+          </button>
+        </div>
+        <pre className="prompt-detail-content">{prompt}</pre>
+      </section>
     </div>
   );
 }

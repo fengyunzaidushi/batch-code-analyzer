@@ -261,8 +261,9 @@ task_cancel
 
 `run_list` 按 Project 返回分页的 `RunSummaryDto`，`run_get` 只允许读取该 Project
 所属的 Run。`task_list` 按 Run 返回分页的 `TaskSummaryDto`，`task_get` 返回一个
-Task 及其按 sequence 升序排列的 `AttemptDto` 历史。跨 Project 的 ID 查询统一按
-不存在处理，不暴露其他项目是否存在。
+Task、创建该 Task 时冻结的 `promptSnapshot` 和按 sequence 升序排列的 `AttemptDto`
+历史。`promptSnapshot` 只包含用户配置的分析提示词，不包含源文件内容、API Key 或
+供应商完整请求体。跨 Project 的 ID 查询统一按不存在处理，不暴露其他项目是否存在。
 
 ### 4.8 Result
 

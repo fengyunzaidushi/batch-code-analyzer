@@ -5,6 +5,7 @@ export interface VirtualTaskTableProps<T> {
   getRowKey: (item: T, index: number) => string;
   renderRow: (item: T, index: number) => ReactNode;
   header: ReactNode;
+  className?: string;
   emptyLabel?: string;
   rowHeight?: number;
   viewportHeight?: number;
@@ -16,6 +17,7 @@ export function VirtualTaskTable<T>({
   getRowKey,
   renderRow,
   header,
+  className,
   emptyLabel = "暂无任务",
   rowHeight = 56,
   viewportHeight = 424,
@@ -31,7 +33,11 @@ export function VirtualTaskTable<T>({
   );
 
   return (
-    <div className="task-table" role="table" aria-rowcount={items.length}>
+    <div
+      className={`task-table${className ? ` ${className}` : ""}`}
+      role="table"
+      aria-rowcount={items.length}
+    >
       <div className="task-table-header" role="row">
         {header}
       </div>
