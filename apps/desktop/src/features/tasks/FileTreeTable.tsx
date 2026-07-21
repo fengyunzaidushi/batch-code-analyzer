@@ -9,6 +9,7 @@ import {
 import { useMemo, useState } from "react";
 import type { FileRecordSummaryDto } from "@batch-code-analyzer/ipc-types";
 
+import { canIncludeFile } from "./fileSelection";
 import { VirtualTaskTable } from "./VirtualTaskTable";
 
 interface FileTreeTableProps {
@@ -230,23 +231,6 @@ export function FileTreeTable({
       }}
     />
   );
-}
-
-function canIncludeFile(file: FileRecordSummaryDto): boolean {
-  if (file.sourceStatus !== "normal" && file.sourceStatus !== "modified") {
-    return false;
-  }
-  return ![
-    "binary",
-    "builtin_extension",
-    "file_too_large",
-    "sensitive",
-    "sensitive_content",
-    "sensitive_filename",
-    "symlink",
-    "unreadable",
-    "unsupported_encoding",
-  ].includes(file.exclusionReason ?? "");
 }
 
 function buildFileTree(files: readonly FileRecordSummaryDto[]): DirectoryNode {

@@ -1,10 +1,11 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type {
   AttemptDto,
   ApiProfileSummaryDto,
   ContextVersionDto,
+  FileRecordSummaryDto,
   ProjectSummaryDto,
   ResultReadResponse,
   RunPreviewResponse,
@@ -28,6 +29,25 @@ function project(overrides: Partial<ShellProject> = {}): ShellProject {
     rootDirectory: "/workspace/analyzer",
     ...overrides,
   } satisfies ProjectSummaryDto & ShellProject;
+}
+
+function fileRecord(
+  overrides: Partial<FileRecordSummaryDto> = {},
+): FileRecordSummaryDto {
+  return {
+    exclusionReason: null,
+    id: "file-1",
+    included: true,
+    language: "typescript",
+    modifiedAt: "2026-07-18T12:00:00Z",
+    projectId: "project-1",
+    relativePath: "src/main.ts",
+    resultStatus: "none",
+    schemaVersion: 1,
+    sizeBytes: 42,
+    sourceStatus: "normal",
+    ...overrides,
+  };
 }
 
 describe("AppShell", () => {
@@ -130,7 +150,10 @@ describe("AppShell", () => {
     await user.clear(screen.getByLabelText("提示词名称"));
     await user.type(screen.getByLabelText("提示词名称"), "架构说明");
     await user.clear(screen.getByLabelText("项目默认提示词"));
-    await user.type(screen.getByLabelText("项目默认提示词"), "请说明模块边界。");
+    await user.type(
+      screen.getByLabelText("项目默认提示词"),
+      "请说明模块边界。",
+    );
     const saveButton = screen.getByRole("button", { name: "保存为项目默认" });
     expect(saveButton).toBeEnabled();
     await user.click(saveButton);
@@ -186,6 +209,69 @@ describe("AppShell", () => {
     await user.click(screen.getByRole("button", { name: "添加临时排除模式" }));
 
     expect(onAddTemporaryScanPattern).toHaveBeenCalledWith("docs/**");
+  });
+
+  it("selects and deselects all safe scanned files", async () => {
+    const user = userEvent.setup();
+    const onSetFileIncluded = vi.fn().mockResolvedValue(undefined);
+    const files = [
+      fileRecord({ id: "file-included", included: true }),
+      fileRecord({
+        id: "file-excluded",
+        included: false,
+        exclusionReason: "user_excluded",
+      }),
+      fileRecord({
+        id: "file-sensitive",
+        included: false,
+        exclusionReason: "sensitive",
+        relativePath: ".env",
+        sourceStatus: "sensitive",
+      }),
+    ];
+    const { rerender } = render(
+      <AppShell
+        fileRecords={files}
+        onSetFileIncluded={onSetFileIncluded}
+        projects={[project()]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "全选文件" }));
+    expect(onSetFileIncluded).toHaveBeenCalledWith("file-excluded", true);
+    expect(onSetFileIncluded).not.toHaveBeenCalledWith("file-sensitive", true);
+
+    rerender(
+      <AppShell
+        fileRecords={files.map((file) =>
+          file.id === "file-excluded" ? { ...file, included: true } : file,
+        )}
+        onSetFileIncluded={onSetFileIncluded}
+        projects={[project()]}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "取消全选文件" }));
+    expect(onSetFileIncluded).toHaveBeenCalledWith("file-included", false);
+    expect(onSetFileIncluded).toHaveBeenCalledWith("file-excluded", false);
+    expect(onSetFileIncluded).not.toHaveBeenCalledWith("file-sensitive", false);
+  });
+
+  it("reenables the bulk button after an inclusion update fails", async () => {
+    const user = userEvent.setup();
+    const onSetFileIncluded = vi
+      .fn()
+      .mockRejectedValue(new Error("update failed"));
+    render(
+      <AppShell
+        fileRecords={[fileRecord({ included: false })]}
+        onSetFileIncluded={onSetFileIncluded}
+        projects={[project()]}
+      />,
+    );
+
+    const button = screen.getByRole("button", { name: "全选文件" });
+    await user.click(button);
+    await waitFor(() => expect(button).toBeEnabled());
   });
 
   it("renders context sources and delegates local discovery", async () => {

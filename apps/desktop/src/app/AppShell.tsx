@@ -7,6 +7,8 @@ import {
   FolderPlus,
   GitBranch,
   LayoutGrid,
+  ListChecks,
+  ListX,
   Plus,
   RefreshCw,
   Search,
@@ -37,6 +39,7 @@ import type {
 } from "@batch-code-analyzer/ipc-types";
 
 import { FileTreeTable } from "../features/tasks/FileTreeTable";
+import { canIncludeFile } from "../features/tasks/fileSelection";
 import { VirtualTaskTable } from "../features/tasks/VirtualTaskTable";
 import { MarkdownPreview } from "../features/markdown/MarkdownPreview";
 
@@ -81,7 +84,9 @@ interface AppShellProps {
   onPreviewRun?: (input: { prompt: string }) => void;
   onGeneratePrompt?: (goal: string) => Promise<string>;
   onSaveProjectPrompt?: (request: ProjectPromptSaveRequest) => Promise<void>;
-  onSelectProjectPrompt?: (request: ProjectPromptSelectRequest) => Promise<void>;
+  onSelectProjectPrompt?: (
+    request: ProjectPromptSelectRequest,
+  ) => Promise<void>;
   onCreateRun?: () => Promise<void> | void;
   onCloseRunPreview?: () => void;
   runPreview?: RunPreviewResponse | null;
@@ -128,6 +133,7 @@ type WorkspaceTab = "prompt" | "api";
 
 const DEFAULT_PROMPT =
   "请结合提供的项目上下文，用通俗但准确的语言解释当前代码文件。\n\n请说明核心职责、关键输入输出、协作模块和修改影响。";
+const BULK_FILE_UPDATE_BATCH_SIZE = 16;
 
 export function AppShell({
   apiProfileError = null,
@@ -616,9 +622,7 @@ function ProjectWorkspace({
   onPreviewRun: () => void;
   onGeneratePrompt: (goal: string) => Promise<string>;
   onSaveProjectPrompt: (request: ProjectPromptSaveRequest) => Promise<void>;
-  onSelectProjectPrompt: (
-    request: ProjectPromptSelectRequest,
-  ) => Promise<void>;
+  onSelectProjectPrompt: (request: ProjectPromptSelectRequest) => Promise<void>;
   onPromptChange: (value: string) => void;
   prompt: string;
   onSetFileIncluded: (fileId: string, included: boolean) => Promise<void>;
@@ -840,9 +844,7 @@ function PromptWorkspace({
   onPreviewRun: () => void;
   onGeneratePrompt: (goal: string) => Promise<string>;
   onSaveProjectPrompt: (request: ProjectPromptSaveRequest) => Promise<void>;
-  onSelectProjectPrompt: (
-    request: ProjectPromptSelectRequest,
-  ) => Promise<void>;
+  onSelectProjectPrompt: (request: ProjectPromptSelectRequest) => Promise<void>;
   onPromptChange: (value: string) => void;
   onSetFileIncluded: (fileId: string, included: boolean) => Promise<void>;
   onStartScan: () => void;
@@ -887,6 +889,40 @@ function PromptWorkspace({
   const includedFileCount = fileRecords.length
     ? fileRecords.filter((file) => file.included).length
     : (scanReport?.includedFiles ?? 0);
+  const selectableFiles = fileRecords.filter(
+    (file) => file.included || canIncludeFile(file),
+  );
+  const allFilesIncluded =
+    selectableFiles.length > 0 &&
+    selectableFiles.every((file) => file.included);
+  const [isUpdatingAllFiles, setIsUpdatingAllFiles] = useState(false);
+  const toggleAllFiles = async () => {
+    if (isUpdatingAllFiles || selectableFiles.length === 0) return;
+    const included = !allFilesIncluded;
+    setIsUpdatingAllFiles(true);
+    try {
+      const filesToUpdate = selectableFiles.filter(
+        (file) => file.included !== included,
+      );
+      for (
+        let start = 0;
+        start < filesToUpdate.length;
+        start += BULK_FILE_UPDATE_BATCH_SIZE
+      ) {
+        const batch = filesToUpdate.slice(
+          start,
+          start + BULK_FILE_UPDATE_BATCH_SIZE,
+        );
+        await Promise.allSettled(
+          batch.map((file) => onSetFileIncluded(file.id, included)),
+        );
+      }
+    } catch {
+      // The application layer owns the user-facing error.
+    } finally {
+      setIsUpdatingAllFiles(false);
+    }
+  };
   return (
     <div className="workspace-content">
       <div className="content-intro">
@@ -1056,6 +1092,29 @@ function PromptWorkspace({
                 <FolderPlus size={15} />
               )}
               {scanReport?.status === "running" ? "取消扫描" : "扫描仓库"}
+            </button>
+            <button
+              aria-busy={isUpdatingAllFiles}
+              className="outline-button"
+              disabled={
+                !hasProject ||
+                selectableFiles.length === 0 ||
+                isUpdatingAllFiles
+              }
+              onClick={() => void toggleAllFiles()}
+              title={
+                allFilesIncluded
+                  ? "取消选择所有可纳入文件"
+                  : "选择所有可纳入文件"
+              }
+              type="button"
+            >
+              {allFilesIncluded ? (
+                <ListX aria-hidden="true" size={15} />
+              ) : (
+                <ListChecks aria-hidden="true" size={15} />
+              )}
+              {allFilesIncluded ? "取消全选文件" : "全选文件"}
             </button>
             <button
               className="primary-button"
