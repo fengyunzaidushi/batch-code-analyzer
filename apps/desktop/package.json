@@ -8,7 +8,7 @@
     "dev": "vite",
     "lint": "eslint . --max-warnings 0",
     "preview": "vite preview",
-    "tauri": "tauri",
+    "tauri": "PATH=\"$HOME/.cargo/bin:$PATH\" tauri",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
