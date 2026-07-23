@@ -70,8 +70,9 @@ project_relocate
 
 - `project_add`：输入用户选择的目录，完成 canonical path 校验；重复目录返回已有项目。
 - `project_get`：按需返回当前项目详情；绝对仓库路径不进入项目列表摘要。
-- `project_update_run_settings`：更新未来 Run 使用的主 API Profile 和项目默认模型；
-  Profile 引用必须存在，响应返回更新后的 `ProjectDetailDto` 和配置镜像写入警告。
+- `project_update_run_settings`：更新未来 Run 使用的主 API Profile、项目默认模型和并发数；
+  `concurrency` 为必填的 `1..=30` 整数，Profile 引用必须存在。响应返回更新后的
+  `ProjectDetailDto`（包含 `concurrency`）和配置镜像写入警告；既有 Run 快照不变。
 - `project_prompt_save`：将命名提示词保存到当前项目的提示词库，并立即设为项目默认；
 - `project_prompt_select`：从当前项目提示词库选择一个预设，并将其内容设为项目默认；
 - `project_remove`：只移除客户端登记，不删除仓库或历史输出。
@@ -196,11 +197,13 @@ run_get
 run_list
 ```
 
-- `run_preview` 返回任务数量、排除数量、预计使用配置和阻塞项，不创建 Run。
+- `run_preview` 返回任务数量、排除数量、预计使用配置（包含将被冻结的 `concurrency`）
+  和阻塞项，不创建 Run。
 - `run_create` 在事务内创建不可变快照与 Task。
 - 首期存在活动 Run 时，第二次 `run_create` 返回 `run_active_exists`。
 - `run_cancel` 接收已有 `runId`，原子取消排队 Task、将已领取 Task 标记为中断，
-  并把 Run 收敛为 `cancelled`；若存在进程内请求，会同时触发请求取消令牌。
+  并把 Run 收敛为 `cancelled`；该操作通过一个事务批量处理全部 Task，不按 Task 逐次
+  调用 IPC。若存在进程内请求，会同时触发请求取消令牌。
 - Run 预览、创建和执行前必须确认主 API Profile 的密钥引用当前可由 SecretStore
   读取；只有数据库中存在引用但当前会话无法读取时，也必须返回
   `security_secret_not_found`，不得创建必然失败的 Run。

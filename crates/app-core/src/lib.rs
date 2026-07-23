@@ -47,6 +47,8 @@ pub use batch_code_analyzer_domain as domain;
 
 const DEFAULT_PROMPT: &str = "请结合提供的项目上下文，用通俗但准确的语言解释当前代码文件。\n请说明：\n1. 该文件在项目中的核心职责；\n2. 关键输入、输出、状态或数据流；\n3. 它与哪些模块或功能协作，以及它为何存在；\n4. 修改或缺失它可能带来的影响。\n如无法从上下文或代码中确认，请明确说明不确定性，不要臆测。";
 const DEFAULT_RUN_CONCURRENCY: u16 = 3;
+const MIN_RUN_CONCURRENCY: u16 = 1;
+const MAX_RUN_CONCURRENCY: u16 = 30;
 static NEXT_PROJECT_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_PROMPT_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_FILE_ID: AtomicU64 = AtomicU64::new(1);
@@ -60,6 +62,7 @@ static NEXT_CONTEXT_VERSION_ID: AtomicU64 = AtomicU64::new(1);
 pub enum ProjectServiceError {
     NotFound,
     ApiProfileNotFound,
+    InvalidConcurrency,
     PromptNotFound,
     InvalidPrompt,
     PathUnavailable,
@@ -71,7 +74,7 @@ impl ProjectServiceError {
     pub const fn code(&self) -> &'static str {
         match self {
             Self::NotFound => "project_not_found",
-            Self::ApiProfileNotFound => "validation_invalid_value",
+            Self::ApiProfileNotFound | Self::InvalidConcurrency => "validation_invalid_value",
             Self::PromptNotFound => "prompt_not_found",
             Self::InvalidPrompt => "validation_required_field",
             Self::PathUnavailable => "project_path_unavailable",
@@ -205,6 +208,7 @@ pub struct RunPreview {
     pub model: Option<String>,
     pub prompt_source: TaskValueSource,
     pub model_source: TaskValueSource,
+    pub concurrency: u16,
     pub output_directory: String,
 }
 
@@ -895,7 +899,8 @@ impl<'database> ProjectService<'database> {
         })
     }
 
-    /// Updates the API routing and default model used by future Runs.
+    /// Updates the API routing, default model, and concurrency used by future
+    /// Runs.
     ///
     /// `SQLite` remains authoritative. The portable project mirror is written
     /// only after the database transaction commits and never contains secrets.
@@ -909,7 +914,11 @@ impl<'database> ProjectService<'database> {
         project_id: &ProjectId,
         primary_profile_id: Option<ApiProfileId>,
         default_model: Option<String>,
+        concurrency: u16,
     ) -> Result<ProjectRunSettingsResult, ProjectServiceError> {
+        if !(MIN_RUN_CONCURRENCY..=MAX_RUN_CONCURRENCY).contains(&concurrency) {
+            return Err(ProjectServiceError::InvalidConcurrency);
+        }
         let mut project = self
             .database
             .repository()
@@ -931,6 +940,7 @@ impl<'database> ProjectService<'database> {
         project.default_model = default_model
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty());
+        project.execution_defaults.concurrency = concurrency;
         self.database
             .repository()
             .update_project(
@@ -1527,6 +1537,7 @@ impl<'database> RunService<'database> {
             } else {
                 TaskValueSource::Project
             },
+            concurrency: project.execution_defaults.concurrency,
             output_directory: project.output_root.unwrap_or_else(|| {
                 Path::new(&project.source_directory)
                     .join(".batch-analysis")
@@ -2714,6 +2725,7 @@ struct ProjectConfigMirror<'project> {
     default_model: &'project Option<String>,
     context_model: &'project Option<String>,
     api_routing: &'project ApiRouting,
+    execution_defaults: &'project ExecutionDefaults,
     output_root: &'project Option<String>,
 }
 
@@ -2733,6 +2745,7 @@ fn write_project_mirror(project: &Project) -> std::io::Result<()> {
         default_model: &project.default_model,
         context_model: &project.context_model,
         api_routing: &project.api_routing,
+        execution_defaults: &project.execution_defaults,
         output_root: &project.output_root,
     };
     let bytes = serde_json::to_vec_pretty(&mirror).map_err(std::io::Error::other)?;
@@ -2810,7 +2823,8 @@ mod tests {
         retry_delay, timestamp_now, wait_for_retry, ApiProfileService, ApiProfileServiceError,
         ContextService, FileServiceError, ProjectService, ProjectServiceError,
         PromptGenerationService, RunExecutionService, RunPreparationInput, RunResultService,
-        RunResultServiceError, RunService, ScanService, TaskRetryError,
+        RunResultServiceError, RunService, ScanService, TaskRetryError, DEFAULT_RUN_CONCURRENCY,
+        MAX_RUN_CONCURRENCY, MIN_RUN_CONCURRENCY,
     };
 
     static NEXT_TEST_DIRECTORY_ID: AtomicU64 = AtomicU64::new(1);
@@ -3829,7 +3843,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn updates_project_run_settings_and_rejects_unknown_profiles() {
+    async fn updates_project_run_settings_and_validates_concurrency() {
         let database = Database::open_in_memory()
             .await
             .expect("database should open");
@@ -3849,19 +3863,31 @@ mod tests {
             .await
             .expect("profile should save");
         let service = ProjectService::new(&database);
+        let minimum = service
+            .update_run_settings(
+                &project.id,
+                Some(profile.id.clone()),
+                Some("gpt-5-mini".into()),
+                MIN_RUN_CONCURRENCY,
+            )
+            .await
+            .expect("project settings should update");
+        assert_eq!(minimum.project.execution_defaults.concurrency, 1);
         let updated = service
             .update_run_settings(
                 &project.id,
                 Some(profile.id.clone()),
                 Some("gpt-5-mini".into()),
+                MAX_RUN_CONCURRENCY,
             )
             .await
-            .expect("project settings should update");
+            .expect("maximum concurrency should update");
         assert_eq!(
             updated.project.api_routing.primary_profile_id,
             Some(profile.id.clone())
         );
         assert_eq!(updated.project.default_model.as_deref(), Some("gpt-5-mini"));
+        assert_eq!(updated.project.execution_defaults.concurrency, 30);
         let persisted = database
             .repository()
             .get_project(&project.id)
@@ -3872,19 +3898,48 @@ mod tests {
         let mirror = fs::read_to_string(path.join(".batch-analysis/project.json"))
             .expect("project mirror should exist");
         assert!(mirror.contains("apiRouting"));
-        assert!(!mirror.contains("sk-test"));
+        let mirror: serde_json::Value =
+            serde_json::from_str(&mirror).expect("project mirror should be valid JSON");
+        assert_eq!(
+            mirror["executionDefaults"]["concurrency"].as_u64(),
+            Some(30)
+        );
+        assert!(!mirror.to_string().contains("sk-test"));
         assert_eq!(
             service
                 .update_run_settings(
                     &project.id,
                     Some(ApiProfileId::new("missing-profile")),
                     Some("gpt-5".into()),
+                    DEFAULT_RUN_CONCURRENCY,
                 )
                 .await
                 .expect_err("unknown profile should be rejected")
                 .code(),
             "validation_invalid_value"
         );
+        for invalid in [0, MAX_RUN_CONCURRENCY + 1] {
+            assert_eq!(
+                service
+                    .update_run_settings(
+                        &project.id,
+                        Some(profile.id.clone()),
+                        Some("gpt-5".into()),
+                        invalid,
+                    )
+                    .await
+                    .expect_err("out-of-range concurrency should be rejected")
+                    .code(),
+                "validation_invalid_value"
+            );
+        }
+        let unchanged = database
+            .repository()
+            .get_project(&project.id)
+            .await
+            .unwrap()
+            .expect("project should remain persisted");
+        assert_eq!(unchanged.execution_defaults.concurrency, 30);
         let _ = fs::remove_dir_all(path);
     }
 
@@ -3932,7 +3987,7 @@ mod tests {
             .set_secret_ref(&profile.id, Some("session-secret-1".into()))
             .await
             .expect("secret reference should save");
-        project.api_routing.primary_profile_id = Some(profile.id);
+        project.api_routing.primary_profile_id = Some(profile.id.clone());
         database
             .repository()
             .update_project(
@@ -3960,6 +4015,7 @@ mod tests {
         assert_eq!(preview.tasks.len(), 1);
         assert!(preview.blockers.is_empty());
         assert_eq!(preview.model.as_deref(), Some("gpt-5"));
+        assert_eq!(preview.concurrency, DEFAULT_RUN_CONCURRENCY);
 
         let run = service
             .create(&project.id, &RunPreparationInput::default())
@@ -3967,6 +4023,7 @@ mod tests {
             .expect("run should create");
         assert_eq!(run.status, batch_code_analyzer_domain::RunStatus::Running);
         assert_eq!(run.stats.queued, 1);
+        assert_eq!(run.snapshot.concurrency, DEFAULT_RUN_CONCURRENCY);
         assert_eq!(
             service
                 .create(&project.id, &RunPreparationInput::default())
@@ -3975,6 +4032,38 @@ mod tests {
                 .code(),
             "run_active_exists"
         );
+
+        ProjectService::new(&database)
+            .update_run_settings(
+                &project.id,
+                Some(profile.id),
+                Some("gpt-5".into()),
+                MAX_RUN_CONCURRENCY,
+            )
+            .await
+            .expect("future Run settings should update");
+        let frozen = database
+            .repository()
+            .get_run(&run.id)
+            .await
+            .unwrap()
+            .expect("existing Run should remain persisted");
+        assert_eq!(frozen.snapshot.concurrency, DEFAULT_RUN_CONCURRENCY);
+        database
+            .repository()
+            .cancel_run(&run.id, &timestamp_now())
+            .await
+            .expect("existing Run should cancel");
+        let next_preview = service
+            .preview(&project.id, &RunPreparationInput::default())
+            .await
+            .expect("next preview should use updated settings");
+        assert_eq!(next_preview.concurrency, MAX_RUN_CONCURRENCY);
+        let next_run = service
+            .create(&project.id, &RunPreparationInput::default())
+            .await
+            .expect("next Run should create");
+        assert_eq!(next_run.snapshot.concurrency, MAX_RUN_CONCURRENCY);
 
         let _ = fs::remove_dir_all(path);
     }

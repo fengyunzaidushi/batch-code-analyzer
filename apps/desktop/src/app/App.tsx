@@ -257,6 +257,7 @@ export function App() {
                   rootDirectory: detail.sourceDirectory,
                   primaryProfileId: detail.apiRouting.primaryProfileId,
                   defaultModel: detail.defaultModel,
+                  concurrency: detail.concurrency,
                   defaultPrompt: detail.defaultPrompt,
                   promptPresets: detail.promptPresets,
                   activePromptId: detail.activePromptId,
@@ -659,6 +660,7 @@ export function App() {
                 rootDirectory: response.project.sourceDirectory,
                 primaryProfileId: response.project.apiRouting.primaryProfileId,
                 defaultModel: response.project.defaultModel,
+                concurrency: response.project.concurrency,
               }
             : project,
         ),

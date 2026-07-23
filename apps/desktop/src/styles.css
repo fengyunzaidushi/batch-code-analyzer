@@ -1136,8 +1136,8 @@ button:disabled {
 .project-run-settings {
   display: grid;
   grid-template-columns:
-    minmax(160px, 0.75fr) minmax(180px, 1fr) minmax(180px, 1fr)
-    auto;
+    minmax(150px, 0.75fr) minmax(160px, 1fr) minmax(160px, 1fr)
+    minmax(104px, 0.5fr) auto;
   align-items: end;
   gap: 16px;
   margin-top: 22px;
@@ -1692,7 +1692,7 @@ button:disabled {
 
 .run-preview-summary {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
   margin: 24px 0;
 }

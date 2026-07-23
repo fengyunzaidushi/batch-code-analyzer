@@ -490,6 +490,65 @@ async fn cancelling_run_settles_queued_and_running_tasks_atomically() {
     );
 }
 
+#[tokio::test]
+async fn cancelling_run_settles_three_hundred_queued_tasks_without_attempts() {
+    const TASK_COUNT: u32 = 300;
+    const TASK_COUNT_USIZE: usize = 300;
+
+    let database = Database::open_in_memory()
+        .await
+        .expect("database should open");
+    let repository = database.repository();
+    let project = project("project-bulk-cancel", "/workspace/bulk-cancel");
+    repository
+        .create_project(&project, project_metadata("/workspace/bulk-cancel"))
+        .await
+        .unwrap();
+    let file = file("file-bulk-cancel", &project.id);
+    repository
+        .create_file_record(&file, file_metadata())
+        .await
+        .unwrap();
+    let run = run("run-bulk-cancel", &project.id, RunStatus::Running);
+    let queued = (0..TASK_COUNT)
+        .map(|index| {
+            task(
+                &format!("task-bulk-cancel-{index}"),
+                &run.id,
+                file.id.as_str(),
+                TaskStatus::Queued,
+            )
+        })
+        .collect::<Vec<_>>();
+    repository
+        .create_run_with_tasks(
+            &run,
+            RunRowMetadata {
+                interruption_reason: None,
+            },
+            &queued,
+        )
+        .await
+        .unwrap();
+
+    let cancelled = repository
+        .cancel_run(&run.id, &timestamp())
+        .await
+        .expect("bulk Run should cancel");
+    assert_eq!(cancelled.status, RunStatus::Cancelled);
+    assert_eq!(cancelled.stats.cancelled, TASK_COUNT);
+    assert_eq!(cancelled.stats.queued, 0);
+    assert_eq!(cancelled.stats.running, 0);
+    let tasks = repository.list_tasks(&run.id).await.unwrap();
+    assert_eq!(tasks.len(), TASK_COUNT_USIZE);
+    assert!(tasks
+        .iter()
+        .all(|task| task.status == TaskStatus::Cancelled));
+    for task in &tasks {
+        assert!(repository.list_attempts(&task.id).await.unwrap().is_empty());
+    }
+}
+
 fn timestamp() -> Rfc3339Timestamp {
     Rfc3339Timestamp::new(TIMESTAMP)
 }

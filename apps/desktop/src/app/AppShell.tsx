@@ -47,6 +47,7 @@ export type ShellProject = ProjectSummaryDto & {
   rootDirectory?: string;
   primaryProfileId?: string | null;
   defaultModel?: string | null;
+  concurrency?: number;
   defaultPrompt?: string;
   promptPresets?: readonly PromptPresetDto[];
   activePromptId?: string | null;
@@ -1564,6 +1565,7 @@ function RunPreviewPanel({
             value={String(preview.tasks.length)}
           />
           <SummaryMetric label="模型" value={preview.model ?? "未配置"} />
+          <SummaryMetric label="并发数" value={String(preview.concurrency)} />
           <SummaryMetric
             label="提示词"
             value={
@@ -1994,7 +1996,7 @@ function ApiWorkspace({
         </div>
       ) : null}
       <ProjectRunSettings
-        key={`${project?.id ?? "none"}:${project?.primaryProfileId ?? "none"}:${project?.defaultModel ?? "none"}:${profiles.map((profile) => `${profile.id}:${profile.defaultModel ?? "none"}:${profile.modelCache.length}`).join(",")}`}
+        key={`${project?.id ?? "none"}:${project?.primaryProfileId ?? "none"}:${project?.defaultModel ?? "none"}:${project?.concurrency ?? 3}:${profiles.map((profile) => `${profile.id}:${profile.defaultModel ?? "none"}:${profile.modelCache.length}`).join(",")}`}
         onUpdate={onUpdateProjectRunSettings}
         profiles={profiles}
         project={project}
@@ -2061,6 +2063,9 @@ function ProjectRunSettings({
   const [defaultModel, setDefaultModel] = useState(
     project?.defaultModel ?? initialProfile?.defaultModel ?? "",
   );
+  const [concurrencyInput, setConcurrencyInput] = useState(
+    String(project?.concurrency ?? 3),
+  );
   const [busy, setBusy] = useState(false);
 
   const selectedProfile = profiles.find(
@@ -2072,14 +2077,24 @@ function ProjectRunSettings({
       ...(selectedProfile?.modelCache.map((model) => model.id) ?? []),
     ]),
   );
+  const concurrency = Number(concurrencyInput);
+  const concurrencyIsValid =
+    Number.isInteger(concurrency) && concurrency >= 1 && concurrency <= 30;
   const save = async () => {
-    if (!project || !primaryProfileId || !defaultModel.trim()) return;
+    if (
+      !project ||
+      !primaryProfileId ||
+      !defaultModel.trim() ||
+      !concurrencyIsValid
+    )
+      return;
     setBusy(true);
     try {
       await onUpdate({
         projectId: project.id,
         primaryProfileId,
         defaultModel: defaultModel.trim(),
+        concurrency,
       });
     } finally {
       setBusy(false);
@@ -2131,9 +2146,27 @@ function ProjectRunSettings({
           </datalist>
         ) : null}
       </label>
+      <label>
+        并发请求数
+        <input
+          disabled={!project || busy}
+          max={30}
+          min={1}
+          onChange={(event) => setConcurrencyInput(event.target.value)}
+          step={1}
+          type="number"
+          value={concurrencyInput}
+        />
+      </label>
       <button
         className="primary-button"
-        disabled={!project || !primaryProfileId || !defaultModel.trim() || busy}
+        disabled={
+          !project ||
+          !primaryProfileId ||
+          !defaultModel.trim() ||
+          !concurrencyIsValid ||
+          busy
+        }
         onClick={() => void save()}
         type="button"
       >

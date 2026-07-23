@@ -320,6 +320,7 @@ Run 创建后，下列字段不可修改：
 - Task 的模型快照；
 - ContextVersion；
 - API 路由顺序；
+- 并发数；
 - 重试策略；
 - 应用版本；
 - Schema 版本。
@@ -1135,7 +1136,9 @@ estimated_input
 
 正式 Run 使用有界 Tokio worker 集合：
 
-- worker 上限读取 Run 创建时冻结的 `snapshot.concurrency`，新项目默认值为 `3`；
+- 项目设置接受 `1..=30` 的整数并发值，新项目默认值为 `3`；该范围必须由 Rust
+  领域服务校验，前端约束只用于即时反馈；
+- worker 上限读取 Run 创建时冻结的 `snapshot.concurrency`，项目设置变化不修改既有 Run；
 - 只有 worker 槽位空闲时才能事务性领取下一个 queued Task；
 - 单 Task 的自动重试和退避始终留在原 worker 内，不额外占用第二个槽位；
 - 所有 worker 收敛且队列为空后，才能计算最终统计并结束 Run；
@@ -1226,6 +1229,8 @@ disabled
 
 - `RunCancellationToken`：取消整个 Run；
 - `TaskCancellationToken`：取消单个 Task；
+- Run 级取消使用单个数据库事务和集合更新，一次收敛该 Run 的全部 queued/running Task，
+  不按 Task 数量循环调用 IPC；
 - reqwest 请求 Future 被 drop 后 Attempt 标记为 cancelled 或 interrupted；
 - 若无法判断服务端是否已完成，使用 `interrupted_unknown`；
 - 不自动重发结果未知请求。

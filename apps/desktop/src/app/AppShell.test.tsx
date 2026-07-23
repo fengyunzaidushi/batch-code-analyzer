@@ -403,6 +403,52 @@ describe("AppShell", () => {
     await user.click(screen.getByRole("button", { name: "保存项目运行设置" }));
 
     expect(onUpdateProjectRunSettings).toHaveBeenCalledWith({
+      concurrency: 3,
+      defaultModel: "gpt-5",
+      primaryProfileId: "profile-1",
+      projectId: "project-1",
+    });
+  });
+
+  it("validates project concurrency before saving", async () => {
+    const user = userEvent.setup();
+    const profile: ApiProfileSummaryDto = {
+      baseUrl: "https://example.test/v1",
+      defaultModel: "gpt-5",
+      hasSecret: true,
+      id: "profile-1",
+      lastConnectionStatus: "unknown",
+      lastErrorCode: null,
+      lastTestedAt: null,
+      modelCache: [],
+      modelCacheUpdatedAt: null,
+      name: "Local API",
+      protocol: "openai-responses",
+      schemaVersion: 1,
+    };
+    const onUpdateProjectRunSettings = vi.fn().mockResolvedValue(undefined);
+    render(
+      <AppShell
+        apiProfiles={[profile]}
+        onUpdateProjectRunSettings={onUpdateProjectRunSettings}
+        projects={[project({ concurrency: 10 })]}
+      />,
+    );
+
+    await user.click(screen.getByRole("tab", { name: "API 配置" }));
+    const input = screen.getByLabelText("并发请求数");
+    const save = screen.getByRole("button", { name: "保存项目运行设置" });
+    for (const invalid of ["0", "31", "1.5"]) {
+      await user.clear(input);
+      await user.type(input, invalid);
+      expect(save).toBeDisabled();
+    }
+    await user.clear(input);
+    await user.type(input, "30");
+    await user.click(save);
+
+    expect(onUpdateProjectRunSettings).toHaveBeenCalledWith({
+      concurrency: 30,
       defaultModel: "gpt-5",
       primaryProfileId: "profile-1",
       projectId: "project-1",
@@ -462,6 +508,7 @@ describe("AppShell", () => {
     const onCreateRun = vi.fn();
     const preview: RunPreviewResponse = {
       blockers: [],
+      concurrency: 3,
       model: "gpt-5",
       modelSource: "project",
       outputDirectory: "/workspace/results",
@@ -490,6 +537,7 @@ describe("AppShell", () => {
       screen.getByRole("dialog", { name: "确认本次分析" }),
     ).toBeInTheDocument();
     expect(screen.getByText("src/main.rs")).toBeInTheDocument();
+    expect(screen.getByText("并发数").parentElement).toHaveTextContent("3");
     await user.click(screen.getByRole("button", { name: "创建 Run" }));
     expect(onCreateRun).toHaveBeenCalledOnce();
   });

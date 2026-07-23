@@ -8,4 +8,4 @@ import type { Rfc3339Timestamp } from "./Rfc3339Timestamp";
 /**
  * Detail DTO intentionally exposes the selected project's path only on demand.
  */
-export type ProjectDetailDto = { schemaVersion: 1, id: ProjectId, name: string, sourceDirectory: string, pathStatus: ProjectPathStatus, defaultPrompt: string, promptPresets: Array<PromptPresetDto>, activePromptId: string | null, defaultModel: string | null, contextModel: string | null, apiRouting: ApiRouting, outputRoot: string | null, lastOpenedAt: Rfc3339Timestamp, };
+export type ProjectDetailDto = { schemaVersion: 1, id: ProjectId, name: string, sourceDirectory: string, pathStatus: ProjectPathStatus, defaultPrompt: string, promptPresets: Array<PromptPresetDto>, activePromptId: string | null, defaultModel: string | null, contextModel: string | null, apiRouting: ApiRouting, concurrency: number, outputRoot: string | null, lastOpenedAt: Rfc3339Timestamp, };

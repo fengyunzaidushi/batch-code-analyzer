@@ -169,6 +169,7 @@ pub(crate) async fn project_update_run_settings(
             &request.project_id,
             request.primary_profile_id,
             request.default_model,
+            request.concurrency,
         )
         .await
         .map_err(project_service_error)?;
@@ -266,6 +267,7 @@ pub(crate) async fn run_preview(
         model: preview.model,
         prompt_source: preview.prompt_source,
         model_source: preview.model_source,
+        concurrency: preview.concurrency,
         output_directory: preview.output_directory,
     })
 }
@@ -1210,6 +1212,12 @@ fn project_service_error(error: ProjectServiceError) -> IpcError {
             "主 API Profile 不存在",
             false,
         ),
+        ProjectServiceError::InvalidConcurrency => ipc_error(
+            "validation_invalid_value",
+            ErrorCategory::Validation,
+            "并发数必须是 1 到 30 的整数",
+            false,
+        ),
         ProjectServiceError::PromptNotFound => ipc_error(
             "prompt_not_found",
             ErrorCategory::Validation,
@@ -1672,6 +1680,12 @@ mod tests {
         assert_eq!(path_error.code, "project_path_unavailable");
         assert_eq!(path_error.message, "所选目录不可用");
         assert!(path_error.details.is_none());
+
+        let concurrency_error =
+            super::project_service_error(ProjectServiceError::InvalidConcurrency);
+        assert_eq!(concurrency_error.code, "validation_invalid_value");
+        assert_eq!(concurrency_error.message, "并发数必须是 1 到 30 的整数");
+        assert!(concurrency_error.details.is_none());
 
         let persistence_error = super::persistence_error(
             &batch_code_analyzer_persistence::PersistenceError::TransactionFailed,

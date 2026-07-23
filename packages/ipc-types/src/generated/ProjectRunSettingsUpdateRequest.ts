@@ -2,4 +2,4 @@
 import type { ApiProfileId } from "./ApiProfileId";
 import type { ProjectId } from "./ProjectId";
 
-export type ProjectRunSettingsUpdateRequest = { projectId: ProjectId, primaryProfileId: ApiProfileId | null, defaultModel: string | null, };
+export type ProjectRunSettingsUpdateRequest = { projectId: ProjectId, primaryProfileId: ApiProfileId | null, defaultModel: string | null, concurrency: number, };

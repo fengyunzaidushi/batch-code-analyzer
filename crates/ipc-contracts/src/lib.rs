@@ -267,6 +267,7 @@ pub struct ProjectDetailDto {
     pub default_model: Option<String>,
     pub context_model: Option<String>,
     pub api_routing: batch_code_analyzer_domain::ApiRouting,
+    pub concurrency: u16,
     pub output_root: Option<String>,
     pub last_opened_at: Rfc3339Timestamp,
 }
@@ -285,6 +286,7 @@ pub struct ProjectRunSettingsUpdateRequest {
     pub project_id: ProjectId,
     pub primary_profile_id: Option<ApiProfileId>,
     pub default_model: Option<String>,
+    pub concurrency: u16,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
@@ -463,6 +465,7 @@ impl From<&DomainProject> for ProjectDetailDto {
             default_model: project.default_model.clone(),
             context_model: project.context_model.clone(),
             api_routing: project.api_routing.clone(),
+            concurrency: project.execution_defaults.concurrency,
             output_root: project.output_root.clone(),
             last_opened_at: project.last_opened_at.clone(),
         }
@@ -629,6 +632,7 @@ pub struct RunPreviewResponse {
     pub model: Option<String>,
     pub prompt_source: TaskValueSource,
     pub model_source: TaskValueSource,
+    pub concurrency: u16,
     pub output_directory: String,
 }
 
