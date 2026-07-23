@@ -39,7 +39,7 @@ use batch_code_analyzer_repository_scanner::{
 use batch_code_analyzer_secret_store::SecretRef;
 use batch_code_analyzer_security_core::{content_hash, detect_secrets, SafeRoot};
 use serde::Serialize;
-use time::{format_description::well_known::Rfc3339, OffsetDateTime};
+use time::{format_description::well_known::Rfc3339, OffsetDateTime, UtcOffset};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
@@ -1359,7 +1359,8 @@ impl<'database> RunService<'database> {
             return Err(RunServiceError::Blocked(blocker));
         }
 
-        let now = timestamp_now();
+        let created_at = OffsetDateTime::now_utc();
+        let now = timestamp_from(created_at);
         let run_id = new_run_id();
         let run_status = RunStateMachine::transition(RunStatus::Draft, RunTransition::Start)
             .map_err(|_| RunServiceError::Blocked(invalid_run_blocker()))?;
@@ -1372,10 +1373,10 @@ impl<'database> RunService<'database> {
             .get_project(project_id)
             .await?
             .ok_or(RunServiceError::NotFound)?;
-        let output_directory = Path::new(&prepared.output_directory)
-            .join(run_id.as_str())
-            .to_string_lossy()
-            .into_owned();
+        let output_directory =
+            run_output_directory(Path::new(&prepared.output_directory), created_at, &run_id)
+                .to_string_lossy()
+                .into_owned();
         let run = Run {
             id: run_id.clone(),
             project_id: project_id.clone(),
@@ -2372,6 +2373,30 @@ fn unique_id(prefix: &str, sequence: &AtomicU64) -> String {
     format!("{prefix}-{timestamp}-{sequence}")
 }
 
+fn run_output_directory(
+    output_root: &Path,
+    created_at: OffsetDateTime,
+    run_id: &RunId,
+) -> std::path::PathBuf {
+    let china_standard_time = created_at
+        .to_offset(UtcOffset::from_hms(8, 0, 0).expect("UTC+08:00 must be a valid offset"));
+    let sequence = run_id
+        .as_str()
+        .rsplit_once('-')
+        .map_or("run", |(_, sequence)| sequence);
+    let timestamp = format!(
+        "{:04}{:02}{:02}{:02}{:02}{:02}{:03}",
+        china_standard_time.year(),
+        u8::from(china_standard_time.month()),
+        china_standard_time.day(),
+        china_standard_time.hour(),
+        china_standard_time.minute(),
+        china_standard_time.second(),
+        china_standard_time.millisecond(),
+    );
+    output_root.join(format!("{timestamp}-run-{sequence}"))
+}
+
 fn saturating_u32(value: u64) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
@@ -2812,7 +2837,11 @@ fn new_api_profile_id() -> ApiProfileId {
 
 #[must_use]
 pub fn timestamp_now() -> Rfc3339Timestamp {
-    let value = OffsetDateTime::now_utc()
+    timestamp_from(OffsetDateTime::now_utc())
+}
+
+fn timestamp_from(value: OffsetDateTime) -> Rfc3339Timestamp {
+    let value = value
         .format(&Rfc3339)
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".into());
     Rfc3339Timestamp::new(value)
@@ -2839,6 +2868,7 @@ mod tests {
     use tokio::{io::AsyncWriteExt, net::TcpListener};
     use tokio_util::sync::CancellationToken;
 
+    use super::run_output_directory;
     use super::{
         retry_delay, timestamp_now, wait_for_retry, ApiProfileService, ApiProfileServiceError,
         ContextService, FileServiceError, ProjectService, ProjectServiceError,
@@ -2848,6 +2878,20 @@ mod tests {
     };
 
     static NEXT_TEST_DIRECTORY_ID: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn run_output_directory_uses_china_standard_time() {
+        let directory = run_output_directory(
+            Path::new("results"),
+            time::OffsetDateTime::from_unix_timestamp(0).expect("Unix epoch should be valid"),
+            &batch_code_analyzer_domain::RunId::new("run-internal-id-42"),
+        );
+
+        assert_eq!(
+            directory,
+            PathBuf::from("results").join("19700101080000000-run-42")
+        );
+    }
 
     #[test]
     fn retry_delay_honors_retry_after_and_bounds_backoff_jitter() {

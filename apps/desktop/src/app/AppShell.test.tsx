@@ -582,6 +582,14 @@ describe("AppShell", () => {
     );
 
     expect(screen.getAllByText("src/main.ts")).not.toHaveLength(0);
+    expect(
+      screen.getByRole("option", {
+        name: "2026-07-20 18:00:00 · 已完成",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("option", { name: "run-1 · 已完成" }),
+    ).not.toBeInTheDocument();
     expect(screen.getByText("1 次尝试")).toBeInTheDocument();
     expect(screen.getByText("Local API")).toBeInTheDocument();
     await user.click(

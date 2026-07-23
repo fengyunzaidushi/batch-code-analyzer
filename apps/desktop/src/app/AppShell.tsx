@@ -1545,7 +1545,34 @@ function PromptDetailPanel({
 }
 
 function formatRunLabel(run: RunSummaryDto): string {
-  return `${run.id} · ${historyRunStatusLabel(run.status)}`;
+  return `${formatRunCreatedAt(run.createdAt) ?? run.id} · ${historyRunStatusLabel(run.status)}`;
+}
+
+function formatRunCreatedAt(createdAt: string): string | null {
+  const date = new Date(createdAt);
+  if (Number.isNaN(date.getTime())) return null;
+
+  const parts = new Intl.DateTimeFormat("zh-CN", {
+    day: "2-digit",
+    hour: "2-digit",
+    hour12: false,
+    minute: "2-digit",
+    month: "2-digit",
+    second: "2-digit",
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+  }).formatToParts(date);
+  const part = (type: string) =>
+    parts.find((item) => item.type === type)?.value;
+  const year = part("year");
+  const month = part("month");
+  const day = part("day");
+  const hour = part("hour");
+  const minute = part("minute");
+  const second = part("second");
+  if (!year || !month || !day || !hour || !minute || !second) return null;
+
+  return `${year}-${month}-${day} ${hour}:${minute}:${second}`;
 }
 
 function renderRunStats(stats: RunSummaryDto["stats"]) {
