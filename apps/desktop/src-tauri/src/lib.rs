@@ -87,6 +87,7 @@ pub fn run() {
             commands::run_get,
             commands::task_list,
             commands::task_get,
+            commands::task_retry,
             commands::result_read,
             commands::api_profile_list,
             commands::api_profile_save,

@@ -28,6 +28,7 @@ pub enum RunTransition {
     AllTasksTerminal,
     AllTasksSucceeded,
     AllTasksTerminalWithErrors,
+    ManualRetryRequested,
     ProcessInterrupted,
 }
 
@@ -129,6 +130,9 @@ impl RunStateMachine {
             (RunStatus::Running, RunTransition::AllTasksTerminalWithErrors) => {
                 Ok(RunStatus::CompletedWithErrors)
             }
+            (RunStatus::CompletedWithErrors, RunTransition::ManualRetryRequested) => {
+                Ok(RunStatus::Running)
+            }
             (
                 RunStatus::Running | RunStatus::Pausing | RunStatus::Cancelling,
                 RunTransition::ProcessInterrupted,
@@ -167,9 +171,10 @@ impl TaskStateMachine {
             (TaskStatus::Running, TaskTransition::ProcessInterrupted) => {
                 Ok(TaskStatus::Interrupted)
             }
-            (TaskStatus::Pending | TaskStatus::Queued, TaskTransition::SourceHashChanged) => {
-                Ok(TaskStatus::SourceChanged)
-            }
+            (
+                TaskStatus::Pending | TaskStatus::Queued | TaskStatus::Running,
+                TaskTransition::SourceHashChanged,
+            ) => Ok(TaskStatus::SourceChanged),
             _ => Err(StateTransitionError::task_invalid_transition()),
         }
     }
@@ -225,6 +230,11 @@ mod tests {
                 RunStatus::Running,
                 RunTransition::AllTasksTerminalWithErrors,
                 RunStatus::CompletedWithErrors,
+            ),
+            (
+                RunStatus::CompletedWithErrors,
+                RunTransition::ManualRetryRequested,
+                RunStatus::Running,
             ),
             (
                 RunStatus::Running,
@@ -305,6 +315,11 @@ mod tests {
             ),
             (
                 TaskStatus::Queued,
+                TaskTransition::SourceHashChanged,
+                TaskStatus::SourceChanged,
+            ),
+            (
+                TaskStatus::Running,
                 TaskTransition::SourceHashChanged,
                 TaskStatus::SourceChanged,
             ),

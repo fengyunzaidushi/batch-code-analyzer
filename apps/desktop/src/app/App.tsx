@@ -60,6 +60,7 @@ import {
   listTasks,
   previewRun,
   readResult,
+  retryTask,
 } from "../ipc/runs";
 import { generatePrompt } from "../ipc/prompt";
 import { AppShell, type ShellHealthState, type ShellProject } from "./AppShell";
@@ -113,6 +114,7 @@ export function App() {
   const [resultPreview, setResultPreview] = useState<ResultReadResponse | null>(
     null,
   );
+  const [retryingTaskId, setRetryingTaskId] = useState<string | null>(null);
 
   const refreshProjects = useCallback(async () => {
     const items = await listProjects();
@@ -588,7 +590,9 @@ export function App() {
     }
   };
 
-  const handleGetApiProfileSecret = async (profileId: string): Promise<string> => {
+  const handleGetApiProfileSecret = async (
+    profileId: string,
+  ): Promise<string> => {
     setApiProfileError(null);
     try {
       const response = await getApiProfileSecret({ profileId });
@@ -849,6 +853,49 @@ export function App() {
     }
   };
 
+  const handleRetryTask = async (taskId: string) => {
+    if (!selectedProjectId || retryingTaskId || activeRun) return;
+    const task = runTasks.find((item) => item.id === taskId);
+    if (!task) return;
+    const project = projects.find((item) => item.id === selectedProjectId);
+    setRunResultsError(null);
+    setRetryingTaskId(taskId);
+    setActiveRun({
+      runId: task.runId,
+      projectId: selectedProjectId,
+      projectName: project?.name ?? "当前项目",
+      status: "running",
+    });
+    const refreshTimer = window.setInterval(() => {
+      void refreshRunTasks(selectedProjectId, task.runId).catch((error) => {
+        setRunResultsError(safeRunResultsError(error));
+      });
+    }, 1000);
+    try {
+      await retryTask({ projectId: selectedProjectId, taskId });
+      await refreshRunHistory(selectedProjectId, task.runId);
+      await refreshRunTasks(selectedProjectId, task.runId);
+      const detail = await getTask({ projectId: selectedProjectId, taskId });
+      setTaskDetails((current) => ({ ...current, [taskId]: detail }));
+      setSelectedTaskId(taskId);
+    } catch (error) {
+      const retryError = safeRunResultsError(error);
+      await refreshRunHistory(selectedProjectId, task.runId).catch(() => {
+        // Preserve the retry error when refreshing persisted state also fails.
+      });
+      await refreshRunTasks(selectedProjectId, task.runId).catch(() => {
+        // Preserve the retry error when refreshing persisted state also fails.
+      });
+      setRunResultsError(retryError);
+    } finally {
+      window.clearInterval(refreshTimer);
+      setRetryingTaskId(null);
+      setActiveRun((current) =>
+        current?.runId === task.runId ? null : current,
+      );
+    }
+  };
+
   return (
     <AppShell
       activeRun={activeRun}
@@ -892,7 +939,9 @@ export function App() {
       isLoadingRunResults={isLoadingRunResults}
       onLoadTaskDetail={handleLoadTaskDetail}
       onOpenResult={handleReadResult}
+      onRetryTask={handleRetryTask}
       onSelectRun={setSelectedRunId}
+      retryingTaskId={retryingTaskId}
       resultPreview={resultPreview}
       onCloseResultPreview={() => setResultPreview(null)}
       isCreatingRun={isCreatingRun}
@@ -1075,6 +1124,11 @@ function safeRunResultsError(error: unknown): string {
       project_not_found: "项目不存在。",
       run_not_found: "Run 不存在或不属于当前项目。",
       task_not_found: "Task 不存在或不属于当前项目。",
+      task_cannot_retry: "当前失败不支持重试，请查看尝试详情。",
+      run_active_exists: "已有其他 Run 正在执行，暂时不能重试。",
+      run_not_active: "原 Run 当前不能重新执行。",
+      security_secret_not_found: "原 Run 使用的 API Profile 密钥不可用。",
+      provider_connection_failed: "模型 Provider 暂不可用。",
       output_result_not_found: "当前 Task 没有可读取的结果。",
       output_result_too_large: "结果超过可预览大小。",
       output_result_read_failed: "结果文件暂时无法读取。",

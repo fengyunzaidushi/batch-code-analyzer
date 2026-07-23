@@ -210,8 +210,9 @@ run_list
 创建成功后返回 `RunSummaryDto` 和创建的 Task 数量；Run 初始状态为 `running`，Task 初始状态为
 `queued`，实际模型请求由后续调度器任务负责。
 
-`run_execute` 只接收已有的 `runId`，要求 Run 处于 `running` 状态。执行器按顺序领取
-queued Task，并在每次真实请求前追加 `created` Attempt。Provider 成功时先原子写入结果
+`run_execute` 只接收已有的 `runId`，要求 Run 处于 `running` 状态。执行器按照 Run 快照
+中的 `concurrency` 有界并发领取 queued Task，并在每次真实请求前追加 `created` Attempt；
+单 Task 自动重试继续占用原 worker 槽位，不会作为另一个并发请求领取。Provider 成功时先原子写入结果
 Markdown，再提交 Attempt、Task 和 Run 统计；Provider、源码读取或结果写入失败时保存脱敏
 错误摘要并将 Task 收敛为 `failed`。命令只返回最终 `RunSummaryDto`，不返回源码、密钥或
 完整 Provider 响应。
@@ -255,9 +256,18 @@ task_regenerate
 task_cancel
 ```
 
-- `task_retry`：只对允许重试的失败、中断或取消任务创建新 Attempt。
+- `task_retry`：只对允许重试的失败、中断或取消任务创建新 Attempt。命令接收
+  `projectId` 和 `taskId`；失败 Task 路径原子地重新打开原 Run、重新排队 Task，再通过
+  统一执行器发送请求。每次真实请求仍在发送前新增 Attempt；取消/中断任务必须先完成
+  PRD 要求的重复计费确认流程。
 - `task_regenerate`：创建新的 Task 版本，不覆盖原 Task。
 - 运行中 Task 不允许重复提交。
+
+`task_retry` 成功返回最新 `RunSummaryDto` 和 `TaskSummaryDto`。重试复用原 Run 的
+文件、提示词、模型、上下文、API 路由、超时和重试策略快照；不得读取当前项目的新
+配置。Task 不存在或不属于 `projectId` 时统一返回 `task_not_found`；状态不允许、失败
+Task 的最新错误不可重试或重复提交时返回 `task_cannot_retry`；存在其他活动 Run 时
+返回 `run_active_exists`。
 
 `run_list` 按 Project 返回分页的 `RunSummaryDto`，`run_get` 只允许读取该 Project
 所属的 Run。`task_list` 按 Run 返回分页的 `TaskSummaryDto`，`task_get` 返回一个

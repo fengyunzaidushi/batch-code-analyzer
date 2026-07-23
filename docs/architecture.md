@@ -1133,9 +1133,20 @@ estimated_input
 
 ### 14.3 并发控制
 
-使用 Tokio Semaphore：
+正式 Run 使用有界 Tokio worker 集合：
 
-- `global_request_semaphore`：Run 文件请求；
+- worker 上限读取 Run 创建时冻结的 `snapshot.concurrency`，新项目默认值为 `3`；
+- 只有 worker 槽位空闲时才能事务性领取下一个 queued Task；
+- 单 Task 的自动重试和退避始终留在原 worker 内，不额外占用第二个槽位；
+- 所有 worker 收敛且队列为空后，才能计算最终统计并结束 Run；
+- 兼容旧数据时将 `concurrency = 0` 安全视为 `1`，避免 Run 永久排队；
+- 执行器内部失败时停止领取，等待 worker 收敛，并原子地将已领取 Task 标记为中断。
+- HTTP 请求可以并发，但同一进程的 SQLite 写事务通过共享异步门闩串行提交，避免多个
+  延迟事务从读取升级为写入时产生 `SQLITE_BUSY`；普通只读查询不经过该门闩。
+
+后续统一请求调度器仍使用全局 Semaphore：
+
+- `global_request_semaphore`：Run 文件请求和辅助请求的统一全局上限；
 - 辅助请求也使用统一调度队列；
 - 并发调低时不撤销已持有 permit；
 - 新请求等待 permit；
@@ -1178,6 +1189,23 @@ for profile in resolved routing chain:
 
 mark Task failed with aggregated attempts
 ```
+
+人工重试失败 Task 时复用同一个执行算法和 Run 快照。重新派发前必须在单个数据库
+事务中完成：
+
+```text
+校验 Task 属于请求 Project 且状态为 Failed
+→ 校验最新 Attempt.error.retryable = true
+→ 校验父 Run 为 CompletedWithErrors 且不存在其他活动 Run
+→ Run: CompletedWithErrors -> Running，清空 completedAt
+→ Task: Failed -> Queued，清空 startedAt/completedAt
+→ 重算并写入 RunStats
+→ 提交事务
+→ 统一执行器领取 Task，并在真实请求前追加新 Attempt
+```
+
+事务失败不得留下 Running Run 或 Queued Task。实际发送前必须重新核对源码哈希；若与
+Task 文件快照不一致，Task 进入 `SourceChanged`，不创建 Attempt、不发送请求。
 
 ### 14.5 档案健康状态
 

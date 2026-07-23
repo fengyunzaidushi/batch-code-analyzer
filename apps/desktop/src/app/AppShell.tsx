@@ -100,7 +100,9 @@ interface AppShellProps {
   isLoadingRunResults?: boolean;
   onLoadTaskDetail?: (taskId: string) => Promise<void>;
   onOpenResult?: (taskId: string) => Promise<void>;
+  onRetryTask?: (taskId: string) => Promise<void>;
   onSelectRun?: (runId: string) => void;
+  retryingTaskId?: string | null;
   resultPreview?: ResultReadResponse | null;
   onCloseResultPreview?: () => void;
   isCreatingRun?: boolean;
@@ -169,7 +171,9 @@ export function AppShell({
   isLoadingRunResults = false,
   onLoadTaskDetail = async () => undefined,
   onOpenResult = async () => undefined,
+  onRetryTask = async () => undefined,
   onSelectRun = () => undefined,
+  retryingTaskId = null,
   resultPreview = null,
   onCloseResultPreview = () => undefined,
   isCreatingRun = false,
@@ -297,7 +301,10 @@ export function AppShell({
           isLoadingRunResults={isLoadingRunResults}
           onLoadTaskDetail={onLoadTaskDetail}
           onOpenResult={onOpenResult}
+          onRetryTask={onRetryTask}
           onSelectRun={onSelectRun}
+          retryBlocked={activeRun !== null}
+          retryingTaskId={retryingTaskId}
         />
       </div>
       <RunPreviewPanel
@@ -605,7 +612,10 @@ function ProjectWorkspace({
   isLoadingRunResults,
   onLoadTaskDetail,
   onOpenResult,
+  onRetryTask,
   onSelectRun,
+  retryBlocked,
+  retryingTaskId,
 }: {
   apiProfileError: string | null;
   apiProfiles: readonly ApiProfileSummaryDto[];
@@ -655,7 +665,10 @@ function ProjectWorkspace({
   isLoadingRunResults: boolean;
   onLoadTaskDetail: (taskId: string) => Promise<void>;
   onOpenResult: (taskId: string) => Promise<void>;
+  onRetryTask: (taskId: string) => Promise<void>;
   onSelectRun: (runId: string) => void;
+  retryBlocked: boolean;
+  retryingTaskId: string | null;
 }) {
   return (
     <main className="project-workspace">
@@ -705,7 +718,10 @@ function ProjectWorkspace({
           isLoadingRunResults={isLoadingRunResults}
           onLoadTaskDetail={onLoadTaskDetail}
           onOpenResult={onOpenResult}
+          onRetryTask={onRetryTask}
           onSelectRun={onSelectRun}
+          retryBlocked={retryBlocked}
+          retryingTaskId={retryingTaskId}
         />
       ) : (
         <ApiWorkspace
@@ -830,7 +846,10 @@ function PromptWorkspace({
   isLoadingRunResults,
   onLoadTaskDetail,
   onOpenResult,
+  onRetryTask,
   onSelectRun,
+  retryBlocked,
+  retryingTaskId,
 }: {
   contextVersion: ContextVersionDto | null;
   onCancelScan: () => void;
@@ -861,7 +880,10 @@ function PromptWorkspace({
   isLoadingRunResults: boolean;
   onLoadTaskDetail: (taskId: string) => Promise<void>;
   onOpenResult: (taskId: string) => Promise<void>;
+  onRetryTask: (taskId: string) => Promise<void>;
   onSelectRun: (runId: string) => void;
+  retryBlocked: boolean;
+  retryingTaskId: string | null;
 }) {
   const hasProject = project !== null;
   const [generatorOpen, setGeneratorOpen] = useState(false);
@@ -1163,7 +1185,10 @@ function PromptWorkspace({
         isLoading={isLoadingRunResults}
         onLoadTaskDetail={onLoadTaskDetail}
         onOpenResult={onOpenResult}
+        onRetryTask={onRetryTask}
         onSelectRun={onSelectRun}
+        retryBlocked={retryBlocked}
+        retryingTaskId={retryingTaskId}
         runHistory={runHistory}
         runTasks={runTasks}
         selectedRunId={selectedRunId}
@@ -1179,7 +1204,10 @@ function RunResultsPanel({
   isLoading,
   onLoadTaskDetail,
   onOpenResult,
+  onRetryTask,
   onSelectRun,
+  retryBlocked,
+  retryingTaskId,
   runHistory,
   runTasks,
   selectedRunId,
@@ -1190,7 +1218,10 @@ function RunResultsPanel({
   isLoading: boolean;
   onLoadTaskDetail: (taskId: string) => Promise<void>;
   onOpenResult: (taskId: string) => Promise<void>;
+  onRetryTask: (taskId: string) => Promise<void>;
   onSelectRun: (runId: string) => void;
+  retryBlocked: boolean;
+  retryingTaskId: string | null;
   runHistory: readonly RunSummaryDto[];
   runTasks: readonly TaskSummaryDto[];
   selectedRunId: string | null;
@@ -1316,6 +1347,26 @@ function RunResultsPanel({
                     >
                       {detail ? `${detail.attempts.length} 次尝试` : "查看尝试"}
                     </button>
+                    {task.status === "failed" ? (
+                      <button
+                        aria-label={`重试 ${task.relativePath}`}
+                        className="text-button retry-task-button"
+                        disabled={retryBlocked || retryingTaskId !== null}
+                        onClick={() => void onRetryTask(task.id)}
+                        type="button"
+                      >
+                        <RefreshCw
+                          aria-hidden="true"
+                          className={
+                            retryingTaskId === task.id
+                              ? "is-spinning"
+                              : undefined
+                          }
+                          size={14}
+                        />
+                        {retryingTaskId === task.id ? "重试中" : "重试"}
+                      </button>
+                    ) : null}
                   </span>
                 </>
               );

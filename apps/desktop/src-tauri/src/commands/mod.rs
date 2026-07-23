@@ -15,6 +15,7 @@ use batch_code_analyzer_app_core::{
     FileServiceError, ProjectService, ProjectServiceError, PromptGenerationError,
     PromptGenerationService, RunCancellationError, RunExecutionService, RunPreparationInput,
     RunResultService, RunResultServiceError, RunService, RunServiceError, ScanService,
+    TaskRetryError,
 };
 use batch_code_analyzer_ipc_contracts::{
     ApiModelsFetchRequest, ApiModelsFetchResponse, ApiProfileDeleteRequest,
@@ -33,8 +34,8 @@ use batch_code_analyzer_ipc_contracts::{
     RunExecuteResponse, RunGetRequest, RunGetResponse, RunListRequest, RunPreviewRequest,
     RunPreviewResponse, RunPreviewTaskDto, RunSummaryDto, ScanCancelRequest, ScanCancelResponse,
     ScanOperationStatus, ScanReportDto, ScanRuleSummaryDto, ScanStartRequest, ScanStartResponse,
-    TaskGetRequest, TaskGetResponse, TaskListRequest, TaskSummaryDto, DTO_SCHEMA_VERSION,
-    HEALTH_CHECK_SCHEMA_VERSION,
+    TaskGetRequest, TaskGetResponse, TaskListRequest, TaskRetryRequest, TaskRetryResponse,
+    TaskSummaryDto, DTO_SCHEMA_VERSION, HEALTH_CHECK_SCHEMA_VERSION,
 };
 use batch_code_analyzer_model_providers::{ModelProvider, OpenAiResponsesProvider, ProviderError};
 use batch_code_analyzer_persistence::DatabaseHealth;
@@ -441,6 +442,73 @@ pub(crate) async fn task_get(
 }
 
 #[tauri::command]
+pub(crate) async fn task_retry(
+    request: TaskRetryRequest,
+    state: State<'_, PersistenceState>,
+) -> Result<TaskRetryResponse, IpcError> {
+    let database = state.database.as_ref().ok_or_else(database_unavailable)?;
+    let result_service = RunResultService::new(database);
+    let task = result_service
+        .get_task(&request.project_id, &request.task_id)
+        .await
+        .map_err(run_result_service_error)?;
+    let run = result_service
+        .get_run(&request.project_id, &task.run_id)
+        .await
+        .map_err(run_result_service_error)?;
+    let attempts = result_service
+        .list_attempts(&request.project_id, &request.task_id)
+        .await
+        .map_err(run_result_service_error)?;
+    let latest_is_retryable = task.status
+        == batch_code_analyzer_app_core::domain::TaskStatus::Failed
+        && task.latest_attempt_id.as_ref().is_some_and(|latest_id| {
+            attempts.iter().any(|attempt| {
+                attempt.id == *latest_id
+                    && attempt.error.as_ref().is_some_and(|error| error.retryable)
+            })
+        });
+    if !latest_is_retryable {
+        return Err(task_retry_error(TaskRetryError::CannotRetry));
+    }
+    if !profile_secret_available(
+        database,
+        &state,
+        run.snapshot.api_routing.primary_profile_id.as_ref(),
+    )
+    .await?
+    {
+        return Err(secret_not_available_error());
+    }
+    let Ok(provider) = OpenAiResponsesProvider::new(state.secret_store.clone()) else {
+        return Err(ipc_error(
+            "provider_connection_failed",
+            ErrorCategory::Provider,
+            "模型 Provider 暂不可用",
+            true,
+        ));
+    };
+    let (reopened_run, _) = RunService::new(database)
+        .retry_failed_task(&request.project_id, &request.task_id)
+        .await
+        .map_err(task_retry_error)?;
+    let cancellation = state.run_cancellations.register(&reopened_run.id);
+    let result = RunExecutionService::new(database, provider)
+        .execute_with_cancellation(&reopened_run.id, cancellation)
+        .await;
+    state.run_cancellations.remove(&reopened_run.id);
+    let completed_run = result.map_err(run_execution_error)?;
+    let completed_task = RunResultService::new(database)
+        .get_task(&request.project_id, &request.task_id)
+        .await
+        .map_err(run_result_service_error)?;
+    Ok(TaskRetryResponse {
+        run: RunSummaryDto::from(&completed_run),
+        task: TaskSummaryDto::from(&completed_task),
+    })
+}
+
+#[tauri::command]
 pub(crate) async fn result_read(
     request: ResultReadRequest,
     state: State<'_, PersistenceState>,
@@ -675,12 +743,25 @@ async fn primary_secret_available(
             false,
         ));
     };
-    let Some(profile_id) = project.api_routing.primary_profile_id else {
+    profile_secret_available(
+        database,
+        state,
+        project.api_routing.primary_profile_id.as_ref(),
+    )
+    .await
+}
+
+async fn profile_secret_available(
+    database: &batch_code_analyzer_persistence::Database,
+    state: &State<'_, PersistenceState>,
+    profile_id: Option<&ApiProfileId>,
+) -> Result<bool, IpcError> {
+    let Some(profile_id) = profile_id else {
         return Ok(false);
     };
     let profile = database
         .repository()
-        .get_api_profile(&profile_id)
+        .get_api_profile(profile_id)
         .await
         .map_err(|error| persistence_error(&error))?;
     let Some(secret_ref) = profile.and_then(|profile| profile.secret_ref) else {
@@ -1377,6 +1458,30 @@ fn run_cancellation_error(error: RunCancellationError) -> IpcError {
     }
 }
 
+fn task_retry_error(error: TaskRetryError) -> IpcError {
+    match error {
+        TaskRetryError::NotFound => ipc_error(
+            "task_not_found",
+            ErrorCategory::Scheduler,
+            "Task 不存在",
+            false,
+        ),
+        TaskRetryError::CannotRetry => ipc_error(
+            "task_cannot_retry",
+            ErrorCategory::Scheduler,
+            "当前 Task 不允许重试",
+            false,
+        ),
+        TaskRetryError::ActiveRun => ipc_error(
+            "run_active_exists",
+            ErrorCategory::Scheduler,
+            "当前已有活动 Run",
+            false,
+        ),
+        TaskRetryError::Persistence(error) => persistence_error(&error),
+    }
+}
+
 fn file_service_error(error: FileServiceError) -> IpcError {
     match error {
         FileServiceError::NotFound | FileServiceError::Deleted => ipc_error(
@@ -1510,7 +1615,7 @@ fn health_check_response(database_health: DatabaseHealth) -> HealthCheckResponse
 mod tests {
     use super::{
         health_check_response, ApiProfileServiceError, ContextServiceError, FileServiceError,
-        ProjectServiceError, ProviderError, RunResultServiceError, RunServiceError,
+        ProjectServiceError, ProviderError, RunResultServiceError, RunServiceError, TaskRetryError,
     };
     use batch_code_analyzer_app_core::RunBlockingReason;
     use batch_code_analyzer_persistence::DatabaseHealth;
@@ -1663,6 +1768,25 @@ mod tests {
         assert_eq!(missing.code, "output_result_not_found");
         assert_eq!(missing.message, "分析结果不存在");
         assert!(missing.details.is_none());
+    }
+
+    #[test]
+    fn task_retry_errors_use_stable_scheduler_codes() {
+        let cannot_retry = super::task_retry_error(TaskRetryError::CannotRetry);
+        assert_eq!(cannot_retry.code, "task_cannot_retry");
+        assert_eq!(
+            cannot_retry.category,
+            batch_code_analyzer_ipc_contracts::ErrorCategory::Scheduler
+        );
+        assert!(!cannot_retry.retryable);
+        assert!(cannot_retry.details.is_none());
+
+        let active = super::task_retry_error(TaskRetryError::ActiveRun);
+        assert_eq!(active.code, "run_active_exists");
+        assert_eq!(
+            active.category,
+            batch_code_analyzer_ipc_contracts::ErrorCategory::Scheduler
+        );
     }
 
     #[test]

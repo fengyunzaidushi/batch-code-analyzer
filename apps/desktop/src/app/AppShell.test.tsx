@@ -551,6 +551,52 @@ describe("AppShell", () => {
     expect(onLoadTaskDetail).toHaveBeenCalledWith(task.id);
   });
 
+  it("offers retry for failed tasks and prevents duplicate submission", async () => {
+    const user = userEvent.setup();
+    const onRetryTask = vi.fn().mockResolvedValue(undefined);
+    const run = {
+      ...runSummary(),
+      status: "completed_with_errors" as const,
+      stats: {
+        ...runSummary().stats,
+        failed: 1,
+        succeeded: 0,
+      },
+    };
+    const task = {
+      ...taskSummary(),
+      hasResult: false,
+      status: "failed" as const,
+    };
+    const view = render(
+      <AppShell
+        onRetryTask={onRetryTask}
+        projects={[project()]}
+        runHistory={[run]}
+        runTasks={[task]}
+        selectedRunId={run.id}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "重试 src/main.ts" }));
+    expect(onRetryTask).toHaveBeenCalledWith(task.id);
+
+    view.rerender(
+      <AppShell
+        onRetryTask={onRetryTask}
+        projects={[project()]}
+        retryingTaskId={task.id}
+        runHistory={[run]}
+        runTasks={[task]}
+        selectedRunId={run.id}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: "重试 src/main.ts" }),
+    ).toBeDisabled();
+    expect(screen.getByText("重试中")).toBeInTheDocument();
+  });
+
   it("shows a sanitized Markdown result dialog when a result is loaded", () => {
     const result: ResultReadResponse = {
       markdown: "# Result\n<script>bad()</script>",

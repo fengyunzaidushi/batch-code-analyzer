@@ -18,6 +18,8 @@ import type {
   TaskGetRequest,
   TaskGetResponse,
   TaskListRequest,
+  TaskRetryRequest,
+  TaskRetryResponse,
   TaskSummaryDto,
 } from "@batch-code-analyzer/ipc-types";
 
@@ -62,6 +64,12 @@ export function listTasks(
 
 export function getTask(request: TaskGetRequest): Promise<TaskGetResponse> {
   return invoke<TaskGetResponse>("task_get", { request });
+}
+
+export function retryTask(
+  request: TaskRetryRequest,
+): Promise<TaskRetryResponse> {
+  return invoke<TaskRetryResponse>("task_retry", { request });
 }
 
 export function readResult(

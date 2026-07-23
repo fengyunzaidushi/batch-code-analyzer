@@ -358,6 +358,68 @@ async fn recovery_queries_find_only_unfinished_objects() {
 }
 
 #[tokio::test]
+async fn interrupting_run_settles_claimed_tasks_and_preserves_queue() {
+    let database = Database::open_in_memory()
+        .await
+        .expect("database should open");
+    let repository = database.repository();
+    let project = project("project-interrupt", "/workspace/interrupt");
+    repository
+        .create_project(&project, project_metadata("/workspace/interrupt"))
+        .await
+        .unwrap();
+    let file = file("file-interrupt", &project.id);
+    repository
+        .create_file_record(&file, file_metadata())
+        .await
+        .unwrap();
+    let run = run("run-interrupt", &project.id, RunStatus::Running);
+    let queued = task("task-queued", &run.id, file.id.as_str(), TaskStatus::Queued);
+    let running = task(
+        "task-running",
+        &run.id,
+        file.id.as_str(),
+        TaskStatus::Running,
+    );
+    repository
+        .create_run_with_tasks(
+            &run,
+            RunRowMetadata {
+                interruption_reason: None,
+            },
+            &[queued, running.clone()],
+        )
+        .await
+        .unwrap();
+    repository
+        .append_attempt(
+            &attempt("attempt-running", &running.id, 1, AttemptStatus::Dispatched),
+            AttemptRowMetadata { response_id: None },
+        )
+        .await
+        .unwrap();
+
+    let interrupted = repository
+        .interrupt_run(&run.id, &timestamp())
+        .await
+        .expect("run should interrupt");
+
+    assert_eq!(interrupted.status, RunStatus::Interrupted);
+    assert_eq!(interrupted.stats.queued, 1);
+    assert_eq!(interrupted.stats.interrupted, 1);
+    let tasks = repository.list_tasks(&run.id).await.unwrap();
+    assert!(tasks.iter().any(|task| task.status == TaskStatus::Queued));
+    assert!(tasks
+        .iter()
+        .any(|task| task.status == TaskStatus::Interrupted));
+    assert!(!tasks.iter().any(|task| task.status == TaskStatus::Running));
+    assert_eq!(
+        repository.list_attempts(&running.id).await.unwrap()[0].status,
+        AttemptStatus::InterruptedUnknown
+    );
+}
+
+#[tokio::test]
 async fn cancelling_run_settles_queued_and_running_tasks_atomically() {
     let database = Database::open_in_memory()
         .await

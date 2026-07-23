@@ -714,6 +714,20 @@ pub struct TaskGetResponse {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
+pub struct TaskRetryRequest {
+    pub project_id: ProjectId,
+    pub task_id: TaskId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskRetryResponse {
+    pub run: RunSummaryDto,
+    pub task: TaskSummaryDto,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
 pub struct ResultReadRequest {
     pub project_id: ProjectId,
     pub task_id: TaskId,
@@ -1013,6 +1027,8 @@ pub fn export_types(out_dir: &Path) -> Result<(), ExportError> {
     TaskListRequest::export_all(&config)?;
     TaskGetRequest::export_all(&config)?;
     TaskGetResponse::export_all(&config)?;
+    TaskRetryRequest::export_all(&config)?;
+    TaskRetryResponse::export_all(&config)?;
     AttemptDto::export_all(&config)?;
     ResultReadRequest::export_all(&config)?;
     ResultReadResponse::export_all(&config)?;

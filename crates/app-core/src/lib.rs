@@ -15,7 +15,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use batch_code_analyzer_api_profiles::ApiProfile as ProviderApiProfile;
+use batch_code_analyzer_api_profiles::{ApiProfile as ProviderApiProfile, ResolvedApiProfile};
 use batch_code_analyzer_domain::{
     ApiModelInfo, ApiProfile, ApiProfileConnectionStatus, ApiProfileId, ApiProtocol, ApiRouting,
     Attempt, AttemptError, AttemptId, AttemptStatus, ContextStatus, ContextVersion,
@@ -40,11 +40,13 @@ use batch_code_analyzer_secret_store::SecretRef;
 use batch_code_analyzer_security_core::{content_hash, detect_secrets, SafeRoot};
 use serde::Serialize;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 pub use batch_code_analyzer_domain as domain;
 
 const DEFAULT_PROMPT: &str = "请结合提供的项目上下文，用通俗但准确的语言解释当前代码文件。\n请说明：\n1. 该文件在项目中的核心职责；\n2. 关键输入、输出、状态或数据流；\n3. 它与哪些模块或功能协作，以及它为何存在；\n4. 修改或缺失它可能带来的影响。\n如无法从上下文或代码中确认，请明确说明不确定性，不要臆测。";
+const DEFAULT_RUN_CONCURRENCY: u16 = 3;
 static NEXT_PROJECT_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_PROMPT_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_FILE_ID: AtomicU64 = AtomicU64::new(1);
@@ -236,6 +238,34 @@ pub enum RunCancellationError {
     NotActive,
     Persistence(PersistenceError),
 }
+
+#[derive(Debug, Eq, PartialEq)]
+pub enum TaskRetryError {
+    NotFound,
+    CannotRetry,
+    ActiveRun,
+    Persistence(PersistenceError),
+}
+
+impl TaskRetryError {
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::NotFound => "task_not_found",
+            Self::CannotRetry => "task_cannot_retry",
+            Self::ActiveRun => "run_active_exists",
+            Self::Persistence(error) => error.code(),
+        }
+    }
+}
+
+impl std::fmt::Display for TaskRetryError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.code())
+    }
+}
+
+impl std::error::Error for TaskRetryError {}
 
 impl RunCancellationError {
     #[must_use]
@@ -808,7 +838,7 @@ impl<'database> ProjectService<'database> {
                 fallbacks: Vec::new(),
             },
             execution_defaults: ExecutionDefaults {
-                concurrency: 5,
+                concurrency: DEFAULT_RUN_CONCURRENCY,
                 timeout_seconds: 120,
                 max_output_tokens: 4096,
                 retry_count_per_profile: 1,
@@ -1209,6 +1239,54 @@ impl<'database> RunService<'database> {
                     code: "run_not_active",
                 } => RunCancellationError::NotActive,
                 other => RunCancellationError::Persistence(other),
+            })
+    }
+
+    /// Reopens the original Run and requeues one retryable failed Task.
+    ///
+    /// The operation preserves every immutable Run/Task snapshot and every
+    /// previous Attempt. The executor creates the next Attempt immediately
+    /// before the retried network request is dispatched.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable not-found error for cross-Project access, a retry
+    /// error for ineligible Tasks, or an active-Run conflict.
+    pub async fn retry_failed_task(
+        &self,
+        project_id: &ProjectId,
+        task_id: &TaskId,
+    ) -> Result<(Run, Task), TaskRetryError> {
+        let task = self
+            .database
+            .repository()
+            .get_task(task_id)
+            .await
+            .map_err(TaskRetryError::Persistence)?
+            .ok_or(TaskRetryError::NotFound)?;
+        let run = self
+            .database
+            .repository()
+            .get_run(&task.run_id)
+            .await
+            .map_err(TaskRetryError::Persistence)?
+            .ok_or(TaskRetryError::NotFound)?;
+        if run.project_id != *project_id {
+            return Err(TaskRetryError::NotFound);
+        }
+        self.database
+            .repository()
+            .retry_failed_task(task_id)
+            .await
+            .map_err(|error| match error {
+                PersistenceError::RecordNotFound { .. } => TaskRetryError::NotFound,
+                PersistenceError::StateTransition {
+                    code: "task_cannot_retry",
+                } => TaskRetryError::CannotRetry,
+                PersistenceError::StateTransition {
+                    code: "run_active_exists",
+                } => TaskRetryError::ActiveRun,
+                other => TaskRetryError::Persistence(other),
             })
     }
 
@@ -1799,7 +1877,7 @@ impl<'database> RunExecutionService<'database> {
                     let _ = self
                         .database
                         .repository()
-                        .complete_run(run_id, RunTransition::ProcessInterrupted, &timestamp_now())
+                        .interrupt_run(run_id, &timestamp_now())
                         .await;
                 }
             }
@@ -1807,7 +1885,8 @@ impl<'database> RunExecutionService<'database> {
         result
     }
 
-    /// Executes queued Tasks sequentially and finalizes the Run.
+    /// Executes queued Tasks up to the frozen concurrency limit and finalizes
+    /// the Run after every worker has settled.
     ///
     /// # Errors
     ///
@@ -1866,139 +1945,61 @@ impl<'database> RunExecutionService<'database> {
         .map_err(|_| RunExecutionError::NotRunning)?
         .resolve();
 
-        while !cancellation.is_cancelled() {
-            let Some(mut task) = self
-                .database
-                .repository()
-                .claim_next_task(run_id, &timestamp_now())
-                .await?
-            else {
-                break;
-            };
-            let created_at = timestamp_now();
-            let attempt_id = new_attempt_id();
-            let sequence = u32::try_from(
-                self.database
+        let worker_cancellation = cancellation.child_token();
+        let worker = RunTaskWorker {
+            database: (*self.database).clone(),
+            provider: self.provider.clone(),
+            run: run.clone(),
+            root,
+            profile,
+            provider_profile,
+            cancellation: worker_cancellation.clone(),
+        };
+        // Historical data could contain zero before validation was enforced.
+        // Treat it as one slot so such a Run cannot remain queued forever.
+        let concurrency = usize::from(run.snapshot.concurrency.max(1));
+        let mut workers = JoinSet::new();
+        let mut queue_drained = false;
+        let mut execution_error = None;
+
+        loop {
+            while execution_error.is_none()
+                && !queue_drained
+                && !cancellation.is_cancelled()
+                && workers.len() < concurrency
+            {
+                match self
+                    .database
                     .repository()
-                    .list_attempts(&task.id)
+                    .claim_next_task(run_id, &timestamp_now())
                     .await?
-                    .len()
-                    .saturating_add(1),
-            )
-            .unwrap_or(u32::MAX);
-            let mut attempt = Attempt {
-                id: attempt_id,
-                task_id: task.id.clone(),
-                sequence,
-                api_profile_id: profile.id.clone(),
-                api_profile_name: profile.name.clone(),
-                actual_model: task.model_snapshot.clone(),
-                status: AttemptStatus::Created,
-                created_at: created_at.clone(),
-                started_at: None,
-                dispatched_at: None,
-                finished_at: None,
-                duration_ms: None,
-                http_status: None,
-                input_tokens: None,
-                output_tokens: None,
-                total_tokens: None,
-                retry_reason: None,
-                error: None,
-            };
-            self.database
-                .repository()
-                .append_running_attempt(&attempt, AttemptRowMetadata { response_id: None }, run_id)
-                .await?;
-            task.latest_attempt_id = Some(attempt.id.clone());
-            attempt.status = AttemptStatus::Dispatched;
-            attempt.started_at = Some(created_at.clone());
-            attempt.dispatched_at = Some(created_at);
-            self.database
-                .repository()
-                .finalize_task_attempt(&attempt, AttemptRowMetadata { response_id: None }, &task)
-                .await?;
-            let started = Instant::now();
-            let source_path = root
-                .relative_path(&task.relative_path)
-                .map_err(|_| RunExecutionError::NotRunning)
-                .map(|relative| root.path().join(relative));
-            let source = match source_path {
-                Ok(path) => fs::read_to_string(path).map_err(|_| "scan_file_unreadable"),
-                Err(error) => Err(match error {
-                    RunExecutionError::NotRunning => "project_path_unavailable",
-                    _ => "scan_file_unreadable",
-                }),
-            };
-            let result = match source {
-                Ok(source) => {
-                    let request = ProviderRequest::new(
-                        provider_profile.clone(),
-                        task.model_snapshot.clone(),
-                        source,
-                    )
-                    .with_instructions(task.prompt_snapshot.clone())
-                    .with_max_output_tokens(run.snapshot.max_output_tokens)
-                    .with_timeout(Duration::from_secs(u64::from(run.snapshot.timeout_seconds)));
-                    self.provider
-                        .execute(request, cancellation.clone())
-                        .await
-                        .map(|response| (response, started.elapsed()))
-                        .map_err(|error| (error.code().to_owned(), error.retryable()))
+                {
+                    Some(task) => {
+                        let task_worker = worker.clone();
+                        workers.spawn(async move { task_worker.execute(task).await });
+                    }
+                    None => queue_drained = true,
                 }
-                Err(code) => Err((code.to_owned(), false)),
-            };
-            if cancellation.is_cancelled() {
+            }
+
+            let Some(completion) = workers.join_next().await else {
                 break;
+            };
+            let error = match completion {
+                Ok(Ok(())) => None,
+                Ok(Err(error)) => Some(error),
+                Err(_) => Some(RunExecutionError::Persistence(
+                    PersistenceError::TransactionFailed,
+                )),
+            };
+            if execution_error.is_none() && error.is_some() {
+                worker_cancellation.cancel();
+                execution_error = error;
             }
-            match result {
-                Ok((response, elapsed)) => {
-                    let Ok(output_path) = write_result(
-                        &run.output_directory,
-                        &task.relative_path,
-                        &response.output_text,
-                    ) else {
-                        self.persist_task_failure(
-                            &mut attempt,
-                            &mut task,
-                            "output_write_failed".into(),
-                            true,
-                            started,
-                        )
-                        .await?;
-                        continue;
-                    };
-                    attempt.status = AttemptStatus::Succeeded;
-                    attempt.finished_at = Some(timestamp_now());
-                    attempt.duration_ms = Some(elapsed.as_millis().try_into().unwrap_or(u64::MAX));
-                    attempt.input_tokens = response.usage.input_tokens.map(saturating_u32);
-                    attempt.output_tokens = response.usage.output_tokens.map(saturating_u32);
-                    attempt.total_tokens = response.usage.total_tokens.map(saturating_u32);
-                    task.status =
-                        TaskStateMachine::transition(task.status, TaskTransition::Succeed)
-                            .map_err(|error| {
-                                RunExecutionError::Persistence(PersistenceError::StateTransition {
-                                    code: error.code(),
-                                })
-                            })?;
-                    task.current_result_path = Some(output_path);
-                    task.completed_at = attempt.finished_at.clone();
-                    self.database
-                        .repository()
-                        .finalize_task_attempt(
-                            &attempt,
-                            AttemptRowMetadata {
-                                response_id: response.response_id,
-                            },
-                            &task,
-                        )
-                        .await?;
-                }
-                Err((code, retryable)) => {
-                    self.persist_task_failure(&mut attempt, &mut task, code, retryable, started)
-                        .await?;
-                }
-            }
+        }
+
+        if let Some(error) = execution_error {
+            return Err(error);
         }
 
         if cancellation.is_cancelled() {
@@ -2030,6 +2031,191 @@ impl<'database> RunExecutionService<'database> {
             .await
             .map_err(Into::into)
     }
+}
+
+#[derive(Clone)]
+struct RunTaskWorker {
+    database: Database,
+    provider: OpenAiResponsesProvider,
+    run: Run,
+    root: SafeRoot,
+    profile: ApiProfile,
+    provider_profile: ResolvedApiProfile,
+    cancellation: CancellationToken,
+}
+
+impl RunTaskWorker {
+    #[allow(clippy::too_many_lines)]
+    async fn execute(&self, mut task: Task) -> Result<(), RunExecutionError> {
+        let source_path = self
+            .root
+            .relative_path(&task.relative_path)
+            .map_err(|_| RunExecutionError::NotRunning)
+            .map(|relative| self.root.path().join(relative));
+        let source = match source_path {
+            Ok(path) => fs::read_to_string(path).map_err(|_| "scan_file_unreadable"),
+            Err(error) => Err(match error {
+                RunExecutionError::NotRunning => "project_path_unavailable",
+                _ => "scan_file_unreadable",
+            }),
+        };
+        if source.as_ref().is_ok_and(|content| {
+            content_hash(content.as_bytes()) != task.file_snapshot.content_hash
+        }) {
+            self.database
+                .repository()
+                .mark_running_task_source_changed(&task.id, &timestamp_now())
+                .await?;
+            return Ok(());
+        }
+        let existing_attempts = self.database.repository().list_attempts(&task.id).await?;
+        let mut next_sequence =
+            u32::try_from(existing_attempts.len().saturating_add(1)).unwrap_or(u32::MAX);
+        let mut retry_index = 0_u8;
+        let mut retry_reason = (!existing_attempts.is_empty()).then(|| "manual_retry".into());
+        loop {
+            let created_at = timestamp_now();
+            let attempt_id = new_attempt_id();
+            let mut attempt = Attempt {
+                id: attempt_id,
+                task_id: task.id.clone(),
+                sequence: next_sequence,
+                api_profile_id: self.profile.id.clone(),
+                api_profile_name: self.profile.name.clone(),
+                actual_model: task.model_snapshot.clone(),
+                status: AttemptStatus::Created,
+                created_at: created_at.clone(),
+                started_at: None,
+                dispatched_at: None,
+                finished_at: None,
+                duration_ms: None,
+                http_status: None,
+                input_tokens: None,
+                output_tokens: None,
+                total_tokens: None,
+                retry_reason: retry_reason.take(),
+                error: None,
+            };
+            next_sequence = next_sequence.saturating_add(1);
+            self.database
+                .repository()
+                .append_running_attempt(
+                    &attempt,
+                    AttemptRowMetadata { response_id: None },
+                    &self.run.id,
+                )
+                .await?;
+            task.latest_attempt_id = Some(attempt.id.clone());
+            attempt.status = AttemptStatus::Dispatched;
+            attempt.started_at = Some(created_at.clone());
+            attempt.dispatched_at = Some(created_at);
+            self.database
+                .repository()
+                .finalize_task_attempt(&attempt, AttemptRowMetadata { response_id: None }, &task)
+                .await?;
+            let started = Instant::now();
+            let result = match &source {
+                Ok(source) => {
+                    let request = ProviderRequest::new(
+                        self.provider_profile.clone(),
+                        task.model_snapshot.clone(),
+                        source.clone(),
+                    )
+                    .with_instructions(task.prompt_snapshot.clone())
+                    .with_max_output_tokens(self.run.snapshot.max_output_tokens)
+                    .with_timeout(Duration::from_secs(u64::from(
+                        self.run.snapshot.timeout_seconds,
+                    )));
+                    self.provider
+                        .execute(request, self.cancellation.clone())
+                        .await
+                        .map(|response| (response, started.elapsed()))
+                        .map_err(ExecutionAttemptError::Provider)
+                }
+                Err(code) => Err(ExecutionAttemptError::Local((*code).to_owned())),
+            };
+            if self.cancellation.is_cancelled() {
+                break;
+            }
+            match result {
+                Ok((response, elapsed)) => {
+                    let Ok(output_path) = write_result(
+                        &self.run.output_directory,
+                        &task.relative_path,
+                        &response.output_text,
+                    ) else {
+                        self.persist_task_failure(
+                            &mut attempt,
+                            &mut task,
+                            "output_write_failed".into(),
+                            true,
+                            true,
+                            started,
+                        )
+                        .await?;
+                        break;
+                    };
+                    attempt.status = AttemptStatus::Succeeded;
+                    attempt.finished_at = Some(timestamp_now());
+                    attempt.duration_ms = Some(elapsed.as_millis().try_into().unwrap_or(u64::MAX));
+                    attempt.input_tokens = response.usage.input_tokens.map(saturating_u32);
+                    attempt.output_tokens = response.usage.output_tokens.map(saturating_u32);
+                    attempt.total_tokens = response.usage.total_tokens.map(saturating_u32);
+                    task.status =
+                        TaskStateMachine::transition(task.status, TaskTransition::Succeed)
+                            .map_err(|error| {
+                                RunExecutionError::Persistence(PersistenceError::StateTransition {
+                                    code: error.code(),
+                                })
+                            })?;
+                    task.current_result_path = Some(output_path);
+                    task.completed_at = attempt.finished_at.clone();
+                    self.database
+                        .repository()
+                        .finalize_task_attempt(
+                            &attempt,
+                            AttemptRowMetadata {
+                                response_id: response.response_id,
+                            },
+                            &task,
+                        )
+                        .await?;
+                    break;
+                }
+                Err(ExecutionAttemptError::Provider(error)) => {
+                    let retryable = error.retryable();
+                    let should_retry = retryable
+                        && retry_index < self.run.snapshot.retry_policy.retry_count_per_profile;
+                    let code = error.code().to_owned();
+                    attempt.http_status = provider_error_http_status(&error);
+                    self.persist_task_failure(
+                        &mut attempt,
+                        &mut task,
+                        code.clone(),
+                        retryable,
+                        !should_retry,
+                        started,
+                    )
+                    .await?;
+                    if !should_retry {
+                        break;
+                    }
+                    let delay = retry_delay(retry_index, error.retry_after_seconds());
+                    retry_index = retry_index.saturating_add(1);
+                    retry_reason = Some(code);
+                    if !wait_for_retry(delay, &self.cancellation).await {
+                        break;
+                    }
+                }
+                Err(ExecutionAttemptError::Local(code)) => {
+                    self.persist_task_failure(&mut attempt, &mut task, code, false, true, started)
+                        .await?;
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
 
     async fn persist_task_failure(
         &self,
@@ -2037,9 +2223,10 @@ impl<'database> RunExecutionService<'database> {
         task: &mut Task,
         code: String,
         retryable: bool,
+        terminal: bool,
         started: Instant,
     ) -> Result<(), RunExecutionError> {
-        attempt.status = if retryable {
+        attempt.status = if retryable && !terminal {
             AttemptStatus::FailedRetryable
         } else {
             AttemptStatus::FailedTerminal
@@ -2052,18 +2239,68 @@ impl<'database> RunExecutionService<'database> {
             retryable,
             sanitized: true,
         });
-        task.status =
-            TaskStateMachine::transition(task.status, TaskTransition::Fail).map_err(|error| {
-                RunExecutionError::Persistence(PersistenceError::StateTransition {
-                    code: error.code(),
-                })
-            })?;
-        task.completed_at = attempt.finished_at.clone();
+        if terminal {
+            task.status = TaskStateMachine::transition(task.status, TaskTransition::Fail).map_err(
+                |error| {
+                    RunExecutionError::Persistence(PersistenceError::StateTransition {
+                        code: error.code(),
+                    })
+                },
+            )?;
+            task.completed_at = attempt.finished_at.clone();
+        }
         self.database
             .repository()
             .finalize_task_attempt(attempt, AttemptRowMetadata { response_id: None }, task)
             .await?;
         Ok(())
+    }
+}
+
+enum ExecutionAttemptError {
+    Provider(ProviderError),
+    Local(String),
+}
+
+fn provider_error_http_status(error: &ProviderError) -> Option<u16> {
+    match error {
+        ProviderError::ServerError { status }
+        | ProviderError::AuthenticationFailed { status }
+        | ProviderError::PermissionDenied { status }
+        | ProviderError::ModelUnavailable { status, .. }
+        | ProviderError::ContentRejected { status }
+        | ProviderError::InvalidRequest { status } => Some(*status),
+        ProviderError::RateLimited { .. } => Some(429),
+        ProviderError::ConnectionFailed
+        | ProviderError::Timeout
+        | ProviderError::InvalidResponse
+        | ProviderError::Cancelled
+        | ProviderError::InterruptedUnknown
+        | ProviderError::SecretStoreUnavailable => None,
+    }
+}
+
+fn retry_delay(retry_index: u8, retry_after_seconds: Option<u64>) -> Duration {
+    if let Some(seconds) = retry_after_seconds {
+        return Duration::from_secs(seconds);
+    }
+    let base_seconds = 5_u64 << retry_index.min(2);
+    let jitter_bucket = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(20, |duration| duration.subsec_nanos() % 41);
+    let jitter_percent = i64::from(jitter_bucket) - 20;
+    let base_millis = base_seconds.saturating_mul(1_000);
+    let jitter_millis = i64::try_from(base_millis)
+        .unwrap_or(i64::MAX)
+        .saturating_mul(jitter_percent)
+        / 100;
+    Duration::from_millis(base_millis.saturating_add_signed(jitter_millis))
+}
+
+async fn wait_for_retry(delay: Duration, cancellation: &CancellationToken) -> bool {
+    tokio::select! {
+        () = tokio::time::sleep(delay) => true,
+        () = cancellation.cancelled() => false,
     }
 }
 
@@ -2554,7 +2791,7 @@ mod tests {
         fs,
         path::{Path, PathBuf},
         sync::{
-            atomic::{AtomicU64, Ordering},
+            atomic::{AtomicU64, AtomicUsize, Ordering},
             Arc,
         },
         time::Duration,
@@ -2567,14 +2804,70 @@ mod tests {
     use batch_code_analyzer_secret_store::{MemorySecretStore, SecretStore, SecretValue};
     use batch_code_analyzer_security_core::SafeRoot;
     use tokio::{io::AsyncWriteExt, net::TcpListener};
+    use tokio_util::sync::CancellationToken;
 
     use super::{
-        timestamp_now, ApiProfileService, ApiProfileServiceError, ContextService, FileServiceError,
-        ProjectService, ProjectServiceError, PromptGenerationService, RunExecutionService,
-        RunPreparationInput, RunResultService, RunResultServiceError, RunService, ScanService,
+        retry_delay, timestamp_now, wait_for_retry, ApiProfileService, ApiProfileServiceError,
+        ContextService, FileServiceError, ProjectService, ProjectServiceError,
+        PromptGenerationService, RunExecutionService, RunPreparationInput, RunResultService,
+        RunResultServiceError, RunService, ScanService, TaskRetryError,
     };
 
     static NEXT_TEST_DIRECTORY_ID: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn retry_delay_honors_retry_after_and_bounds_backoff_jitter() {
+        assert_eq!(retry_delay(0, Some(7)), Duration::from_secs(7));
+        assert!((Duration::from_secs(4)..=Duration::from_secs(6)).contains(&retry_delay(0, None)));
+        assert!((Duration::from_secs(8)..=Duration::from_secs(12)).contains(&retry_delay(1, None)));
+        assert!((Duration::from_secs(16)..=Duration::from_secs(24)).contains(&retry_delay(9, None)));
+    }
+
+    #[tokio::test]
+    async fn retry_wait_stops_immediately_after_cancellation() {
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+
+        assert!(!wait_for_retry(Duration::from_mins(1), &cancellation).await);
+    }
+
+    #[tokio::test]
+    async fn new_projects_default_to_three_concurrent_requests() {
+        let database = Database::open_in_memory()
+            .await
+            .expect("database should open");
+        let path = temporary_directory("default-concurrency");
+
+        let project = ProjectService::new(&database)
+            .add_project(&path)
+            .await
+            .expect("project should add")
+            .project;
+
+        assert_eq!(project.execution_defaults.concurrency, 3);
+        let _ = fs::remove_dir_all(path);
+    }
+
+    struct TestProviderResponse {
+        status: String,
+        headers: Vec<(String, String)>,
+        body: String,
+    }
+
+    impl TestProviderResponse {
+        fn new(status: &str, body: &str) -> Self {
+            Self {
+                status: status.into(),
+                headers: Vec::new(),
+                body: body.into(),
+            }
+        }
+
+        fn with_header(mut self, name: &str, value: &str) -> Self {
+            self.headers.push((name.into(), value.into()));
+            self
+        }
+    }
 
     fn temporary_directory(name: &str) -> PathBuf {
         let sequence = NEXT_TEST_DIRECTORY_ID.fetch_add(1, Ordering::Relaxed);
@@ -2589,34 +2882,83 @@ mod tests {
         path
     }
 
-    async fn provider_server(
-        status: &str,
-        body: &str,
+    async fn provider_server_sequence(
+        responses: Vec<TestProviderResponse>,
     ) -> (String, std::sync::mpsc::Receiver<Vec<u8>>) {
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .await
             .expect("provider server should bind");
         let address = listener.local_addr().expect("provider address");
-        let status = status.to_owned();
-        let body = body.to_owned();
         let (request_sender, request_receiver) = std::sync::mpsc::channel();
         tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.expect("provider request");
-            let mut request = [0_u8; 4096];
-            let request_size = tokio::io::AsyncReadExt::read(&mut stream, &mut request)
-                .await
-                .expect("provider request should be readable");
-            let _ = request_sender.send(request[..request_size].to_vec());
-            let response = format!(
-                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nContent-Type: application/json\r\n\r\n{body}",
-                body.len()
-            );
-            stream
-                .write_all(response.as_bytes())
-                .await
-                .expect("provider response should be written");
+            for response in responses {
+                let (mut stream, _) = listener.accept().await.expect("provider request");
+                let mut request = [0_u8; 4096];
+                let request_size = tokio::io::AsyncReadExt::read(&mut stream, &mut request)
+                    .await
+                    .expect("provider request should be readable");
+                let _ = request_sender.send(request[..request_size].to_vec());
+                let headers =
+                    response
+                        .headers
+                        .iter()
+                        .fold(String::new(), |mut headers, (name, value)| {
+                            headers.push_str(name);
+                            headers.push_str(": ");
+                            headers.push_str(value);
+                            headers.push_str("\r\n");
+                            headers
+                        });
+                let raw_response = format!(
+                    "HTTP/1.1 {}\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n{}\r\n{}",
+                    response.status,
+                    response.body.len(),
+                    headers,
+                    response.body
+                );
+                stream
+                    .write_all(raw_response.as_bytes())
+                    .await
+                    .expect("provider response should be written");
+            }
         });
         (format!("http://{address}/v1"), request_receiver)
+    }
+
+    async fn delayed_provider_server(response_count: usize) -> (String, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("provider server should bind");
+        let address = listener.local_addr().expect("provider address");
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let max_in_flight = Arc::new(AtomicUsize::new(0));
+        let server_in_flight = in_flight.clone();
+        let server_max_in_flight = max_in_flight.clone();
+        tokio::spawn(async move {
+            for _ in 0..response_count {
+                let (mut stream, _) = listener.accept().await.expect("provider request");
+                let request_in_flight = server_in_flight.clone();
+                let request_max_in_flight = server_max_in_flight.clone();
+                tokio::spawn(async move {
+                    let mut request = [0_u8; 4096];
+                    tokio::io::AsyncReadExt::read(&mut stream, &mut request)
+                        .await
+                        .expect("provider request should be readable");
+                    let current = request_in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                    request_max_in_flight.fetch_max(current, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                    let body = r##"{"id":"resp-concurrent","output_text":"# Result"}"##;
+                    let raw_response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(raw_response.as_bytes()).await;
+                    request_in_flight.fetch_sub(1, Ordering::SeqCst);
+                });
+            }
+        });
+        (format!("http://{address}/v1"), max_in_flight)
     }
 
     async fn execution_fixture(
@@ -2631,10 +2973,33 @@ mod tests {
         PathBuf,
         std::sync::mpsc::Receiver<Vec<u8>>,
     ) {
+        execution_fixture_sequence(
+            vec![TestProviderResponse::new(status, body)],
+            0,
+            output_blocked,
+        )
+        .await
+    }
+
+    async fn execution_fixture_sequence(
+        responses: Vec<TestProviderResponse>,
+        retry_count_per_profile: u8,
+        output_blocked: bool,
+    ) -> (
+        Database,
+        batch_code_analyzer_domain::Run,
+        OpenAiResponsesProvider,
+        Arc<MemorySecretStore>,
+        PathBuf,
+        std::sync::mpsc::Receiver<Vec<u8>>,
+    ) {
         let database = Database::open_in_memory()
             .await
             .expect("database should open");
-        let path = temporary_directory(if status.starts_with("200") {
+        let starts_successful = responses
+            .first()
+            .is_some_and(|response| response.status.starts_with("200"));
+        let path = temporary_directory(if starts_successful {
             if output_blocked {
                 "run-execution-output-failure"
             } else {
@@ -2649,6 +3014,7 @@ mod tests {
             .await
             .expect("project should add")
             .project;
+        project.execution_defaults.retry_count_per_profile = retry_count_per_profile;
         let output_path_file = path.join("output-blocker");
         if output_blocked {
             fs::write(
@@ -2658,7 +3024,7 @@ mod tests {
             .expect("output blocker should be created");
             project.output_root = Some(output_path_file.to_string_lossy().into_owned());
         }
-        let (base_url, request_receiver) = provider_server(status, body).await;
+        let (base_url, request_receiver) = provider_server_sequence(responses).await;
         let profile = ApiProfileService::new(&database)
             .save(None, "Test Profile".into(), base_url, Some("gpt-5".into()))
             .await
@@ -2703,6 +3069,178 @@ mod tests {
         (database, run, provider, secrets, path, request_receiver)
     }
 
+    async fn concurrent_execution_fixture(
+        concurrency: u16,
+    ) -> (
+        Database,
+        batch_code_analyzer_domain::Run,
+        OpenAiResponsesProvider,
+        Arc<MemorySecretStore>,
+        PathBuf,
+        Arc<AtomicUsize>,
+    ) {
+        let database = Database::open_in_memory()
+            .await
+            .expect("database should open");
+        let path = temporary_directory(&format!("run-concurrency-{concurrency}"));
+        for index in 1..=3 {
+            fs::write(
+                path.join(format!("file-{index}.rs")),
+                format!("fn file_{index}() {{}}\n"),
+            )
+            .expect("source file should be created");
+        }
+        let mut project = ProjectService::new(&database)
+            .add_project(&path)
+            .await
+            .expect("project should add")
+            .project;
+        project.execution_defaults.concurrency = concurrency;
+        let (base_url, max_in_flight) = delayed_provider_server(3).await;
+        let profile = ApiProfileService::new(&database)
+            .save(
+                None,
+                "Concurrent Profile".into(),
+                base_url,
+                Some("gpt-5".into()),
+            )
+            .await
+            .expect("profile should save");
+        let secrets = Arc::new(MemorySecretStore::new());
+        let secret_ref = secrets
+            .put(SecretValue::new("sk-test-key"))
+            .await
+            .expect("secret should be stored");
+        ApiProfileService::new(&database)
+            .set_secret_ref(&profile.id, Some(secret_ref.to_string()))
+            .await
+            .expect("profile secret should be linked");
+        project.api_routing.primary_profile_id = Some(profile.id);
+        database
+            .repository()
+            .update_project(
+                &project,
+                batch_code_analyzer_persistence::ProjectRowMetadata {
+                    canonical_source_directory: path.to_string_lossy().into_owned(),
+                    created_at: timestamp_now(),
+                    updated_at: timestamp_now(),
+                },
+            )
+            .await
+            .expect("project settings should save");
+        let scan = ScanService::scan_project(&project, ScanCancellation::new())
+            .expect("scan should complete");
+        ScanService::new(&database)
+            .persist_scan(&project.id, scan)
+            .await
+            .expect("scan should persist");
+        let run = RunService::new(&database)
+            .create(&project.id, &RunPreparationInput::default())
+            .await
+            .expect("run should create");
+        let provider = OpenAiResponsesProvider::with_client(
+            reqwest::Client::new(),
+            secrets.clone(),
+            Duration::from_secs(2),
+        );
+        (database, run, provider, secrets, path, max_in_flight)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn run_execution_dispatches_three_tasks_concurrently() {
+        let (database, run, provider, _secrets, path, max_in_flight) =
+            concurrent_execution_fixture(3).await;
+
+        let completed = RunExecutionService::new(&database, provider)
+            .execute(&run.id)
+            .await
+            .expect("run should execute");
+
+        assert_eq!(completed.stats.succeeded, 3);
+        assert_eq!(max_in_flight.load(Ordering::SeqCst), 3);
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn run_execution_never_exceeds_frozen_concurrency_limit() {
+        let (database, run, provider, _secrets, path, max_in_flight) =
+            concurrent_execution_fixture(2).await;
+
+        let completed = RunExecutionService::new(&database, provider)
+            .execute(&run.id)
+            .await
+            .expect("run should execute");
+
+        assert_eq!(completed.stats.succeeded, 3);
+        assert_eq!(max_in_flight.load(Ordering::SeqCst), 2);
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn run_cancellation_stops_dispatching_queued_tasks() {
+        let (database, run, provider, _secrets, path, max_in_flight) =
+            concurrent_execution_fixture(2).await;
+        let cancellation = CancellationToken::new();
+        let execution_cancellation = cancellation.clone();
+        let execution_database = database.clone();
+        let run_id = run.id.clone();
+        let execution = tokio::spawn(async move {
+            RunExecutionService::new(&execution_database, provider)
+                .execute_with_cancellation(&run_id, execution_cancellation)
+                .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while max_in_flight.load(Ordering::SeqCst) < 2 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("two requests should enter flight");
+        let cancelled = RunService::new(&database)
+            .cancel(&run.id)
+            .await
+            .expect("run should cancel");
+        cancellation.cancel();
+        let returned = execution
+            .await
+            .expect("execution task should join")
+            .expect("cancelled execution should return the persisted run");
+
+        assert_eq!(
+            cancelled.status,
+            batch_code_analyzer_domain::RunStatus::Cancelled
+        );
+        assert_eq!(
+            returned.status,
+            batch_code_analyzer_domain::RunStatus::Cancelled
+        );
+        assert_eq!(max_in_flight.load(Ordering::SeqCst), 2);
+        let tasks = database.repository().list_tasks(&run.id).await.unwrap();
+        assert!(!tasks.iter().any(|task| matches!(
+            task.status,
+            batch_code_analyzer_domain::TaskStatus::Queued
+                | batch_code_analyzer_domain::TaskStatus::Running
+        )));
+        assert_eq!(
+            tasks
+                .iter()
+                .filter(|task| {
+                    task.status == batch_code_analyzer_domain::TaskStatus::Interrupted
+                })
+                .count(),
+            2
+        );
+        assert_eq!(
+            tasks
+                .iter()
+                .filter(|task| task.status == batch_code_analyzer_domain::TaskStatus::Cancelled)
+                .count(),
+            1
+        );
+        let _ = fs::remove_dir_all(path);
+    }
+
     #[tokio::test]
     async fn run_execution_persists_successful_attempt_and_result() {
         let (database, run, provider, _secrets, path, _request_receiver) = execution_fixture(
@@ -2743,7 +3281,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_execution_persists_retryable_provider_failure() {
+    async fn run_execution_marks_exhausted_retryable_failure_terminal() {
         let (database, run, provider, _secrets, path, _request_receiver) = execution_fixture(
             "500 Internal Server Error",
             r#"{"error":{"message":"temporary"}}"#,
@@ -2772,11 +3310,283 @@ mod tests {
         assert_eq!(attempts.len(), 1);
         assert_eq!(
             attempts[0].status,
-            batch_code_analyzer_domain::AttemptStatus::FailedRetryable
+            batch_code_analyzer_domain::AttemptStatus::FailedTerminal
+        );
+        assert_eq!(attempts[0].http_status, Some(500));
+        assert_eq!(
+            attempts[0].error.as_ref().map(|error| error.retryable),
+            Some(true)
         );
         assert_eq!(
             attempts[0].error.as_ref().map(|error| error.code.as_str()),
             Some("provider_server_error")
+        );
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[tokio::test]
+    async fn run_execution_retries_retryable_provider_failure_and_succeeds() {
+        let responses = vec![
+            TestProviderResponse::new(
+                "429 Too Many Requests",
+                r#"{"error":{"message":"slow down"}}"#,
+            )
+            .with_header("Retry-After", "0"),
+            TestProviderResponse::new(
+                "200 OK",
+                r##"{"id":"resp-retry","output_text":"# Retried"}"##,
+            ),
+        ];
+        let (database, run, provider, _secrets, path, _request_receiver) =
+            execution_fixture_sequence(responses, 1, false).await;
+
+        let completed = RunExecutionService::new(&database, provider)
+            .execute(&run.id)
+            .await
+            .expect("retry should complete");
+
+        assert_eq!(
+            completed.status,
+            batch_code_analyzer_domain::RunStatus::Completed
+        );
+        let task = database.repository().list_tasks(&run.id).await.unwrap()[0].clone();
+        let attempts = database.repository().list_attempts(&task.id).await.unwrap();
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(
+            attempts[0].status,
+            batch_code_analyzer_domain::AttemptStatus::FailedRetryable
+        );
+        assert_eq!(attempts[0].http_status, Some(429));
+        assert_eq!(
+            attempts[1].status,
+            batch_code_analyzer_domain::AttemptStatus::Succeeded
+        );
+        assert_eq!(
+            attempts[1].retry_reason.as_deref(),
+            Some("provider_rate_limited")
+        );
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[tokio::test]
+    async fn run_execution_marks_final_attempt_terminal_after_retry_exhaustion() {
+        let responses = vec![
+            TestProviderResponse::new(
+                "429 Too Many Requests",
+                r#"{"error":{"message":"slow down"}}"#,
+            )
+            .with_header("Retry-After", "0"),
+            TestProviderResponse::new(
+                "429 Too Many Requests",
+                r#"{"error":{"message":"still slow"}}"#,
+            )
+            .with_header("Retry-After", "0"),
+        ];
+        let (database, run, provider, _secrets, path, _request_receiver) =
+            execution_fixture_sequence(responses, 1, false).await;
+
+        let completed = RunExecutionService::new(&database, provider)
+            .execute(&run.id)
+            .await
+            .expect("retry exhaustion should be persisted");
+
+        assert_eq!(
+            completed.status,
+            batch_code_analyzer_domain::RunStatus::CompletedWithErrors
+        );
+        let task = database.repository().list_tasks(&run.id).await.unwrap()[0].clone();
+        let attempts = database.repository().list_attempts(&task.id).await.unwrap();
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(
+            attempts[0].status,
+            batch_code_analyzer_domain::AttemptStatus::FailedRetryable
+        );
+        assert_eq!(
+            attempts[1].status,
+            batch_code_analyzer_domain::AttemptStatus::FailedTerminal
+        );
+        assert_eq!(
+            attempts[1].error.as_ref().map(|error| error.retryable),
+            Some(true)
+        );
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[tokio::test]
+    async fn manual_retry_reopens_run_and_appends_attempt_using_frozen_task() {
+        let responses = vec![
+            TestProviderResponse::new(
+                "429 Too Many Requests",
+                r#"{"error":{"message":"slow down"}}"#,
+            )
+            .with_header("Retry-After", "0"),
+            TestProviderResponse::new(
+                "200 OK",
+                r##"{"id":"resp-manual-retry","output_text":"# Manual retry"}"##,
+            ),
+        ];
+        let (database, run, provider, _secrets, path, _request_receiver) =
+            execution_fixture_sequence(responses, 0, false).await;
+        let first_completion = RunExecutionService::new(&database, provider.clone())
+            .execute(&run.id)
+            .await
+            .expect("first execution should persist failure");
+        assert_eq!(
+            first_completion.status,
+            batch_code_analyzer_domain::RunStatus::CompletedWithErrors
+        );
+        let failed_task = database.repository().list_tasks(&run.id).await.unwrap()[0].clone();
+
+        let (reopened_run, queued_task) = RunService::new(&database)
+            .retry_failed_task(&run.project_id, &failed_task.id)
+            .await
+            .expect("failed task should requeue");
+        assert_eq!(
+            reopened_run.status,
+            batch_code_analyzer_domain::RunStatus::Running
+        );
+        assert_eq!(
+            queued_task.status,
+            batch_code_analyzer_domain::TaskStatus::Queued
+        );
+        assert_eq!(queued_task.prompt_snapshot, failed_task.prompt_snapshot);
+        assert_eq!(queued_task.model_snapshot, failed_task.model_snapshot);
+
+        let completed = RunExecutionService::new(&database, provider)
+            .execute(&run.id)
+            .await
+            .expect("manual retry should execute");
+        assert_eq!(
+            completed.status,
+            batch_code_analyzer_domain::RunStatus::Completed
+        );
+        let task = database.repository().list_tasks(&run.id).await.unwrap()[0].clone();
+        let attempts = database.repository().list_attempts(&task.id).await.unwrap();
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0].sequence, 1);
+        assert_eq!(attempts[1].sequence, 2);
+        assert_eq!(attempts[1].retry_reason.as_deref(), Some("manual_retry"));
+        assert_eq!(
+            attempts[1].status,
+            batch_code_analyzer_domain::AttemptStatus::Succeeded
+        );
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[tokio::test]
+    async fn manual_retry_does_not_send_when_source_changed_after_original_run() {
+        let response = TestProviderResponse::new(
+            "429 Too Many Requests",
+            r#"{"error":{"message":"slow down"}}"#,
+        )
+        .with_header("Retry-After", "0");
+        let (database, run, provider, _secrets, path, _request_receiver) =
+            execution_fixture_sequence(vec![response], 0, false).await;
+        RunExecutionService::new(&database, provider.clone())
+            .execute(&run.id)
+            .await
+            .expect("first failure should persist");
+        let failed_task = database.repository().list_tasks(&run.id).await.unwrap()[0].clone();
+        RunService::new(&database)
+            .retry_failed_task(&run.project_id, &failed_task.id)
+            .await
+            .expect("failed task should requeue");
+        fs::write(path.join("main.rs"), "fn changed() {}\n")
+            .expect("source should change after the original Run");
+
+        let completed = RunExecutionService::new(&database, provider)
+            .execute(&run.id)
+            .await
+            .expect("source change should settle without provider dispatch");
+
+        assert_eq!(
+            completed.status,
+            batch_code_analyzer_domain::RunStatus::CompletedWithErrors
+        );
+        assert_eq!(completed.stats.failed, 0);
+        assert_eq!(completed.stats.source_changed, 1);
+        let task = database.repository().list_tasks(&run.id).await.unwrap()[0].clone();
+        assert_eq!(
+            task.status,
+            batch_code_analyzer_domain::TaskStatus::SourceChanged
+        );
+        assert_eq!(
+            database
+                .repository()
+                .list_attempts(&task.id)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[tokio::test]
+    async fn manual_retry_rejects_non_retryable_and_cross_project_cases() {
+        let (database, run, provider, _secrets, path, _request_receiver) = execution_fixture(
+            "400 Bad Request",
+            r#"{"error":{"message":"invalid"}}"#,
+            false,
+        )
+        .await;
+        RunExecutionService::new(&database, provider)
+            .execute(&run.id)
+            .await
+            .expect("non-retryable failure should persist");
+        let task = database.repository().list_tasks(&run.id).await.unwrap()[0].clone();
+        let cannot_retry = RunService::new(&database)
+            .retry_failed_task(&run.project_id, &task.id)
+            .await;
+        assert!(matches!(cannot_retry, Err(TaskRetryError::CannotRetry)));
+
+        let other_path = temporary_directory("retry-other-project");
+        let other_project = ProjectService::new(&database)
+            .add_project(&other_path)
+            .await
+            .expect("other project should add")
+            .project;
+        let cross_project = RunService::new(&database)
+            .retry_failed_task(&other_project.id, &task.id)
+            .await;
+        assert!(matches!(cross_project, Err(TaskRetryError::NotFound)));
+        let _ = fs::remove_dir_all(other_path);
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[tokio::test]
+    async fn manual_retry_rejects_when_another_run_is_active() {
+        let response = TestProviderResponse::new(
+            "429 Too Many Requests",
+            r#"{"error":{"message":"slow down"}}"#,
+        )
+        .with_header("Retry-After", "0");
+        let (database, run, provider, _secrets, path, _request_receiver) =
+            execution_fixture_sequence(vec![response], 0, false).await;
+        RunExecutionService::new(&database, provider)
+            .execute(&run.id)
+            .await
+            .expect("retryable failure should persist");
+        let task = database.repository().list_tasks(&run.id).await.unwrap()[0].clone();
+        let active_run = RunService::new(&database)
+            .create(&run.project_id, &RunPreparationInput::default())
+            .await
+            .expect("a different active run should create");
+
+        let conflict = RunService::new(&database)
+            .retry_failed_task(&run.project_id, &task.id)
+            .await;
+
+        assert!(matches!(conflict, Err(TaskRetryError::ActiveRun)));
+        assert_eq!(
+            database
+                .repository()
+                .get_run(&active_run.id)
+                .await
+                .unwrap()
+                .expect("active run should remain")
+                .status,
+            batch_code_analyzer_domain::RunStatus::Running
         );
         let _ = fs::remove_dir_all(path);
     }
@@ -2804,7 +3614,7 @@ mod tests {
         assert_eq!(attempts.len(), 1);
         assert_eq!(
             attempts[0].status,
-            batch_code_analyzer_domain::AttemptStatus::FailedRetryable
+            batch_code_analyzer_domain::AttemptStatus::FailedTerminal
         );
         assert_eq!(
             attempts[0].error.as_ref().map(|error| error.code.as_str()),

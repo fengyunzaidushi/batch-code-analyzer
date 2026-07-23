@@ -1,6 +1,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    sync::Arc,
     time::Duration,
 };
 
@@ -15,6 +16,7 @@ use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
     Sqlite, SqliteConnection, SqlitePool, Transaction,
 };
+use tokio::sync::{Mutex, OwnedMutexGuard};
 
 use crate::PersistenceError;
 
@@ -102,6 +104,7 @@ impl DatabaseStartup {
 pub struct Database {
     pool: SqlitePool,
     schema_version: u32,
+    write_gate: Arc<Mutex<()>>,
 }
 
 impl Database {
@@ -187,13 +190,17 @@ impl Database {
     /// Returns `persistence_transaction_failed` if `SQLite` cannot begin the
     /// transaction.
     pub async fn begin_write(&self) -> Result<WriteTransaction<'_>, PersistenceError> {
+        let write_guard = self.write_gate.clone().lock_owned().await;
         let transaction = self
             .pool
             .begin()
             .await
             .map_err(|_| PersistenceError::TransactionFailed)?;
 
-        Ok(WriteTransaction { transaction })
+        Ok(WriteTransaction {
+            transaction,
+            _write_guard: write_guard,
+        })
     }
 
     /// Applies a documented Run transition atomically after loading the
@@ -270,12 +277,14 @@ impl Database {
         Ok(Self {
             pool,
             schema_version,
+            write_gate: Arc::new(Mutex::new(())),
         })
     }
 }
 
 pub struct WriteTransaction<'database> {
     transaction: Transaction<'database, Sqlite>,
+    _write_guard: OwnedMutexGuard<()>,
 }
 
 impl WriteTransaction<'_> {
@@ -457,7 +466,7 @@ mod tests {
     use std::{
         fs,
         path::{Path, PathBuf},
-        time::{SystemTime, UNIX_EPOCH},
+        time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
     use super::{
@@ -466,6 +475,7 @@ mod tests {
     };
     use batch_code_analyzer_domain::{RunId, RunStatus, RunTransition};
     use sqlx::{query, query_scalar};
+    use tokio::sync::oneshot;
 
     const TIMESTAMP: &str = "2026-07-17T10:00:00+08:00";
 
@@ -531,6 +541,54 @@ mod tests {
         assert_eq!(foreign_keys, 1);
         assert_eq!(busy_timeout, 5_000);
 
+        drop(database);
+        remove_temporary_database(&path);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn disk_database_serializes_write_transactions_across_clones() {
+        let path = temporary_database_path("write-gate");
+        let database = Database::open(&path)
+            .await
+            .expect("disk database should initialize");
+        let first = database
+            .begin_write()
+            .await
+            .expect("first write transaction should begin");
+        let second_database = database.clone();
+        let (acquired_sender, mut acquired_receiver) = oneshot::channel();
+        let (release_sender, release_receiver) = oneshot::channel();
+        let second = tokio::spawn(async move {
+            let transaction = second_database
+                .begin_write()
+                .await
+                .expect("second write transaction should eventually begin");
+            let _ = acquired_sender.send(());
+            let _ = release_receiver.await;
+            transaction
+                .rollback()
+                .await
+                .expect("second transaction should roll back");
+        });
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut acquired_receiver)
+                .await
+                .is_err(),
+            "a second write transaction must wait for the shared write gate"
+        );
+        first
+            .rollback()
+            .await
+            .expect("first transaction should roll back");
+        tokio::time::timeout(Duration::from_secs(1), &mut acquired_receiver)
+            .await
+            .expect("second transaction should acquire after release")
+            .expect("second transaction should report acquisition");
+        let _ = release_sender.send(());
+        second.await.expect("second transaction task should join");
+
+        database.pool.close().await;
         drop(database);
         remove_temporary_database(&path);
     }

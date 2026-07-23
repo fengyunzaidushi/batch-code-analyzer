@@ -1083,6 +1083,254 @@ impl Repository<'_> {
         finish_write(transaction, result).await
     }
 
+    /// Atomically reopens a completed Run and requeues one retryable failed Task.
+    ///
+    /// The latest Attempt remains attached to the Task until the executor
+    /// creates the next append-only Attempt. This method never overwrites
+    /// Attempt history.
+    ///
+    /// # Errors
+    ///
+    /// Returns `task_cannot_retry` when the Task, latest Attempt, or parent Run
+    /// is not eligible, and `run_active_exists` when another Run is active.
+    pub async fn retry_failed_task(
+        &self,
+        task_id: &TaskId,
+    ) -> Result<(Run, Task), PersistenceError> {
+        let mut transaction = self.database.begin_write().await?;
+        let result = async {
+            let mut task = load_task(&mut transaction, task_id.as_str())
+                .await?
+                .ok_or_else(|| task_not_found(task_id.as_str()))?;
+            let latest_attempt_id =
+                task.latest_attempt_id
+                    .as_ref()
+                    .ok_or(PersistenceError::StateTransition {
+                        code: "task_cannot_retry",
+                    })?;
+            let latest_attempt = load_attempt(&mut transaction, latest_attempt_id.as_str())
+                .await?
+                .ok_or(PersistenceError::StateTransition {
+                    code: "task_cannot_retry",
+                })?;
+            if latest_attempt.task_id != task.id
+                || !latest_attempt
+                    .error
+                    .as_ref()
+                    .is_some_and(|error| error.retryable)
+            {
+                return Err(PersistenceError::StateTransition {
+                    code: "task_cannot_retry",
+                });
+            }
+
+            let mut run = load_run(&mut transaction, task.run_id.as_str())
+                .await?
+                .ok_or_else(|| run_not_found(task.run_id.as_str()))?;
+            let next_task_status =
+                TaskStateMachine::transition(task.status, TaskTransition::ManualRetry).map_err(
+                    |_| PersistenceError::StateTransition {
+                        code: "task_cannot_retry",
+                    },
+                )?;
+            let next_run_status =
+                RunStateMachine::transition(run.status, RunTransition::ManualRetryRequested)
+                    .map_err(|_| PersistenceError::StateTransition {
+                        code: "task_cannot_retry",
+                    })?;
+
+            let running = status_string(RunStatus::Running)?;
+            let pausing = status_string(RunStatus::Pausing)?;
+            let paused = status_string(RunStatus::Paused)?;
+            let cancelling = status_string(RunStatus::Cancelling)?;
+            let active: Option<String> = sqlx::query_scalar(
+                "SELECT id FROM runs
+                 WHERE id <> ? AND status IN (?, ?, ?, ?) LIMIT 1",
+            )
+            .bind(run.id.as_str())
+            .bind(running)
+            .bind(pausing)
+            .bind(paused)
+            .bind(cancelling)
+            .fetch_optional(transaction.connection())
+            .await
+            .map_err(|_| PersistenceError::TransactionFailed)?;
+            if active.is_some() {
+                return Err(PersistenceError::StateTransition {
+                    code: "run_active_exists",
+                });
+            }
+
+            task.status = next_task_status;
+            task.started_at = None;
+            task.completed_at = None;
+            run.status = next_run_status;
+            run.completed_at = None;
+            sqlx::query(
+                "UPDATE tasks SET status = ?, started_at = NULL, completed_at = NULL
+                 WHERE id = ?",
+            )
+            .bind(status_string(task.status)?)
+            .bind(task.id.as_str())
+            .execute(transaction.connection())
+            .await
+            .map_err(|_| PersistenceError::TransactionFailed)?;
+            sqlx::query("UPDATE runs SET status = ?, completed_at = NULL WHERE id = ?")
+                .bind(status_string(run.status)?)
+                .bind(run.id.as_str())
+                .execute(transaction.connection())
+                .await
+                .map_err(|_| PersistenceError::TransactionFailed)?;
+
+            let stats =
+                recompute_run_stats_in_transaction(&mut transaction, run.id.as_str()).await?;
+            update_run_stats(&mut transaction, run.id.as_str(), &stats).await?;
+            run.stats = stats;
+            Ok((run, task))
+        }
+        .await;
+        finish_write(transaction, result).await
+    }
+
+    /// Marks a claimed Task as source-changed without creating an Attempt.
+    ///
+    /// This is used by the final pre-dispatch hash check, before any provider
+    /// request exists to record.
+    ///
+    /// # Errors
+    ///
+    /// Returns a state error when the Task or parent Run is no longer active.
+    pub async fn mark_running_task_source_changed(
+        &self,
+        task_id: &TaskId,
+        completed_at: &Rfc3339Timestamp,
+    ) -> Result<Task, PersistenceError> {
+        let mut transaction = self.database.begin_write().await?;
+        let result = async {
+            let mut task = load_task(&mut transaction, task_id.as_str())
+                .await?
+                .ok_or_else(|| task_not_found(task_id.as_str()))?;
+            let run = load_run(&mut transaction, task.run_id.as_str())
+                .await?
+                .ok_or_else(|| run_not_found(task.run_id.as_str()))?;
+            if run.status != RunStatus::Running {
+                return Err(PersistenceError::StateTransition {
+                    code: "run_not_active",
+                });
+            }
+            task.status =
+                TaskStateMachine::transition(task.status, TaskTransition::SourceHashChanged)
+                    .map_err(|error| PersistenceError::StateTransition { code: error.code() })?;
+            task.completed_at = Some(completed_at.clone());
+            let affected = sqlx::query(
+                "UPDATE tasks SET status = ?, completed_at = ?
+                 WHERE id = ? AND status = ?",
+            )
+            .bind(status_string(task.status)?)
+            .bind(completed_at.as_str())
+            .bind(task.id.as_str())
+            .bind(status_string(TaskStatus::Running)?)
+            .execute(transaction.connection())
+            .await
+            .map_err(|_| PersistenceError::TransactionFailed)?
+            .rows_affected();
+            if affected == 0 {
+                return Err(PersistenceError::StateTransition {
+                    code: "task_invalid_transition",
+                });
+            }
+            let stats =
+                recompute_run_stats_in_transaction(&mut transaction, task.run_id.as_str()).await?;
+            update_run_stats(&mut transaction, task.run_id.as_str(), &stats).await?;
+            Ok(task)
+        }
+        .await;
+        finish_write(transaction, result).await
+    }
+
+    /// Interrupts an active Run and atomically settles every claimed Task.
+    ///
+    /// Queued Tasks remain queued for an explicit recovery decision. Any
+    /// created or dispatched Attempt owned by a running Task is marked as
+    /// outcome-unknown before the Task and Run become interrupted.
+    ///
+    /// # Errors
+    ///
+    /// Returns `run_not_active` for a terminal Run and a persistence error
+    /// when the transition cannot be committed.
+    pub async fn interrupt_run(
+        &self,
+        run_id: &RunId,
+        completed_at: &Rfc3339Timestamp,
+    ) -> Result<Run, PersistenceError> {
+        let running = status_string(TaskStatus::Running)?;
+        let interrupted_task = status_string(
+            TaskStateMachine::transition(TaskStatus::Running, TaskTransition::ProcessInterrupted)
+                .map_err(|error| PersistenceError::StateTransition { code: error.code() })?,
+        )?;
+        let interrupted_attempt =
+            status_string(batch_code_analyzer_domain::AttemptStatus::InterruptedUnknown)?;
+        let created_attempt = status_string(batch_code_analyzer_domain::AttemptStatus::Created)?;
+        let dispatched_attempt =
+            status_string(batch_code_analyzer_domain::AttemptStatus::Dispatched)?;
+        let mut transaction = self.database.begin_write().await?;
+        let result = async {
+            let mut run = load_run(&mut transaction, run_id.as_str())
+                .await?
+                .ok_or_else(|| run_not_found(run_id.as_str()))?;
+            run.status = RunStateMachine::transition(run.status, RunTransition::ProcessInterrupted)
+                .map_err(|error| PersistenceError::StateTransition { code: error.code() })?;
+
+            sqlx::query(
+                "UPDATE attempts SET status = ?, finished_at = ?
+                 WHERE task_id IN (
+                    SELECT id FROM tasks WHERE run_id = ? AND status = ?
+                 ) AND status IN (?, ?)",
+            )
+            .bind(&interrupted_attempt)
+            .bind(completed_at.as_str())
+            .bind(run_id.as_str())
+            .bind(&running)
+            .bind(&created_attempt)
+            .bind(&dispatched_attempt)
+            .execute(transaction.connection())
+            .await
+            .map_err(|_| PersistenceError::TransactionFailed)?;
+
+            sqlx::query(
+                "UPDATE tasks SET status = ?, completed_at = ?
+                 WHERE run_id = ? AND status = ?",
+            )
+            .bind(&interrupted_task)
+            .bind(completed_at.as_str())
+            .bind(run_id.as_str())
+            .bind(&running)
+            .execute(transaction.connection())
+            .await
+            .map_err(|_| PersistenceError::TransactionFailed)?;
+
+            run.completed_at = Some(completed_at.clone());
+            run.stats =
+                recompute_run_stats_in_transaction(&mut transaction, run_id.as_str()).await?;
+            sqlx::query(
+                "UPDATE runs SET status = ?, completed_at = ?, stats_json = ? WHERE id = ?",
+            )
+            .bind(status_string(run.status)?)
+            .bind(completed_at.as_str())
+            .bind(
+                serde_json::to_string(&run.stats)
+                    .map_err(|_| PersistenceError::InvalidStoredState)?,
+            )
+            .bind(run_id.as_str())
+            .execute(transaction.connection())
+            .await
+            .map_err(|_| PersistenceError::TransactionFailed)?;
+            Ok(run)
+        }
+        .await;
+        finish_write(transaction, result).await
+    }
+
     /// Cancels a Run and atomically settles every task that has not reached a
     /// successful/failed terminal state. Queued tasks are cancelled; tasks
     /// already claimed by the executor become interrupted because the remote

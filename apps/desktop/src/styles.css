@@ -985,6 +985,25 @@ button:disabled {
   color: #164c7b;
   text-decoration: underline;
 }
+.text-button:disabled {
+  color: #9aa6b1;
+  cursor: not-allowed;
+  text-decoration: none;
+}
+.retry-task-button {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+}
+.is-spinning {
+  animation: spin 900ms linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
 .attempt-detail-panel {
   display: grid;
   gap: 12px;
