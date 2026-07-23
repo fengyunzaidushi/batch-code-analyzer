@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   ApiProfileSaveRequest,
   ApiProfileSummaryDto,
@@ -61,9 +61,17 @@ import {
   previewRun,
   readResult,
   retryTask,
+  retryTasks,
 } from "../ipc/runs";
 import { generatePrompt } from "../ipc/prompt";
 import { AppShell, type ShellHealthState, type ShellProject } from "./AppShell";
+
+interface RetryQueueItem {
+  projectId: string;
+  projectName: string;
+  runId: string;
+  taskId: string;
+}
 
 export function App() {
   const [healthState, setHealthState] = useState<ShellHealthState>("checking");
@@ -114,7 +122,15 @@ export function App() {
   const [resultPreview, setResultPreview] = useState<ResultReadResponse | null>(
     null,
   );
-  const [retryingTaskId, setRetryingTaskId] = useState<string | null>(null);
+  const [retryingTaskIds, setRetryingTaskIds] = useState<string[]>([]);
+  const [isBatchRetrying, setIsBatchRetrying] = useState(false);
+  const [batchRetryTargetCount, setBatchRetryTargetCount] = useState(0);
+  const retryQueue = useRef<RetryQueueItem[]>([]);
+  const retryingTaskIdSet = useRef(new Set<string>());
+  const retryQueueRunning = useRef(false);
+  const retryQueueRunId = useRef<string | null>(null);
+  const activeRetryTaskId = useRef<string | null>(null);
+  const batchRetryRunning = useRef(false);
 
   const refreshProjects = useCallback(async () => {
     const items = await listProjects();
@@ -810,7 +826,14 @@ export function App() {
   const handleRunCancel = async () => {
     const current = activeRun;
     if (!current?.runId) return;
+    retryQueue.current = [];
+    if (retryQueueRunning.current) {
+      const currentTaskId = activeRetryTaskId.current;
+      retryingTaskIdSet.current = new Set(currentTaskId ? [currentTaskId] : []);
+      setRetryingTaskIds(currentTaskId ? [currentTaskId] : []);
+    }
     setRunError(null);
+    setActiveRun({ ...current, status: "cancelling" });
     try {
       await cancelRun(current.runId);
       setActiveRun(null);
@@ -855,45 +878,143 @@ export function App() {
     }
   };
 
+  const drainRetryQueue = useCallback(async () => {
+    if (retryQueueRunning.current) return;
+    retryQueueRunning.current = true;
+    while (retryQueue.current.length > 0) {
+      const item = retryQueue.current.shift();
+      if (!item) break;
+      activeRetryTaskId.current = item.taskId;
+      setRunResultsError(null);
+      setActiveRun({
+        runId: item.runId,
+        projectId: item.projectId,
+        projectName: item.projectName,
+        status: "running",
+      });
+      const refreshTimer = window.setInterval(() => {
+        void refreshRunTasks(item.projectId, item.runId).catch((error) => {
+          setRunResultsError(safeRunResultsError(error));
+        });
+      }, 1000);
+      try {
+        await retryTask({ projectId: item.projectId, taskId: item.taskId });
+        await refreshRunHistory(item.projectId, item.runId);
+        await refreshRunTasks(item.projectId, item.runId);
+        const detail = await getTask({
+          projectId: item.projectId,
+          taskId: item.taskId,
+        });
+        setTaskDetails((current) => ({
+          ...current,
+          [item.taskId]: detail,
+        }));
+        setSelectedTaskId(item.taskId);
+      } catch (error) {
+        const retryError = safeRunResultsError(error);
+        await refreshRunHistory(item.projectId, item.runId).catch(() => {
+          // Preserve the retry error when refreshing persisted state also fails.
+        });
+        await refreshRunTasks(item.projectId, item.runId).catch(() => {
+          // Preserve the retry error when refreshing persisted state also fails.
+        });
+        setRunResultsError(retryError);
+      } finally {
+        window.clearInterval(refreshTimer);
+        activeRetryTaskId.current = null;
+        retryingTaskIdSet.current.delete(item.taskId);
+        setRetryingTaskIds(Array.from(retryingTaskIdSet.current));
+      }
+    }
+    const completedRunId = retryQueueRunId.current;
+    retryQueueRunning.current = false;
+    retryQueueRunId.current = null;
+    setActiveRun((current) =>
+      current?.runId === completedRunId ? null : current,
+    );
+  }, [refreshRunHistory, refreshRunTasks]);
+
   const handleRetryTask = async (taskId: string) => {
-    if (!selectedProjectId || retryingTaskId || activeRun) return;
+    if (!selectedProjectId || batchRetryRunning.current) return;
     const task = runTasks.find((item) => item.id === taskId);
-    if (!task) return;
+    if (!task || task.status !== "failed") return;
+    if (retryingTaskIdSet.current.has(taskId)) return;
+    if (
+      retryQueueRunId.current !== null &&
+      retryQueueRunId.current !== task.runId
+    ) {
+      return;
+    }
+    if (
+      activeRun &&
+      (activeRun.status !== "running" || retryQueueRunId.current !== task.runId)
+    ) {
+      return;
+    }
     const project = projects.find((item) => item.id === selectedProjectId);
-    setRunResultsError(null);
-    setRetryingTaskId(taskId);
-    setActiveRun({
+    retryQueueRunId.current = task.runId;
+    retryQueue.current.push({
+      projectId: selectedProjectId,
+      projectName: project?.name ?? "当前项目",
       runId: task.runId,
+      taskId,
+    });
+    retryingTaskIdSet.current.add(taskId);
+    setRetryingTaskIds(Array.from(retryingTaskIdSet.current));
+    await drainRetryQueue();
+  };
+
+  const handleRetryTasks = async (taskIds: readonly string[]) => {
+    if (
+      !selectedProjectId ||
+      !selectedRunId ||
+      taskIds.length === 0 ||
+      activeRun ||
+      retryQueueRunning.current ||
+      batchRetryRunning.current
+    ) {
+      return;
+    }
+    const project = projects.find((item) => item.id === selectedProjectId);
+    batchRetryRunning.current = true;
+    setIsBatchRetrying(true);
+    setBatchRetryTargetCount(taskIds.length);
+    setRunResultsError(null);
+    setActiveRun({
+      runId: selectedRunId,
       projectId: selectedProjectId,
       projectName: project?.name ?? "当前项目",
       status: "running",
     });
     const refreshTimer = window.setInterval(() => {
-      void refreshRunTasks(selectedProjectId, task.runId).catch((error) => {
+      void refreshRunTasks(selectedProjectId, selectedRunId).catch((error) => {
         setRunResultsError(safeRunResultsError(error));
       });
     }, 1000);
     try {
-      await retryTask({ projectId: selectedProjectId, taskId });
-      await refreshRunHistory(selectedProjectId, task.runId);
-      await refreshRunTasks(selectedProjectId, task.runId);
-      const detail = await getTask({ projectId: selectedProjectId, taskId });
-      setTaskDetails((current) => ({ ...current, [taskId]: detail }));
-      setSelectedTaskId(taskId);
+      await retryTasks({
+        projectId: selectedProjectId,
+        runId: selectedRunId,
+        taskIds: [...taskIds],
+      });
+      await refreshRunHistory(selectedProjectId, selectedRunId);
+      await refreshRunTasks(selectedProjectId, selectedRunId);
     } catch (error) {
       const retryError = safeRunResultsError(error);
-      await refreshRunHistory(selectedProjectId, task.runId).catch(() => {
+      await refreshRunHistory(selectedProjectId, selectedRunId).catch(() => {
         // Preserve the retry error when refreshing persisted state also fails.
       });
-      await refreshRunTasks(selectedProjectId, task.runId).catch(() => {
+      await refreshRunTasks(selectedProjectId, selectedRunId).catch(() => {
         // Preserve the retry error when refreshing persisted state also fails.
       });
       setRunResultsError(retryError);
     } finally {
       window.clearInterval(refreshTimer);
-      setRetryingTaskId(null);
+      batchRetryRunning.current = false;
+      setIsBatchRetrying(false);
+      setBatchRetryTargetCount(0);
       setActiveRun((current) =>
-        current?.runId === task.runId ? null : current,
+        current?.runId === selectedRunId ? null : current,
       );
     }
   };
@@ -942,8 +1063,11 @@ export function App() {
       onLoadTaskDetail={handleLoadTaskDetail}
       onOpenResult={handleReadResult}
       onRetryTask={handleRetryTask}
+      onRetryTasks={handleRetryTasks}
       onSelectRun={setSelectedRunId}
-      retryingTaskId={retryingTaskId}
+      retryingTaskIds={retryingTaskIds}
+      isBatchRetrying={isBatchRetrying}
+      batchRetryTargetCount={batchRetryTargetCount}
       resultPreview={resultPreview}
       onCloseResultPreview={() => setResultPreview(null)}
       isCreatingRun={isCreatingRun}

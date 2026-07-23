@@ -1,5 +1,7 @@
 //! Transactional repositories for persisted domain entities.
 
+use std::collections::HashSet;
+
 use batch_code_analyzer_domain::{
     ApiProfile, ApiProfileId, ApiRouting, Attempt, AttemptId, ContextStatus, ContextVersion,
     ContextVersionId, FileRecord, FileRecordId, FileResultStatus, FileSourceStatus, Project,
@@ -1097,42 +1099,53 @@ impl Repository<'_> {
         &self,
         task_id: &TaskId,
     ) -> Result<(Run, Task), PersistenceError> {
+        let task = self
+            .get_task(task_id)
+            .await?
+            .ok_or_else(|| task_not_found(task_id.as_str()))?;
+        let (run, mut tasks, _) = self
+            .retry_failed_tasks(&task.run_id, std::slice::from_ref(task_id))
+            .await?;
+        let task = tasks.pop().ok_or(PersistenceError::StateTransition {
+            code: "task_cannot_retry",
+        })?;
+        Ok((run, task))
+    }
+
+    /// Atomically reopens a completed Run and requeues every eligible failed
+    /// Task from one batch.
+    ///
+    /// Missing or cross-Run Task IDs fail the whole transaction. Existing
+    /// Tasks whose state or latest Attempt is not retryable are returned as
+    /// skipped without blocking eligible siblings.
+    ///
+    /// # Errors
+    ///
+    /// Returns `task_not_found` for invalid membership, `task_cannot_retry`
+    /// when no Task is eligible, and `run_active_exists` when another Run is
+    /// active.
+    #[allow(clippy::too_many_lines)]
+    pub async fn retry_failed_tasks(
+        &self,
+        run_id: &RunId,
+        task_ids: &[TaskId],
+    ) -> Result<(Run, Vec<Task>, Vec<TaskId>), PersistenceError> {
+        let mut seen = HashSet::new();
+        let task_ids = task_ids
+            .iter()
+            .filter(|task_id| seen.insert(task_id.as_str().to_owned()))
+            .cloned()
+            .collect::<Vec<_>>();
+        if task_ids.is_empty() {
+            return Err(PersistenceError::StateTransition {
+                code: "task_cannot_retry",
+            });
+        }
         let mut transaction = self.database.begin_write().await?;
         let result = async {
-            let mut task = load_task(&mut transaction, task_id.as_str())
+            let mut run = load_run(&mut transaction, run_id.as_str())
                 .await?
-                .ok_or_else(|| task_not_found(task_id.as_str()))?;
-            let latest_attempt_id =
-                task.latest_attempt_id
-                    .as_ref()
-                    .ok_or(PersistenceError::StateTransition {
-                        code: "task_cannot_retry",
-                    })?;
-            let latest_attempt = load_attempt(&mut transaction, latest_attempt_id.as_str())
-                .await?
-                .ok_or(PersistenceError::StateTransition {
-                    code: "task_cannot_retry",
-                })?;
-            if latest_attempt.task_id != task.id
-                || !latest_attempt
-                    .error
-                    .as_ref()
-                    .is_some_and(|error| error.retryable)
-            {
-                return Err(PersistenceError::StateTransition {
-                    code: "task_cannot_retry",
-                });
-            }
-
-            let mut run = load_run(&mut transaction, task.run_id.as_str())
-                .await?
-                .ok_or_else(|| run_not_found(task.run_id.as_str()))?;
-            let next_task_status =
-                TaskStateMachine::transition(task.status, TaskTransition::ManualRetry).map_err(
-                    |_| PersistenceError::StateTransition {
-                        code: "task_cannot_retry",
-                    },
-                )?;
+                .ok_or_else(|| run_not_found(run_id.as_str()))?;
             let next_run_status =
                 RunStateMachine::transition(run.status, RunTransition::ManualRetryRequested)
                     .map_err(|_| PersistenceError::StateTransition {
@@ -1161,20 +1174,52 @@ impl Repository<'_> {
                 });
             }
 
-            task.status = next_task_status;
-            task.started_at = None;
-            task.completed_at = None;
+            let mut requeued = Vec::new();
+            let mut skipped = Vec::new();
+            for task_id in task_ids {
+                let mut task = load_task(&mut transaction, task_id.as_str())
+                    .await?
+                    .ok_or_else(|| task_not_found(task_id.as_str()))?;
+                if task.run_id != run.id {
+                    return Err(task_not_found(task_id.as_str()));
+                }
+                let next_task_status =
+                    TaskStateMachine::transition(task.status, TaskTransition::ManualRetry).ok();
+                let latest_attempt = match task.latest_attempt_id.as_ref() {
+                    Some(attempt_id) => load_attempt(&mut transaction, attempt_id.as_str()).await?,
+                    None => None,
+                };
+                let latest_is_retryable = latest_attempt.as_ref().is_some_and(|attempt| {
+                    attempt.task_id == task.id
+                        && attempt.error.as_ref().is_some_and(|error| error.retryable)
+                });
+                let Some(next_task_status) = next_task_status.filter(|_| latest_is_retryable)
+                else {
+                    skipped.push(task.id);
+                    continue;
+                };
+                task.status = next_task_status;
+                task.started_at = None;
+                task.completed_at = None;
+                sqlx::query(
+                    "UPDATE tasks SET status = ?, started_at = NULL, completed_at = NULL
+                     WHERE id = ?",
+                )
+                .bind(status_string(task.status)?)
+                .bind(task.id.as_str())
+                .execute(transaction.connection())
+                .await
+                .map_err(|_| PersistenceError::TransactionFailed)?;
+                requeued.push(task);
+            }
+            if requeued.is_empty() {
+                return Err(PersistenceError::StateTransition {
+                    code: "task_cannot_retry",
+                });
+            }
+
             run.status = next_run_status;
             run.completed_at = None;
-            sqlx::query(
-                "UPDATE tasks SET status = ?, started_at = NULL, completed_at = NULL
-                 WHERE id = ?",
-            )
-            .bind(status_string(task.status)?)
-            .bind(task.id.as_str())
-            .execute(transaction.connection())
-            .await
-            .map_err(|_| PersistenceError::TransactionFailed)?;
             sqlx::query("UPDATE runs SET status = ?, completed_at = NULL WHERE id = ?")
                 .bind(status_string(run.status)?)
                 .bind(run.id.as_str())
@@ -1186,7 +1231,7 @@ impl Repository<'_> {
                 recompute_run_stats_in_transaction(&mut transaction, run.id.as_str()).await?;
             update_run_stats(&mut transaction, run.id.as_str(), &stats).await?;
             run.stats = stats;
-            Ok((run, task))
+            Ok((run, requeued, skipped))
         }
         .await;
         finish_write(transaction, result).await

@@ -102,8 +102,11 @@ interface AppShellProps {
   onLoadTaskDetail?: (taskId: string) => Promise<void>;
   onOpenResult?: (taskId: string) => Promise<void>;
   onRetryTask?: (taskId: string) => Promise<void>;
+  onRetryTasks?: (taskIds: readonly string[]) => Promise<void>;
   onSelectRun?: (runId: string) => void;
-  retryingTaskId?: string | null;
+  retryingTaskIds?: readonly string[];
+  isBatchRetrying?: boolean;
+  batchRetryTargetCount?: number;
   resultPreview?: ResultReadResponse | null;
   onCloseResultPreview?: () => void;
   isCreatingRun?: boolean;
@@ -173,8 +176,11 @@ export function AppShell({
   onLoadTaskDetail = async () => undefined,
   onOpenResult = async () => undefined,
   onRetryTask = async () => undefined,
+  onRetryTasks = async () => undefined,
   onSelectRun = () => undefined,
-  retryingTaskId = null,
+  retryingTaskIds = [],
+  isBatchRetrying = false,
+  batchRetryTargetCount = 0,
   resultPreview = null,
   onCloseResultPreview = () => undefined,
   isCreatingRun = false,
@@ -303,9 +309,18 @@ export function AppShell({
           onLoadTaskDetail={onLoadTaskDetail}
           onOpenResult={onOpenResult}
           onRetryTask={onRetryTask}
+          onRetryTasks={onRetryTasks}
           onSelectRun={onSelectRun}
-          retryBlocked={activeRun !== null}
-          retryingTaskId={retryingTaskId}
+          retryBlocked={
+            activeRun !== null &&
+            (activeRun.status !== "running" ||
+              isBatchRetrying ||
+              retryingTaskIds.length === 0 ||
+              activeRun.runId !== selectedRunId)
+          }
+          retryingTaskIds={retryingTaskIds}
+          isBatchRetrying={isBatchRetrying}
+          batchRetryTargetCount={batchRetryTargetCount}
         />
       </div>
       <RunPreviewPanel
@@ -614,9 +629,12 @@ function ProjectWorkspace({
   onLoadTaskDetail,
   onOpenResult,
   onRetryTask,
+  onRetryTasks,
   onSelectRun,
   retryBlocked,
-  retryingTaskId,
+  retryingTaskIds,
+  isBatchRetrying,
+  batchRetryTargetCount,
 }: {
   apiProfileError: string | null;
   apiProfiles: readonly ApiProfileSummaryDto[];
@@ -667,9 +685,12 @@ function ProjectWorkspace({
   onLoadTaskDetail: (taskId: string) => Promise<void>;
   onOpenResult: (taskId: string) => Promise<void>;
   onRetryTask: (taskId: string) => Promise<void>;
+  onRetryTasks: (taskIds: readonly string[]) => Promise<void>;
   onSelectRun: (runId: string) => void;
   retryBlocked: boolean;
-  retryingTaskId: string | null;
+  retryingTaskIds: readonly string[];
+  isBatchRetrying: boolean;
+  batchRetryTargetCount: number;
 }) {
   return (
     <main className="project-workspace">
@@ -720,9 +741,12 @@ function ProjectWorkspace({
           onLoadTaskDetail={onLoadTaskDetail}
           onOpenResult={onOpenResult}
           onRetryTask={onRetryTask}
+          onRetryTasks={onRetryTasks}
           onSelectRun={onSelectRun}
           retryBlocked={retryBlocked}
-          retryingTaskId={retryingTaskId}
+          retryingTaskIds={retryingTaskIds}
+          isBatchRetrying={isBatchRetrying}
+          batchRetryTargetCount={batchRetryTargetCount}
         />
       ) : (
         <ApiWorkspace
@@ -848,9 +872,12 @@ function PromptWorkspace({
   onLoadTaskDetail,
   onOpenResult,
   onRetryTask,
+  onRetryTasks,
   onSelectRun,
   retryBlocked,
-  retryingTaskId,
+  retryingTaskIds,
+  isBatchRetrying,
+  batchRetryTargetCount,
 }: {
   contextVersion: ContextVersionDto | null;
   onCancelScan: () => void;
@@ -882,9 +909,12 @@ function PromptWorkspace({
   onLoadTaskDetail: (taskId: string) => Promise<void>;
   onOpenResult: (taskId: string) => Promise<void>;
   onRetryTask: (taskId: string) => Promise<void>;
+  onRetryTasks: (taskIds: readonly string[]) => Promise<void>;
   onSelectRun: (runId: string) => void;
   retryBlocked: boolean;
-  retryingTaskId: string | null;
+  retryingTaskIds: readonly string[];
+  isBatchRetrying: boolean;
+  batchRetryTargetCount: number;
 }) {
   const hasProject = project !== null;
   const [generatorOpen, setGeneratorOpen] = useState(false);
@@ -1187,9 +1217,12 @@ function PromptWorkspace({
         onLoadTaskDetail={onLoadTaskDetail}
         onOpenResult={onOpenResult}
         onRetryTask={onRetryTask}
+        onRetryTasks={onRetryTasks}
         onSelectRun={onSelectRun}
         retryBlocked={retryBlocked}
-        retryingTaskId={retryingTaskId}
+        retryingTaskIds={retryingTaskIds}
+        isBatchRetrying={isBatchRetrying}
+        batchRetryTargetCount={batchRetryTargetCount}
         runHistory={runHistory}
         runTasks={runTasks}
         selectedRunId={selectedRunId}
@@ -1206,9 +1239,12 @@ function RunResultsPanel({
   onLoadTaskDetail,
   onOpenResult,
   onRetryTask,
+  onRetryTasks,
   onSelectRun,
   retryBlocked,
-  retryingTaskId,
+  retryingTaskIds,
+  isBatchRetrying,
+  batchRetryTargetCount,
   runHistory,
   runTasks,
   selectedRunId,
@@ -1220,9 +1256,12 @@ function RunResultsPanel({
   onLoadTaskDetail: (taskId: string) => Promise<void>;
   onOpenResult: (taskId: string) => Promise<void>;
   onRetryTask: (taskId: string) => Promise<void>;
+  onRetryTasks: (taskIds: readonly string[]) => Promise<void>;
   onSelectRun: (runId: string) => void;
   retryBlocked: boolean;
-  retryingTaskId: string | null;
+  retryingTaskIds: readonly string[];
+  isBatchRetrying: boolean;
+  batchRetryTargetCount: number;
   runHistory: readonly RunSummaryDto[];
   runTasks: readonly TaskSummaryDto[];
   selectedRunId: string | null;
@@ -1236,6 +1275,14 @@ function RunResultsPanel({
   const selectedTask = runTasks.find((task) => task.id === selectedTaskId);
   const selectedDetail = selectedTaskId ? taskDetails[selectedTaskId] : null;
   const promptDetail = promptTaskId ? taskDetails[promptTaskId] : null;
+  const failedTaskIds = runTasks
+    .filter((task) => task.status === "failed")
+    .map((task) => task.id);
+  const retryingTaskIdSet = new Set(retryingTaskIds);
+  const activeRetryTaskId = retryingTaskIds[0] ?? null;
+  const displayedBatchCount = isBatchRetrying
+    ? batchRetryTargetCount || failedTaskIds.length
+    : failedTaskIds.length;
   const selectRun = (runId: string) => {
     setPromptTaskId(null);
     setLoadingPromptTaskId(null);
@@ -1258,9 +1305,31 @@ function RunResultsPanel({
           <p className="eyebrow">RUN RESULTS</p>
           <h2>运行结果</h2>
         </div>
-        {isLoading ? (
-          <span className="run-results-loading">正在刷新</span>
-        ) : null}
+        <div className="run-results-heading-actions">
+          {displayedBatchCount > 0 ? (
+            <button
+              aria-busy={isBatchRetrying}
+              className="outline-button retry-failed-button"
+              disabled={
+                retryBlocked || isBatchRetrying || retryingTaskIds.length > 0
+              }
+              onClick={() => void onRetryTasks(failedTaskIds)}
+              type="button"
+            >
+              <RefreshCw
+                aria-hidden="true"
+                className={isBatchRetrying ? "is-spinning" : undefined}
+                size={14}
+              />
+              {isBatchRetrying
+                ? `批量重试中（${displayedBatchCount}）`
+                : `重试全部失败（${displayedBatchCount}）`}
+            </button>
+          ) : null}
+          {isLoading ? (
+            <span className="run-results-loading">正在刷新</span>
+          ) : null}
+        </div>
       </div>
       {error ? (
         <div className="project-error" role="alert">
@@ -1352,20 +1421,28 @@ function RunResultsPanel({
                       <button
                         aria-label={`重试 ${task.relativePath}`}
                         className="text-button retry-task-button"
-                        disabled={retryBlocked || retryingTaskId !== null}
+                        disabled={
+                          retryBlocked ||
+                          isBatchRetrying ||
+                          retryingTaskIdSet.has(task.id)
+                        }
                         onClick={() => void onRetryTask(task.id)}
                         type="button"
                       >
                         <RefreshCw
                           aria-hidden="true"
                           className={
-                            retryingTaskId === task.id
+                            activeRetryTaskId === task.id
                               ? "is-spinning"
                               : undefined
                           }
                           size={14}
                         />
-                        {retryingTaskId === task.id ? "重试中" : "重试"}
+                        {activeRetryTaskId === task.id
+                          ? "重试中"
+                          : retryingTaskIdSet.has(task.id)
+                            ? "已排队"
+                            : "重试"}
                       </button>
                     ) : null}
                   </span>

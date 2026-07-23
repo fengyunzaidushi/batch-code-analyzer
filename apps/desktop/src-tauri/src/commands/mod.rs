@@ -34,8 +34,9 @@ use batch_code_analyzer_ipc_contracts::{
     RunExecuteResponse, RunGetRequest, RunGetResponse, RunListRequest, RunPreviewRequest,
     RunPreviewResponse, RunPreviewTaskDto, RunSummaryDto, ScanCancelRequest, ScanCancelResponse,
     ScanOperationStatus, ScanReportDto, ScanRuleSummaryDto, ScanStartRequest, ScanStartResponse,
-    TaskGetRequest, TaskGetResponse, TaskListRequest, TaskRetryRequest, TaskRetryResponse,
-    TaskSummaryDto, DTO_SCHEMA_VERSION, HEALTH_CHECK_SCHEMA_VERSION,
+    TaskGetRequest, TaskGetResponse, TaskListRequest, TaskRetryBatchRequest,
+    TaskRetryBatchResponse, TaskRetryRequest, TaskRetryResponse, TaskSummaryDto,
+    DTO_SCHEMA_VERSION, HEALTH_CHECK_SCHEMA_VERSION,
 };
 use batch_code_analyzer_model_providers::{ModelProvider, OpenAiResponsesProvider, ProviderError};
 use batch_code_analyzer_persistence::DatabaseHealth;
@@ -507,6 +508,62 @@ pub(crate) async fn task_retry(
     Ok(TaskRetryResponse {
         run: RunSummaryDto::from(&completed_run),
         task: TaskSummaryDto::from(&completed_task),
+    })
+}
+
+#[tauri::command]
+pub(crate) async fn task_retry_batch(
+    request: TaskRetryBatchRequest,
+    state: State<'_, PersistenceState>,
+) -> Result<TaskRetryBatchResponse, IpcError> {
+    if request.task_ids.is_empty() || request.task_ids.len() > 10_000 {
+        return Err(ipc_error(
+            "validation_limit_exceeded",
+            ErrorCategory::Validation,
+            "批量重试任务数量必须在 1 到 10000 之间",
+            false,
+        ));
+    }
+    let database = state.database.as_ref().ok_or_else(database_unavailable)?;
+    let run = RunResultService::new(database)
+        .get_run(&request.project_id, &request.run_id)
+        .await
+        .map_err(run_result_service_error)?;
+    if !profile_secret_available(
+        database,
+        &state,
+        run.snapshot.api_routing.primary_profile_id.as_ref(),
+    )
+    .await?
+    {
+        return Err(secret_not_available_error());
+    }
+    let Ok(provider) = OpenAiResponsesProvider::new(state.secret_store.clone()) else {
+        return Err(ipc_error(
+            "provider_connection_failed",
+            ErrorCategory::Provider,
+            "模型 Provider 暂不可用",
+            true,
+        ));
+    };
+    let (reopened_run, requeued_tasks, skipped_task_ids) = RunService::new(database)
+        .retry_failed_tasks(&request.project_id, &request.run_id, &request.task_ids)
+        .await
+        .map_err(task_retry_error)?;
+    let retried_task_ids = requeued_tasks
+        .into_iter()
+        .map(|task| task.id)
+        .collect::<Vec<_>>();
+    let cancellation = state.run_cancellations.register(&reopened_run.id);
+    let result = RunExecutionService::new(database, provider)
+        .execute_with_cancellation(&reopened_run.id, cancellation)
+        .await;
+    state.run_cancellations.remove(&reopened_run.id);
+    let completed_run = result.map_err(run_execution_error)?;
+    Ok(TaskRetryBatchResponse {
+        run: RunSummaryDto::from(&completed_run),
+        retried_task_ids,
+        skipped_task_ids,
     })
 }
 

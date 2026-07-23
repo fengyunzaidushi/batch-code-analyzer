@@ -18,6 +18,8 @@ import type {
   TaskGetRequest,
   TaskGetResponse,
   TaskListRequest,
+  TaskRetryBatchRequest,
+  TaskRetryBatchResponse,
   TaskRetryRequest,
   TaskRetryResponse,
   TaskSummaryDto,
@@ -70,6 +72,12 @@ export function retryTask(
   request: TaskRetryRequest,
 ): Promise<TaskRetryResponse> {
   return invoke<TaskRetryResponse>("task_retry", { request });
+}
+
+export function retryTasks(
+  request: TaskRetryBatchRequest,
+): Promise<TaskRetryBatchResponse> {
+  return invoke<TaskRetryBatchResponse>("task_retry_batch", { request });
 }
 
 export function readResult(

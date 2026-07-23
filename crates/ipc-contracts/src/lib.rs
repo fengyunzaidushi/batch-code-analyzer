@@ -732,6 +732,22 @@ pub struct TaskRetryResponse {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
+pub struct TaskRetryBatchRequest {
+    pub project_id: ProjectId,
+    pub run_id: RunId,
+    pub task_ids: Vec<TaskId>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskRetryBatchResponse {
+    pub run: RunSummaryDto,
+    pub retried_task_ids: Vec<TaskId>,
+    pub skipped_task_ids: Vec<TaskId>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
 pub struct ResultReadRequest {
     pub project_id: ProjectId,
     pub task_id: TaskId,
@@ -1033,6 +1049,8 @@ pub fn export_types(out_dir: &Path) -> Result<(), ExportError> {
     TaskGetResponse::export_all(&config)?;
     TaskRetryRequest::export_all(&config)?;
     TaskRetryResponse::export_all(&config)?;
+    TaskRetryBatchRequest::export_all(&config)?;
+    TaskRetryBatchResponse::export_all(&config)?;
     AttemptDto::export_all(&config)?;
     ResultReadRequest::export_all(&config)?;
     ResultReadResponse::export_all(&config)?;

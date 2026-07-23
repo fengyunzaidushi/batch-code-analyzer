@@ -255,6 +255,7 @@ Rust 会重新校验仓库边界、符号链接、文件大小、二进制和编
 task_list
 task_get
 task_retry
+task_retry_batch
 task_regenerate
 task_cancel
 ```
@@ -263,6 +264,11 @@ task_cancel
   `projectId` 和 `taskId`；失败 Task 路径原子地重新打开原 Run、重新排队 Task，再通过
   统一执行器发送请求。每次真实请求仍在发送前新增 Attempt；取消/中断任务必须先完成
   PRD 要求的重复计费确认流程。
+- `task_retry_batch`：接收 `projectId`、`runId` 和 `1..=10,000` 个 `taskIds`。所有 ID
+  必须属于指定 Project 和同一 Run，否则整个请求以 `task_not_found` 失败且不部分更新。
+  Repository 在一个事务中重新排队最新错误仍允许重试的失败 Task，并在响应中返回
+  `retriedTaskIds` 与 `skippedTaskIds`；没有可提交项时返回 `task_cannot_retry`。事务提交
+  后只启动一个执行器，按原 Run 的冻结并发快照执行。
 - `task_regenerate`：创建新的 Task 版本，不覆盖原 Task。
 - 运行中 Task 不允许重复提交。
 
@@ -271,6 +277,9 @@ task_cancel
 配置。Task 不存在或不属于 `projectId` 时统一返回 `task_not_found`；状态不允许、失败
 Task 的最新错误不可重试或重复提交时返回 `task_cannot_retry`；存在其他活动 Run 时
 返回 `run_active_exists`。
+
+`task_retry_batch` 成功返回最终 `RunSummaryDto`、`retriedTaskIds` 和 `skippedTaskIds`。
+批量请求长度为零或超过 10,000 时返回 `validation_limit_exceeded`。
 
 `run_list` 按 Project 返回分页的 `RunSummaryDto`，`run_get` 只允许读取该 Project
 所属的 Run。`task_list` 按 Run 返回分页的 `TaskSummaryDto`，`task_get` 返回一个

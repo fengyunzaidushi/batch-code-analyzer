@@ -1207,6 +1207,12 @@ mark Task failed with aggregated attempts
 → 统一执行器领取 Task，并在真实请求前追加新 Attempt
 ```
 
+批量人工重试是上述事务的集合版本：请求中的 Task 必须属于同一 Project 和同一 Run；
+Repository 在一个写事务中验证全部 ID，重新排队其中最新错误仍允许重试的失败 Task，
+并返回被跳过的不可重试项。事务提交后只启动一个执行器，由现有有界 worker 集合按
+`snapshot.concurrency` 领取这些 Task，不得为每个 Task 分别启动执行器。单项连续点击
+由前端提交队列串行调用单项 IPC，避免活动 Run 冲突，同时不锁定未点击的失败行。
+
 事务失败不得留下 Running Run 或 Queued Task。实际发送前必须重新核对源码哈希；若与
 Task 文件快照不一致，Task 进入 `SourceChanged`，不创建 Attempt、不发送请求。
 

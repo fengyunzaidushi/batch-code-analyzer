@@ -919,6 +919,16 @@ button:disabled {
   color: #263544;
   font-size: 17px;
 }
+.run-results-heading-actions {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+}
+.retry-failed-button {
+  flex: 0 0 auto;
+}
 .run-results-loading,
 .run-results-empty {
   color: #82909e;

@@ -1,9 +1,9 @@
 use batch_code_analyzer_domain::{
     ApiProfile, ApiProfileConnectionStatus, ApiProfileId, ApiProtocol, ApiRouting, Attempt,
-    AttemptId, AttemptStatus, ContextStatus, ExecutionDefaults, FileRecord, FileRecordId,
-    FileResultStatus, FileSnapshot, FileSourceStatus, FilterRules, Project, ProjectContext,
-    ProjectId, ProjectPathStatus, RetryPolicy, Rfc3339Timestamp, Run, RunId, RunSnapshot, RunStats,
-    RunStatus, SensitiveFinding, Task, TaskId, TaskStatus, TaskValueSource,
+    AttemptError, AttemptId, AttemptStatus, ContextStatus, ExecutionDefaults, FileRecord,
+    FileRecordId, FileResultStatus, FileSnapshot, FileSourceStatus, FilterRules, Project,
+    ProjectContext, ProjectId, ProjectPathStatus, RetryPolicy, Rfc3339Timestamp, Run, RunId,
+    RunSnapshot, RunStats, RunStatus, SensitiveFinding, Task, TaskId, TaskStatus, TaskValueSource,
 };
 use batch_code_analyzer_persistence::{
     AttemptRowMetadata, Database, FileRecordRowMetadata, PersistenceError, ProjectRowMetadata,
@@ -416,6 +416,189 @@ async fn interrupting_run_settles_claimed_tasks_and_preserves_queue() {
     assert_eq!(
         repository.list_attempts(&running.id).await.unwrap()[0].status,
         AttemptStatus::InterruptedUnknown
+    );
+}
+
+struct BatchRetryFixture {
+    database: Database,
+    project: Project,
+    file: FileRecord,
+    retry_run: Run,
+    first: Task,
+    second: Task,
+    terminal: Task,
+}
+
+async fn batch_retry_fixture() -> BatchRetryFixture {
+    let database = Database::open_in_memory()
+        .await
+        .expect("database should open");
+    let repository = database.repository();
+    let project = project("project-batch-retry", "/workspace/batch-retry");
+    repository
+        .create_project(&project, project_metadata("/workspace/batch-retry"))
+        .await
+        .unwrap();
+    let file = file("file-batch-retry", &project.id);
+    repository
+        .create_file_record(&file, file_metadata())
+        .await
+        .unwrap();
+
+    let retry_run = run(
+        "run-batch-retry",
+        &project.id,
+        RunStatus::CompletedWithErrors,
+    );
+    let mut first = task(
+        "task-batch-retry-1",
+        &retry_run.id,
+        file.id.as_str(),
+        TaskStatus::Failed,
+    );
+    let mut second = task(
+        "task-batch-retry-2",
+        &retry_run.id,
+        file.id.as_str(),
+        TaskStatus::Failed,
+    );
+    let mut terminal = task(
+        "task-batch-retry-terminal",
+        &retry_run.id,
+        file.id.as_str(),
+        TaskStatus::Failed,
+    );
+    first.latest_attempt_id = Some(AttemptId::new("attempt-batch-retry-1"));
+    second.latest_attempt_id = Some(AttemptId::new("attempt-batch-retry-2"));
+    terminal.latest_attempt_id = Some(AttemptId::new("attempt-batch-retry-terminal"));
+    repository
+        .create_run_with_tasks(
+            &retry_run,
+            RunRowMetadata {
+                interruption_reason: None,
+            },
+            &[first.clone(), second.clone(), terminal.clone()],
+        )
+        .await
+        .unwrap();
+    for (id, task_id, retryable) in [
+        ("attempt-batch-retry-1", &first.id, true),
+        ("attempt-batch-retry-2", &second.id, true),
+        ("attempt-batch-retry-terminal", &terminal.id, false),
+    ] {
+        let mut failed_attempt = attempt(id, task_id, 1, AttemptStatus::FailedTerminal);
+        failed_attempt.error = Some(AttemptError {
+            code: "provider_http_error".into(),
+            message: "request failed".into(),
+            retryable,
+            sanitized: true,
+        });
+        repository
+            .append_attempt(&failed_attempt, AttemptRowMetadata { response_id: None })
+            .await
+            .unwrap();
+    }
+
+    BatchRetryFixture {
+        database,
+        project,
+        file,
+        retry_run,
+        first,
+        second,
+        terminal,
+    }
+}
+
+#[tokio::test]
+async fn batch_retry_rolls_back_cross_run_input() {
+    let fixture = batch_retry_fixture().await;
+    let repository = fixture.database.repository();
+
+    let other_run = run(
+        "run-batch-retry-other",
+        &fixture.project.id,
+        RunStatus::CompletedWithErrors,
+    );
+    let cross_run = task(
+        "task-batch-retry-other",
+        &other_run.id,
+        fixture.file.id.as_str(),
+        TaskStatus::Failed,
+    );
+    repository
+        .create_run_with_tasks(
+            &other_run,
+            RunRowMetadata {
+                interruption_reason: None,
+            },
+            std::slice::from_ref(&cross_run),
+        )
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        repository
+            .retry_failed_tasks(
+                &fixture.retry_run.id,
+                &[fixture.first.id.clone(), cross_run.id]
+            )
+            .await
+            .expect_err("cross-Run input must roll back the whole batch"),
+        PersistenceError::RecordNotFound { kind: "task", .. }
+    ));
+    assert_eq!(
+        repository
+            .get_task(&fixture.first.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        TaskStatus::Failed
+    );
+    assert_eq!(
+        repository
+            .get_run(&fixture.retry_run.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        RunStatus::CompletedWithErrors
+    );
+}
+
+#[tokio::test]
+async fn batch_retry_requeues_eligible_tasks_and_skips_terminal_failures() {
+    let fixture = batch_retry_fixture().await;
+    let repository = fixture.database.repository();
+
+    let (reopened, requeued, skipped) = repository
+        .retry_failed_tasks(
+            &fixture.retry_run.id,
+            &[
+                fixture.first.id.clone(),
+                fixture.second.id.clone(),
+                fixture.terminal.id.clone(),
+            ],
+        )
+        .await
+        .expect("eligible failed Tasks should requeue together");
+    assert_eq!(reopened.status, RunStatus::Running);
+    assert_eq!(reopened.stats.queued, 2);
+    assert_eq!(reopened.stats.failed, 1);
+    assert_eq!(
+        requeued.iter().map(|task| &task.id).collect::<Vec<_>>(),
+        vec![&fixture.first.id, &fixture.second.id]
+    );
+    assert_eq!(skipped, vec![fixture.terminal.id.clone()]);
+    assert_eq!(
+        repository
+            .list_attempts(&fixture.first.id)
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "requeue must not create an Attempt before dispatch"
     );
 }
 

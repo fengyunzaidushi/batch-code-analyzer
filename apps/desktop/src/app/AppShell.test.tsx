@@ -599,7 +599,7 @@ describe("AppShell", () => {
     expect(onLoadTaskDetail).toHaveBeenCalledWith(task.id);
   });
 
-  it("offers retry for failed tasks and prevents duplicate submission", async () => {
+  it("keeps other failed tasks clickable while one retry is queued", async () => {
     const user = userEvent.setup();
     const onRetryTask = vi.fn().mockResolvedValue(undefined);
     const run = {
@@ -616,12 +616,17 @@ describe("AppShell", () => {
       hasResult: false,
       status: "failed" as const,
     };
+    const secondTask = {
+      ...task,
+      id: "task-2",
+      relativePath: "src/worker.ts",
+    };
     const view = render(
       <AppShell
         onRetryTask={onRetryTask}
         projects={[project()]}
         runHistory={[run]}
-        runTasks={[task]}
+        runTasks={[task, secondTask]}
         selectedRunId={run.id}
       />,
     );
@@ -633,9 +638,9 @@ describe("AppShell", () => {
       <AppShell
         onRetryTask={onRetryTask}
         projects={[project()]}
-        retryingTaskId={task.id}
+        retryingTaskIds={[task.id]}
         runHistory={[run]}
-        runTasks={[task]}
+        runTasks={[task, secondTask]}
         selectedRunId={run.id}
       />,
     );
@@ -643,6 +648,58 @@ describe("AppShell", () => {
       screen.getByRole("button", { name: "重试 src/main.ts" }),
     ).toBeDisabled();
     expect(screen.getByText("重试中")).toBeInTheDocument();
+    const secondRetry = screen.getByRole("button", {
+      name: "重试 src/worker.ts",
+    });
+    expect(secondRetry).toBeEnabled();
+    await user.click(secondRetry);
+    expect(onRetryTask).toHaveBeenLastCalledWith(secondTask.id);
+  });
+
+  it("submits all failed tasks through the batch retry action", async () => {
+    const user = userEvent.setup();
+    const onRetryTasks = vi.fn().mockResolvedValue(undefined);
+    const run = {
+      ...runSummary(),
+      status: "completed_with_errors" as const,
+      stats: { ...runSummary().stats, failed: 2, succeeded: 0 },
+    };
+    const firstTask = {
+      ...taskSummary(),
+      hasResult: false,
+      status: "failed" as const,
+    };
+    const secondTask = {
+      ...firstTask,
+      id: "task-2",
+      relativePath: "src/worker.ts",
+    };
+    const view = render(
+      <AppShell
+        onRetryTasks={onRetryTasks}
+        projects={[project()]}
+        runHistory={[run]}
+        runTasks={[firstTask, secondTask]}
+        selectedRunId={run.id}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "重试全部失败（2）" }));
+    expect(onRetryTasks).toHaveBeenCalledWith([firstTask.id, secondTask.id]);
+
+    view.rerender(
+      <AppShell
+        isBatchRetrying
+        onRetryTasks={onRetryTasks}
+        projects={[project()]}
+        runHistory={[run]}
+        runTasks={[firstTask, secondTask]}
+        selectedRunId={run.id}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: "批量重试中（2）" }),
+    ).toBeDisabled();
   });
 
   it("shows a sanitized Markdown result dialog when a result is loaded", () => {

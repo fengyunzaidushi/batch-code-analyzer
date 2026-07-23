@@ -1274,10 +1274,30 @@ impl<'database> RunService<'database> {
             .await
             .map_err(TaskRetryError::Persistence)?
             .ok_or(TaskRetryError::NotFound)?;
+        let (run, mut tasks, _) = self
+            .retry_failed_tasks(project_id, &task.run_id, std::slice::from_ref(task_id))
+            .await?;
+        let task = tasks.pop().ok_or(TaskRetryError::CannotRetry)?;
+        Ok((run, task))
+    }
+
+    /// Reopens the original Run and requeues every eligible failed Task from
+    /// one batch while preserving immutable snapshots and Attempt history.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable not-found error for cross-Project/Run access, a retry
+    /// error when no Task is eligible, or an active-Run conflict.
+    pub async fn retry_failed_tasks(
+        &self,
+        project_id: &ProjectId,
+        run_id: &RunId,
+        task_ids: &[TaskId],
+    ) -> Result<(Run, Vec<Task>, Vec<TaskId>), TaskRetryError> {
         let run = self
             .database
             .repository()
-            .get_run(&task.run_id)
+            .get_run(run_id)
             .await
             .map_err(TaskRetryError::Persistence)?
             .ok_or(TaskRetryError::NotFound)?;
@@ -1286,7 +1306,7 @@ impl<'database> RunService<'database> {
         }
         self.database
             .repository()
-            .retry_failed_task(task_id)
+            .retry_failed_tasks(run_id, task_ids)
             .await
             .map_err(|error| match error {
                 PersistenceError::RecordNotFound { .. } => TaskRetryError::NotFound,
@@ -3007,6 +3027,28 @@ mod tests {
         PathBuf,
         std::sync::mpsc::Receiver<Vec<u8>>,
     ) {
+        execution_fixture_sequence_with_file_count(
+            responses,
+            retry_count_per_profile,
+            output_blocked,
+            1,
+        )
+        .await
+    }
+
+    async fn execution_fixture_sequence_with_file_count(
+        responses: Vec<TestProviderResponse>,
+        retry_count_per_profile: u8,
+        output_blocked: bool,
+        file_count: usize,
+    ) -> (
+        Database,
+        batch_code_analyzer_domain::Run,
+        OpenAiResponsesProvider,
+        Arc<MemorySecretStore>,
+        PathBuf,
+        std::sync::mpsc::Receiver<Vec<u8>>,
+    ) {
         let database = Database::open_in_memory()
             .await
             .expect("database should open");
@@ -3022,7 +3064,15 @@ mod tests {
         } else {
             "run-execution-failure"
         });
-        fs::write(path.join("main.rs"), "fn main() {}\n").expect("source file should be created");
+        for index in 1..=file_count {
+            let file_name = if file_count == 1 {
+                "main.rs".to_owned()
+            } else {
+                format!("file-{index}.rs")
+            };
+            fs::write(path.join(file_name), format!("fn source_{index}() {{}}\n"))
+                .expect("source file should be created");
+        }
         let mut project = ProjectService::new(&database)
             .add_project(&path)
             .await
@@ -3484,6 +3534,71 @@ mod tests {
             attempts[1].status,
             batch_code_analyzer_domain::AttemptStatus::Succeeded
         );
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn batch_manual_retry_reopens_once_and_appends_attempts_for_each_task() {
+        let responses = vec![
+            TestProviderResponse::new(
+                "429 Too Many Requests",
+                r#"{"error":{"message":"slow down one"}}"#,
+            )
+            .with_header("Retry-After", "0"),
+            TestProviderResponse::new(
+                "429 Too Many Requests",
+                r#"{"error":{"message":"slow down two"}}"#,
+            )
+            .with_header("Retry-After", "0"),
+            TestProviderResponse::new(
+                "200 OK",
+                r##"{"id":"resp-batch-retry-1","output_text":"# Batch retry one"}"##,
+            ),
+            TestProviderResponse::new(
+                "200 OK",
+                r##"{"id":"resp-batch-retry-2","output_text":"# Batch retry two"}"##,
+            ),
+        ];
+        let (database, run, provider, _secrets, path, _request_receiver) =
+            execution_fixture_sequence_with_file_count(responses, 0, false, 2).await;
+
+        let first_completion = RunExecutionService::new(&database, provider.clone())
+            .execute(&run.id)
+            .await
+            .expect("initial batch should persist both failures");
+        assert_eq!(first_completion.stats.failed, 2);
+        let failed_tasks = database.repository().list_tasks(&run.id).await.unwrap();
+        let task_ids = failed_tasks
+            .iter()
+            .map(|task| task.id.clone())
+            .collect::<Vec<_>>();
+
+        let (reopened_run, requeued_tasks, skipped_task_ids) = RunService::new(&database)
+            .retry_failed_tasks(&run.project_id, &run.id, &task_ids)
+            .await
+            .expect("both retryable failures should requeue together");
+        assert_eq!(reopened_run.snapshot, run.snapshot);
+        assert_eq!(reopened_run.stats.queued, 2);
+        assert_eq!(requeued_tasks.len(), 2);
+        assert!(skipped_task_ids.is_empty());
+
+        let completed = RunExecutionService::new(&database, provider)
+            .execute(&run.id)
+            .await
+            .expect("batch retry should execute");
+        assert_eq!(completed.stats.succeeded, 2);
+        assert_eq!(completed.stats.failed, 0);
+        for task_id in task_ids {
+            let attempts = database.repository().list_attempts(&task_id).await.unwrap();
+            assert_eq!(attempts.len(), 2);
+            assert_eq!(attempts[0].sequence, 1);
+            assert_eq!(attempts[1].sequence, 2);
+            assert_eq!(attempts[1].retry_reason.as_deref(), Some("manual_retry"));
+            assert_eq!(
+                attempts[1].status,
+                batch_code_analyzer_domain::AttemptStatus::Succeeded
+            );
+        }
         let _ = fs::remove_dir_all(path);
     }
 
