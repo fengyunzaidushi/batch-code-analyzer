@@ -718,6 +718,21 @@ pub struct TaskGetResponse {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
+pub struct TaskRequestPreviewRequest {
+    pub project_id: ProjectId,
+    pub task_id: TaskId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskRequestPreviewResponse {
+    pub task: TaskSummaryDto,
+    pub instructions: String,
+    pub input: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
 pub struct TaskRetryRequest {
     pub project_id: ProjectId,
     pub task_id: TaskId,
@@ -1047,6 +1062,8 @@ pub fn export_types(out_dir: &Path) -> Result<(), ExportError> {
     TaskListRequest::export_all(&config)?;
     TaskGetRequest::export_all(&config)?;
     TaskGetResponse::export_all(&config)?;
+    TaskRequestPreviewRequest::export_all(&config)?;
+    TaskRequestPreviewResponse::export_all(&config)?;
     TaskRetryRequest::export_all(&config)?;
     TaskRetryResponse::export_all(&config)?;
     TaskRetryBatchRequest::export_all(&config)?;
@@ -1135,6 +1152,12 @@ mod tests {
         let task_get = fs::read_to_string(out_dir.join("TaskGetResponse.ts"))
             .expect("task detail declaration should be generated");
         assert!(task_get.contains("promptSnapshot: string"));
+        assert!(!task_get.contains("input: string"));
+
+        let request_preview = fs::read_to_string(out_dir.join("TaskRequestPreviewResponse.ts"))
+            .expect("request preview declaration should be generated");
+        assert!(request_preview.contains("instructions: string"));
+        assert!(request_preview.contains("input: string"));
 
         let file_summary = fs::read_to_string(out_dir.join("FileRecordSummaryDto.ts"))
             .expect("file summary declaration should be generated");

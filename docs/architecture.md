@@ -684,6 +684,9 @@ Rust Event 到达后，前端只更新受影响查询缓存或执行精确失效
 - 分页查询不是强制要求，但 IPC 必须支持游标或 offset/limit；
 - 状态更新按 Task ID 局部合并；
 - Markdown 结果按需加载；
+- 失败 Task 的结果预览复用按需加载的 `task_get` Attempt 历史，优先展示最近一次失败
+  原因，不为失败状态调用不存在的 Markdown `result_read`；
+- UI 只显示稳定错误码的本地文案或 `sanitized = true` 的 Attempt message；
 - 关闭预览后释放大文本引用。
 
 ### 9.5 Markdown 安全
@@ -1042,25 +1045,26 @@ PRD 默认不保存完整源文件副本。Run 创建后到发送前文件发生
 
 `RequestAssembler` 接收：
 
-- 系统安全约束；
-- ContextVersion；
+- ContextVersion 及其冻结来源清单；
 - Task 提示词；
 - 文件相对路径；
 - 文件内容；
 - 输出限制。
 
-组装时保持明确边界：
+正式单文件分析的 `ProviderRequest.instructions` 固定为空字符串。`input` 组装时保持明确
+边界：
 
 ```text
-SYSTEM / DEVELOPER SAFETY
-PROJECT MATERIAL
+PROJECT MATERIAL（仅 ContextVersion 含已纳入的 AGENTS.md/README* 时）
 USER TASK
 TARGET FILE PATH
 TARGET FILE CONTENT
 OUTPUT REQUIREMENTS
 ```
 
-项目资料和代码都视作不可信数据，不允许覆盖系统约束。
+当冻结 ContextVersion 不含符合条件的来源时，完全省略 `PROJECT MATERIAL`，不生成空标题
+或占位摘要。是否包含该段只依据冻结来源清单，不解析摘要文本，也不读取项目当前版本。
+项目资料和代码都视作不可信数据，不允许修改客户端权限、路由或任务快照。
 
 ### 13.2 Token 预估
 

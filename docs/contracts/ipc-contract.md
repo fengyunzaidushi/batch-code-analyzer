@@ -254,6 +254,7 @@ Rust 会重新校验仓库边界、符号链接、文件大小、二进制和编
 ```text
 task_list
 task_get
+task_request_preview
 task_retry
 task_retry_batch
 task_regenerate
@@ -285,7 +286,19 @@ Task 的最新错误不可重试或重复提交时返回 `task_cannot_retry`；�
 所属的 Run。`task_list` 按 Run 返回分页的 `TaskSummaryDto`，`task_get` 返回一个
 Task、创建该 Task 时冻结的 `promptSnapshot` 和按 sequence 升序排列的 `AttemptDto`
 历史。`promptSnapshot` 只包含用户配置的分析提示词，不包含源文件内容、API Key 或
-供应商完整请求体。跨 Project 的 ID 查询统一按不存在处理，不暴露其他项目是否存在。
+供应商完整请求体。失败 Task 点击“查看结果”时，前端使用该响应展示最近一次失败原因和
+全部 Attempt 明细；只允许显示稳定错误码映射或 `sanitized = true` 的错误 message，不得
+回显未脱敏内容。跨 Project 的 ID 查询统一按不存在处理，不暴露其他项目是否存在。
+
+`task_request_preview` 只在用户明确点击“查看提示词”时调用。Rust 根据 Task 冻结的
+`promptSnapshot`、相对路径和 ContextVersion，读取当前目标文件并重新校验仓库边界与
+内容哈希，然后返回 `TaskSummaryDto`、`instructions` 和完整 `input`。`instructions` 固定
+为空字符串。`input` 包含用户任务目标、目标文件路径和未经截断的完整 UTF-8 文件内容；
+只有 Task 冻结 ContextVersion 的来源清单中存在已纳入的 `AGENTS.md` 或 `README*` 时才
+包含项目上下文摘要，否则完全省略该分段和占位文本。响应不得包含 API Key、认证请求头或
+绝对仓库路径。文件不可读取、路径逃逸或内容哈希变化时不得返回当前源码，分别复用
+`scan_file_unreadable`、`security_path_escape` 或 `task_source_changed`。该响应不得写入
+普通日志、数据库或结果文件。
 
 ### 4.8 Result
 
@@ -299,6 +312,8 @@ Run 输出目录重新解析路径，拒绝路径逃逸、外部符号链接、�
 包含结果相对路径、版本和 Markdown 正文，不包含源文件、绝对路径、请求原文或密钥。
 
 - `result_read` 按需读取已完成结果；不得通过 `task_list` 返回完整 Markdown。
+- 失败 Task 没有 Markdown 结果时不得调用 `result_read`；“查看结果”复用 `task_get` 展示
+  Attempt 失败原因，避免用 `output_result_not_found` 覆盖实际错误。
 - `result_open_in_folder` 只能打开已验证位于允许输出根目录内的路径。
 
 ### 4.9 App

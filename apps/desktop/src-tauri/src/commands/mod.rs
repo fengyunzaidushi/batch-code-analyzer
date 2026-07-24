@@ -34,9 +34,9 @@ use batch_code_analyzer_ipc_contracts::{
     RunExecuteResponse, RunGetRequest, RunGetResponse, RunListRequest, RunPreviewRequest,
     RunPreviewResponse, RunPreviewTaskDto, RunSummaryDto, ScanCancelRequest, ScanCancelResponse,
     ScanOperationStatus, ScanReportDto, ScanRuleSummaryDto, ScanStartRequest, ScanStartResponse,
-    TaskGetRequest, TaskGetResponse, TaskListRequest, TaskRetryBatchRequest,
-    TaskRetryBatchResponse, TaskRetryRequest, TaskRetryResponse, TaskSummaryDto,
-    DTO_SCHEMA_VERSION, HEALTH_CHECK_SCHEMA_VERSION,
+    TaskGetRequest, TaskGetResponse, TaskListRequest, TaskRequestPreviewRequest,
+    TaskRequestPreviewResponse, TaskRetryBatchRequest, TaskRetryBatchResponse, TaskRetryRequest,
+    TaskRetryResponse, TaskSummaryDto, DTO_SCHEMA_VERSION, HEALTH_CHECK_SCHEMA_VERSION,
 };
 use batch_code_analyzer_model_providers::{ModelProvider, OpenAiResponsesProvider, ProviderError};
 use batch_code_analyzer_persistence::DatabaseHealth;
@@ -441,6 +441,23 @@ pub(crate) async fn task_get(
         task: TaskSummaryDto::from(&task),
         prompt_snapshot: task.prompt_snapshot,
         attempts: attempts.iter().map(AttemptDto::from).collect(),
+    })
+}
+
+#[tauri::command]
+pub(crate) async fn task_request_preview(
+    request: TaskRequestPreviewRequest,
+    state: State<'_, PersistenceState>,
+) -> Result<TaskRequestPreviewResponse, IpcError> {
+    let database = state.database.as_ref().ok_or_else(database_unavailable)?;
+    let preview = RunResultService::new(database)
+        .request_preview(&request.project_id, &request.task_id)
+        .await
+        .map_err(run_result_service_error)?;
+    Ok(TaskRequestPreviewResponse {
+        task: TaskSummaryDto::from(&preview.task),
+        instructions: preview.instructions,
+        input: preview.input,
     })
 }
 
@@ -1397,6 +1414,30 @@ fn run_result_service_error(error: RunResultServiceError) -> IpcError {
             "Task 不存在",
             false,
         ),
+        RunResultServiceError::ProjectPathUnavailable => ipc_error(
+            "project_path_unavailable",
+            ErrorCategory::Project,
+            "项目路径不可用",
+            true,
+        ),
+        RunResultServiceError::SourcePathEscape => ipc_error(
+            "security_path_escape",
+            ErrorCategory::Security,
+            "目标文件路径无效",
+            false,
+        ),
+        RunResultServiceError::SourceUnreadable => ipc_error(
+            "scan_file_unreadable",
+            ErrorCategory::Scan,
+            "目标文件暂时无法读取",
+            true,
+        ),
+        RunResultServiceError::SourceChanged => ipc_error(
+            "task_source_changed",
+            ErrorCategory::Scheduler,
+            "目标文件内容已变化，无法还原原请求",
+            false,
+        ),
         RunResultServiceError::ResultNotFound => ipc_error(
             "output_result_not_found",
             ErrorCategory::Output,
@@ -1839,6 +1880,18 @@ mod tests {
         assert_eq!(missing.code, "output_result_not_found");
         assert_eq!(missing.message, "分析结果不存在");
         assert!(missing.details.is_none());
+
+        let changed = super::run_result_service_error(RunResultServiceError::SourceChanged);
+        assert_eq!(changed.code, "task_source_changed");
+        assert_eq!(
+            changed.category,
+            batch_code_analyzer_ipc_contracts::ErrorCategory::Scheduler
+        );
+        assert!(!changed.retryable);
+
+        let unreadable = super::run_result_service_error(RunResultServiceError::SourceUnreadable);
+        assert_eq!(unreadable.code, "scan_file_unreadable");
+        assert!(unreadable.retryable);
     }
 
     #[test]

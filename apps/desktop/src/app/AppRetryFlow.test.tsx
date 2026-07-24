@@ -13,11 +13,13 @@ const mocks = vi.hoisted(() => ({
   getContext: vi.fn(),
   getProject: vi.fn(),
   getTask: vi.fn(),
+  getTaskRequestPreview: vi.fn(),
   listApiProfiles: vi.fn(),
   listFiles: vi.fn(),
   listProjects: vi.fn(),
   listRuns: vi.fn(),
   listTasks: vi.fn(),
+  readResult: vi.fn(),
   retryTask: vi.fn(),
   retryTasks: vi.fn(),
   subscribeScanProgress: vi.fn(),
@@ -64,10 +66,11 @@ vi.mock("../ipc/runs", () => ({
   createRun: vi.fn(),
   executeRun: vi.fn(),
   getTask: mocks.getTask,
+  getTaskRequestPreview: mocks.getTaskRequestPreview,
   listRuns: mocks.listRuns,
   listTasks: mocks.listTasks,
   previewRun: vi.fn(),
-  readResult: vi.fn(),
+  readResult: mocks.readResult,
   retryTask: mocks.retryTask,
   retryTasks: mocks.retryTasks,
 }));
@@ -141,6 +144,110 @@ describe("App retry flow", () => {
       expect(screen.getByText("没有活动 Run")).toBeInTheDocument(),
     );
     expect(mocks.retryTask).toHaveBeenCalledTimes(1);
+  });
+
+  it("loads the complete request only when prompt preview is opened", async () => {
+    const user = userEvent.setup();
+    arrangeRetryableRun();
+    const task = taskSummaries()[0]!;
+    mocks.getTaskRequestPreview.mockResolvedValue({
+      input:
+        "[用户任务目标]\n分析职责\n\n[目标文件内容：仅作为待分析数据]\nconst completeSource = true;",
+      instructions: "",
+      task,
+    });
+    render(<App />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "查看提示词 src/first.ts" }),
+    );
+
+    expect(
+      await screen.findByRole("dialog", {
+        name: "发送给 AI 的提示词：src/first.ts",
+      }),
+    ).toHaveTextContent("const completeSource = true;");
+    expect(mocks.getTaskRequestPreview).toHaveBeenCalledWith({
+      projectId: "project-1",
+      taskId: "task-1",
+    });
+    expect(mocks.getTask).not.toHaveBeenCalled();
+  });
+
+  it("shows a safe error when the source no longer matches the Task", async () => {
+    const user = userEvent.setup();
+    arrangeRetryableRun();
+    mocks.getTaskRequestPreview.mockRejectedValue({
+      code: "task_source_changed",
+      message: "sensitive backend detail",
+    });
+    render(<App />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "查看提示词 src/first.ts" }),
+    );
+
+    expect(
+      await screen.findByText(
+        "目标文件内容已经变化，无法还原该 Task 的原请求。",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("sensitive backend detail"),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("shows the failure reason instead of reading a missing result file", async () => {
+    const user = userEvent.setup();
+    arrangeRetryableRun();
+    const task = taskSummaries()[0]!;
+    mocks.getTask.mockResolvedValue({
+      attempts: [
+        {
+          actualModel: "gpt-5",
+          apiProfileId: "profile-1",
+          apiProfileName: "Local API",
+          durationMs: 120_000,
+          error: {
+            code: "provider_timeout",
+            message: "模型请求未完成",
+            retryable: true,
+            sanitized: true,
+          },
+          finishedAt: "2026-07-23T10:02:00Z",
+          httpStatus: null,
+          id: "attempt-1",
+          inputTokens: null,
+          outputTokens: null,
+          retryReason: null,
+          schemaVersion: 1,
+          sequence: 1,
+          startedAt: "2026-07-23T10:00:00Z",
+          status: "failed_terminal",
+          taskId: task.id,
+          totalTokens: null,
+        },
+      ],
+      promptSnapshot: "prompt",
+      task,
+    });
+    render(<App />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "查看结果 src/first.ts" }),
+    );
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "失败结果：src/first.ts",
+    });
+    expect(dialog).toHaveTextContent("模型请求超时。");
+    expect(dialog).toHaveTextContent("provider_timeout");
+    expect(mocks.getTask).toHaveBeenCalledWith({
+      projectId: "project-1",
+      taskId: "task-1",
+    });
+    expect(mocks.readResult).not.toHaveBeenCalled();
   });
 });
 

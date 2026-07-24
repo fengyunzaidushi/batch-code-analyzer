@@ -93,6 +93,8 @@ export type { TaskId } from "./generated/TaskId";
 export type { TaskGetRequest } from "./generated/TaskGetRequest";
 export type { TaskGetResponse } from "./generated/TaskGetResponse";
 export type { TaskListRequest } from "./generated/TaskListRequest";
+export type { TaskRequestPreviewRequest } from "./generated/TaskRequestPreviewRequest";
+export type { TaskRequestPreviewResponse } from "./generated/TaskRequestPreviewResponse";
 export type { TaskRetryBatchRequest } from "./generated/TaskRetryBatchRequest";
 export type { TaskRetryBatchResponse } from "./generated/TaskRetryBatchResponse";
 export type { TaskRetryRequest } from "./generated/TaskRetryRequest";

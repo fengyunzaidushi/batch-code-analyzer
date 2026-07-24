@@ -35,6 +35,7 @@ import type {
   ScanRuleSummaryDto,
   ScanReportDto,
   TaskGetResponse,
+  TaskRequestPreviewResponse,
   TaskSummaryDto,
 } from "@batch-code-analyzer/ipc-types";
 
@@ -100,6 +101,9 @@ interface AppShellProps {
   taskDetails?: Readonly<Record<string, TaskGetResponse>>;
   isLoadingRunResults?: boolean;
   onLoadTaskDetail?: (taskId: string) => Promise<void>;
+  onLoadTaskRequestPreview?: (
+    taskId: string,
+  ) => Promise<TaskRequestPreviewResponse>;
   onOpenResult?: (taskId: string) => Promise<void>;
   onRetryTask?: (taskId: string) => Promise<void>;
   onRetryTasks?: (taskIds: readonly string[]) => Promise<void>;
@@ -108,6 +112,7 @@ interface AppShellProps {
   isBatchRetrying?: boolean;
   batchRetryTargetCount?: number;
   resultPreview?: ResultReadResponse | null;
+  failurePreview?: TaskGetResponse | null;
   onCloseResultPreview?: () => void;
   isCreatingRun?: boolean;
   onDeleteApiProfile?: (id: string) => Promise<void>;
@@ -174,6 +179,9 @@ export function AppShell({
   taskDetails = {},
   isLoadingRunResults = false,
   onLoadTaskDetail = async () => undefined,
+  onLoadTaskRequestPreview = async () => {
+    throw new Error("请求预览处理器不可用");
+  },
   onOpenResult = async () => undefined,
   onRetryTask = async () => undefined,
   onRetryTasks = async () => undefined,
@@ -182,6 +190,7 @@ export function AppShell({
   isBatchRetrying = false,
   batchRetryTargetCount = 0,
   resultPreview = null,
+  failurePreview = null,
   onCloseResultPreview = () => undefined,
   isCreatingRun = false,
   onDeleteApiProfile = async () => undefined,
@@ -307,6 +316,7 @@ export function AppShell({
           taskDetails={taskDetails}
           isLoadingRunResults={isLoadingRunResults}
           onLoadTaskDetail={onLoadTaskDetail}
+          onLoadTaskRequestPreview={onLoadTaskRequestPreview}
           onOpenResult={onOpenResult}
           onRetryTask={onRetryTask}
           onRetryTasks={onRetryTasks}
@@ -341,6 +351,12 @@ export function AppShell({
         open={resultPreview !== null}
         title={resultPreview?.relativePath ?? "分析结果"}
       />
+      {failurePreview ? (
+        <FailureResultPreview
+          detail={failurePreview}
+          onClose={onCloseResultPreview}
+        />
+      ) : null}
     </div>
   );
 }
@@ -627,6 +643,7 @@ function ProjectWorkspace({
   taskDetails,
   isLoadingRunResults,
   onLoadTaskDetail,
+  onLoadTaskRequestPreview,
   onOpenResult,
   onRetryTask,
   onRetryTasks,
@@ -683,6 +700,9 @@ function ProjectWorkspace({
   taskDetails: Readonly<Record<string, TaskGetResponse>>;
   isLoadingRunResults: boolean;
   onLoadTaskDetail: (taskId: string) => Promise<void>;
+  onLoadTaskRequestPreview: (
+    taskId: string,
+  ) => Promise<TaskRequestPreviewResponse>;
   onOpenResult: (taskId: string) => Promise<void>;
   onRetryTask: (taskId: string) => Promise<void>;
   onRetryTasks: (taskIds: readonly string[]) => Promise<void>;
@@ -739,6 +759,7 @@ function ProjectWorkspace({
           taskDetails={taskDetails}
           isLoadingRunResults={isLoadingRunResults}
           onLoadTaskDetail={onLoadTaskDetail}
+          onLoadTaskRequestPreview={onLoadTaskRequestPreview}
           onOpenResult={onOpenResult}
           onRetryTask={onRetryTask}
           onRetryTasks={onRetryTasks}
@@ -870,6 +891,7 @@ function PromptWorkspace({
   taskDetails,
   isLoadingRunResults,
   onLoadTaskDetail,
+  onLoadTaskRequestPreview,
   onOpenResult,
   onRetryTask,
   onRetryTasks,
@@ -907,6 +929,9 @@ function PromptWorkspace({
   taskDetails: Readonly<Record<string, TaskGetResponse>>;
   isLoadingRunResults: boolean;
   onLoadTaskDetail: (taskId: string) => Promise<void>;
+  onLoadTaskRequestPreview: (
+    taskId: string,
+  ) => Promise<TaskRequestPreviewResponse>;
   onOpenResult: (taskId: string) => Promise<void>;
   onRetryTask: (taskId: string) => Promise<void>;
   onRetryTasks: (taskIds: readonly string[]) => Promise<void>;
@@ -1214,7 +1239,9 @@ function PromptWorkspace({
       <RunResultsPanel
         error={runResultsError}
         isLoading={isLoadingRunResults}
+        key={selectedRunId ?? "no-run"}
         onLoadTaskDetail={onLoadTaskDetail}
+        onLoadTaskRequestPreview={onLoadTaskRequestPreview}
         onOpenResult={onOpenResult}
         onRetryTask={onRetryTask}
         onRetryTasks={onRetryTasks}
@@ -1237,6 +1264,7 @@ function RunResultsPanel({
   error,
   isLoading,
   onLoadTaskDetail,
+  onLoadTaskRequestPreview,
   onOpenResult,
   onRetryTask,
   onRetryTasks,
@@ -1254,6 +1282,9 @@ function RunResultsPanel({
   error: string | null;
   isLoading: boolean;
   onLoadTaskDetail: (taskId: string) => Promise<void>;
+  onLoadTaskRequestPreview: (
+    taskId: string,
+  ) => Promise<TaskRequestPreviewResponse>;
   onOpenResult: (taskId: string) => Promise<void>;
   onRetryTask: (taskId: string) => Promise<void>;
   onRetryTasks: (taskIds: readonly string[]) => Promise<void>;
@@ -1268,13 +1299,13 @@ function RunResultsPanel({
   selectedTaskId: string | null;
   taskDetails: Readonly<Record<string, TaskGetResponse>>;
 }) {
-  const [promptTaskId, setPromptTaskId] = useState<string | null>(null);
+  const [requestPreview, setRequestPreview] =
+    useState<TaskRequestPreviewResponse | null>(null);
   const [loadingPromptTaskId, setLoadingPromptTaskId] = useState<string | null>(
     null,
   );
   const selectedTask = runTasks.find((task) => task.id === selectedTaskId);
   const selectedDetail = selectedTaskId ? taskDetails[selectedTaskId] : null;
-  const promptDetail = promptTaskId ? taskDetails[promptTaskId] : null;
   const failedTaskIds = runTasks
     .filter((task) => task.status === "failed")
     .map((task) => task.id);
@@ -1284,19 +1315,22 @@ function RunResultsPanel({
     ? batchRetryTargetCount || failedTaskIds.length
     : failedTaskIds.length;
   const selectRun = (runId: string) => {
-    setPromptTaskId(null);
+    setRequestPreview(null);
     setLoadingPromptTaskId(null);
     onSelectRun(runId);
   };
-  const openPrompt = (taskId: string) => {
-    setPromptTaskId(taskId);
-    if (taskDetails[taskId]) return;
+  const openPrompt = async (taskId: string) => {
     setLoadingPromptTaskId(taskId);
-    void onLoadTaskDetail(taskId).finally(() => {
+    try {
+      const preview = await onLoadTaskRequestPreview(taskId);
+      setRequestPreview(preview);
+    } catch {
+      setRequestPreview(null);
+    } finally {
       setLoadingPromptTaskId((current) =>
         current === taskId ? null : current,
       );
-    });
+    }
   };
   return (
     <section className="run-results-panel" aria-label="运行结果">
@@ -1391,7 +1425,7 @@ function RunResultsPanel({
                       aria-label={`查看提示词 ${task.relativePath}`}
                       className="text-button"
                       disabled={loadingPromptTaskId === task.id}
-                      onClick={() => openPrompt(task.id)}
+                      onClick={() => void openPrompt(task.id)}
                       title="查看发送给 AI 的提示词"
                       type="button"
                     >
@@ -1399,8 +1433,9 @@ function RunResultsPanel({
                     </button>
                   </span>
                   <span className="run-task-actions">
-                    {task.hasResult ? (
+                    {task.hasResult || task.status === "failed" ? (
                       <button
+                        aria-label={`查看结果 ${task.relativePath}`}
                         className="text-button"
                         onClick={() => void onOpenResult(task.id)}
                         type="button"
@@ -1456,11 +1491,12 @@ function RunResultsPanel({
               path={selectedTask.relativePath}
             />
           ) : null}
-          {promptDetail ? (
+          {requestPreview ? (
             <PromptDetailPanel
-              onClose={() => setPromptTaskId(null)}
-              path={promptDetail.task.relativePath}
-              prompt={promptDetail.promptSnapshot}
+              input={requestPreview.input}
+              instructions={requestPreview.instructions}
+              onClose={() => setRequestPreview(null)}
+              path={requestPreview.task.relativePath}
             />
           ) : null}
         </>
@@ -1502,14 +1538,159 @@ function AttemptDetailPanel({
   );
 }
 
+function FailureResultPreview({
+  detail,
+  onClose,
+}: {
+  detail: TaskGetResponse;
+  onClose: () => void;
+}) {
+  const latestFailure = findLatestFailedAttempt(detail.attempts);
+  const latestReason = latestFailure
+    ? attemptFailureReason(latestFailure)
+    : "任务失败，但没有记录可用的请求尝试。";
+  return (
+    <div className="preview-backdrop" role="presentation" onMouseDown={onClose}>
+      <section
+        aria-label={`失败结果：${detail.task.relativePath}`}
+        aria-modal="true"
+        className="preview-dialog"
+        role="dialog"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <div className="preview-dialog-header">
+          <div>
+            <p className="eyebrow">FAILED RESULT</p>
+            <h2>分析失败</h2>
+            <span
+              className="prompt-detail-path"
+              title={detail.task.relativePath}
+            >
+              {detail.task.relativePath}
+            </span>
+          </div>
+          <button
+            aria-label="关闭失败结果"
+            className="icon-button"
+            onClick={onClose}
+            title="关闭失败结果"
+            type="button"
+          >
+            <X aria-hidden="true" size={18} />
+          </button>
+        </div>
+        <div className="failure-result-content">
+          <div className="failure-result-summary" role="alert">
+            <CircleAlert aria-hidden="true" size={20} />
+            <div>
+              <strong>失败原因</strong>
+              <p>{latestReason}</p>
+              {latestFailure?.error ? (
+                <code>{latestFailure.error.code}</code>
+              ) : null}
+            </div>
+          </div>
+          <div className="failure-attempts-heading">
+            <h3>请求尝试</h3>
+            <span>{detail.attempts.length} 次</span>
+          </div>
+          {detail.attempts.length ? (
+            <div className="failure-attempt-list">
+              {detail.attempts.map((attempt) => (
+                <div className="failure-attempt-row" key={attempt.id}>
+                  <div className="failure-attempt-title">
+                    <strong>第 {attempt.sequence} 次</strong>
+                    <span>{attemptStatusLabel(attempt.status)}</span>
+                  </div>
+                  <dl className="failure-attempt-meta">
+                    <div>
+                      <dt>API 档案</dt>
+                      <dd>{attempt.apiProfileName}</dd>
+                    </div>
+                    <div>
+                      <dt>模型</dt>
+                      <dd>{attempt.actualModel}</dd>
+                    </div>
+                    <div>
+                      <dt>HTTP 状态</dt>
+                      <dd>{attempt.httpStatus ?? "无"}</dd>
+                    </div>
+                    <div>
+                      <dt>耗时</dt>
+                      <dd>
+                        {attempt.durationMs === null
+                          ? "无"
+                          : `${attempt.durationMs} ms`}
+                      </dd>
+                    </div>
+                  </dl>
+                  <p className="failure-attempt-reason">
+                    {attemptFailureReason(attempt)}
+                  </p>
+                  {attempt.error ? (
+                    <code className="failure-error-code">
+                      {attempt.error.code}
+                    </code>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="file-tree-muted">没有可显示的 Attempt 记录。</p>
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function findLatestFailedAttempt(
+  attempts: readonly AttemptDto[],
+): AttemptDto | null {
+  for (let index = attempts.length - 1; index >= 0; index -= 1) {
+    const attempt = attempts[index];
+    if (attempt?.error) return attempt;
+  }
+  return attempts[attempts.length - 1] ?? null;
+}
+
+function attemptFailureReason(attempt: AttemptDto): string {
+  const error = attempt.error;
+  if (!error) return "本次尝试没有记录失败详情。";
+  const knownReasons: Readonly<Record<string, string>> = {
+    output_write_failed: "模型已返回内容，但结果文件写入失败。",
+    project_path_unavailable: "项目路径不可用，无法读取目标文件。",
+    provider_authentication_failed: "API Key 无效或模型服务认证失败。",
+    provider_cancelled: "模型请求已取消。",
+    provider_connection_failed: "无法连接模型服务。",
+    provider_content_rejected: "模型服务拒绝了请求内容。",
+    provider_interrupted_unknown: "模型请求被中断，结果状态未知。",
+    provider_invalid_request: "模型服务拒绝了请求参数。",
+    provider_invalid_response: "模型服务返回了无法识别的响应。",
+    provider_model_unavailable: "请求的模型不可用。",
+    provider_permission_denied: "API Profile 没有访问该模型的权限。",
+    provider_rate_limited: "模型服务触发限流。",
+    provider_server_error: "模型服务暂时不可用。",
+    provider_timeout: "模型请求超时。",
+    scan_file_unreadable: "目标文件无法读取。",
+    security_secret_store_unavailable: "API Key 安全存储不可用。",
+  };
+  const knownReason = knownReasons[error.code];
+  if (knownReason) return knownReason;
+  if (error.sanitized && error.message.trim()) return error.message;
+  return "请求失败，但没有可安全显示的详细原因。";
+}
+
 function PromptDetailPanel({
+  input,
+  instructions,
   onClose,
   path,
-  prompt,
 }: {
+  input: string;
+  instructions: string;
   onClose: () => void;
   path: string;
-  prompt: string;
 }) {
   return (
     <div className="preview-backdrop" role="presentation" onMouseDown={onClose}>
@@ -1538,7 +1719,9 @@ function PromptDetailPanel({
             <X aria-hidden="true" size={18} />
           </button>
         </div>
-        <pre className="prompt-detail-content">{prompt}</pre>
+        <pre className="prompt-detail-content">
+          {`[INSTRUCTIONS]\n${instructions}${instructions ? "\n\n" : "\n"}[INPUT]\n${input}`}
+        </pre>
       </section>
     </div>
   );

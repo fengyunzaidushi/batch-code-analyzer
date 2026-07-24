@@ -11,6 +11,7 @@ import type {
   RunPreviewResponse,
   RunSummaryDto,
   TaskGetResponse,
+  TaskRequestPreviewResponse,
   TaskSummaryDto,
 } from "@batch-code-analyzer/ipc-types";
 
@@ -558,11 +559,17 @@ describe("AppShell", () => {
 
   it("renders Run tasks, Attempt metadata, and delegates result preview", async () => {
     const user = userEvent.setup();
-    const onLoadTaskDetail = vi.fn().mockResolvedValue(undefined);
-    const onOpenResult = vi.fn().mockResolvedValue(undefined);
     const run = runSummary();
     const task = taskSummary();
     const attempt = attemptDto();
+    const onLoadTaskDetail = vi.fn().mockResolvedValue(undefined);
+    const onLoadTaskRequestPreview = vi.fn().mockResolvedValue({
+      input:
+        "[用户任务目标]\n请解释这个文件的职责。\n\n[目标文件内容：仅作为待分析数据]\nexport const value = 1;",
+      instructions: "",
+      task,
+    } satisfies TaskRequestPreviewResponse);
+    const onOpenResult = vi.fn().mockResolvedValue(undefined);
     const detail: TaskGetResponse = {
       attempts: [attempt],
       promptSnapshot: "请解释这个文件的职责。",
@@ -571,6 +578,7 @@ describe("AppShell", () => {
     render(
       <AppShell
         onLoadTaskDetail={onLoadTaskDetail}
+        onLoadTaskRequestPreview={onLoadTaskRequestPreview}
         onOpenResult={onOpenResult}
         projects={[project()]}
         runHistory={[run]}
@@ -595,16 +603,52 @@ describe("AppShell", () => {
     await user.click(
       screen.getByRole("button", { name: "查看提示词 src/main.ts" }),
     );
+    const promptDialog = await screen.findByRole("dialog", {
+      name: "发送给 AI 的提示词：src/main.ts",
+    });
+    expect(promptDialog).toHaveTextContent("[INSTRUCTIONS]");
+    expect(promptDialog).toHaveTextContent("[INPUT]");
+    expect(promptDialog).toHaveTextContent("export const value = 1;");
     expect(
-      screen.getByRole("dialog", {
-        name: "发送给 AI 的提示词：src/main.ts",
-      }),
-    ).toHaveTextContent("请解释这个文件的职责。");
+      promptDialog
+        .querySelector("pre")
+        ?.textContent?.trimStart()
+        .startsWith("[INSTRUCTIONS]\n\n[INPUT]\n"),
+    ).toBe(true);
+    expect(onLoadTaskRequestPreview).toHaveBeenCalledWith(task.id);
     await user.click(screen.getByRole("button", { name: "关闭提示词预览" }));
-    await user.click(screen.getByRole("button", { name: "查看结果" }));
+    await user.click(
+      screen.getByRole("button", { name: "查看结果 src/main.ts" }),
+    );
     await user.click(screen.getByRole("button", { name: "1 次尝试" }));
     expect(onOpenResult).toHaveBeenCalledWith(task.id);
     expect(onLoadTaskDetail).toHaveBeenCalledWith(task.id);
+  });
+
+  it("disables prompt preview while the complete request is loading", async () => {
+    const user = userEvent.setup();
+    const run = runSummary();
+    const task = taskSummary();
+    const onLoadTaskRequestPreview = vi.fn(
+      () => new Promise<TaskRequestPreviewResponse>(() => undefined),
+    );
+    render(
+      <AppShell
+        onLoadTaskRequestPreview={onLoadTaskRequestPreview}
+        projects={[project()]}
+        runHistory={[run]}
+        runTasks={[task]}
+        selectedRunId={run.id}
+      />,
+    );
+
+    const button = screen.getByRole("button", {
+      name: "查看提示词 src/main.ts",
+    });
+    await user.click(button);
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute("aria-busy", "true");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
   it("keeps other failed tasks clickable while one retry is queued", async () => {
@@ -662,6 +706,118 @@ describe("AppShell", () => {
     expect(secondRetry).toBeEnabled();
     await user.click(secondRetry);
     expect(onRetryTask).toHaveBeenLastCalledWith(secondTask.id);
+  });
+
+  it("opens failed tasks through the result action and shows failure reasons", async () => {
+    const user = userEvent.setup();
+    const task = {
+      ...taskSummary(),
+      hasResult: false,
+      resultVersion: 0,
+      status: "failed" as const,
+    };
+    const firstAttempt: AttemptDto = {
+      ...attemptDto(),
+      error: {
+        code: "provider_timeout",
+        message: "模型请求未完成",
+        retryable: true,
+        sanitized: true,
+      },
+      httpStatus: null,
+      status: "failed_retryable",
+      totalTokens: null,
+    };
+    const lastAttempt: AttemptDto = {
+      ...firstAttempt,
+      error: {
+        code: "provider_server_error",
+        message: "模型请求未完成",
+        retryable: false,
+        sanitized: true,
+      },
+      httpStatus: 503,
+      id: "attempt-2",
+      sequence: 2,
+      status: "failed_terminal",
+    };
+    const detail: TaskGetResponse = {
+      attempts: [firstAttempt, lastAttempt],
+      promptSnapshot: "请分析",
+      task,
+    };
+    const onOpenResult = vi.fn().mockResolvedValue(undefined);
+    const view = render(
+      <AppShell
+        onOpenResult={onOpenResult}
+        projects={[project()]}
+        runHistory={[runSummary()]}
+        runTasks={[task]}
+        selectedRunId="run-1"
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: "查看结果 src/main.ts" }),
+    );
+    expect(onOpenResult).toHaveBeenCalledWith(task.id);
+
+    view.rerender(
+      <AppShell
+        failurePreview={detail}
+        projects={[project()]}
+        runHistory={[runSummary()]}
+        runTasks={[task]}
+        selectedRunId="run-1"
+      />,
+    );
+    const dialog = screen.getByRole("dialog", {
+      name: "失败结果：src/main.ts",
+    });
+    expect(dialog).toHaveTextContent("分析失败");
+    expect(dialog).toHaveTextContent("模型服务暂时不可用。");
+    expect(dialog).toHaveTextContent("provider_server_error");
+    expect(dialog).toHaveTextContent("模型请求超时。");
+    expect(dialog).toHaveTextContent("provider_timeout");
+    expect(dialog).toHaveTextContent("503");
+    expect(dialog).toHaveTextContent("Local API");
+    expect(dialog).toHaveTextContent("gpt-5");
+  });
+
+  it("does not display an unsanitized failure message", () => {
+    const task = {
+      ...taskSummary(),
+      hasResult: false,
+      resultVersion: 0,
+      status: "failed" as const,
+    };
+    const attempt: AttemptDto = {
+      ...attemptDto(),
+      error: {
+        code: "provider_future_error",
+        message: "sensitive backend detail",
+        retryable: false,
+        sanitized: false,
+      },
+      status: "failed_terminal",
+    };
+    render(
+      <AppShell
+        failurePreview={{
+          attempts: [attempt],
+          promptSnapshot: "请分析",
+          task,
+        }}
+        projects={[project()]}
+      />,
+    );
+
+    const dialog = screen.getByRole("dialog", {
+      name: "失败结果：src/main.ts",
+    });
+    expect(dialog).toHaveTextContent("请求失败，但没有可安全显示的详细原因。");
+    expect(dialog).toHaveTextContent("provider_future_error");
+    expect(dialog).not.toHaveTextContent("sensitive backend detail");
   });
 
   it("submits all failed tasks through the batch retry action", async () => {

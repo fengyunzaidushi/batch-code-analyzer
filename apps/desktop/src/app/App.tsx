@@ -16,6 +16,7 @@ import type {
   RunSummaryDto,
   ScanReportDto,
   TaskGetResponse,
+  TaskRequestPreviewResponse,
   TaskSummaryDto,
 } from "@batch-code-analyzer/ipc-types";
 
@@ -56,6 +57,7 @@ import {
   createRun,
   executeRun,
   getTask,
+  getTaskRequestPreview,
   listRuns,
   listTasks,
   previewRun,
@@ -120,6 +122,9 @@ export function App() {
   const [runResultsError, setRunResultsError] = useState<string | null>(null);
   const [isLoadingRunResults, setIsLoadingRunResults] = useState(false);
   const [resultPreview, setResultPreview] = useState<ResultReadResponse | null>(
+    null,
+  );
+  const [failurePreview, setFailurePreview] = useState<TaskGetResponse | null>(
     null,
   );
   const [retryingTaskIds, setRetryingTaskIds] = useState<string[]>([]);
@@ -864,16 +869,71 @@ export function App() {
     }
   };
 
+  const handleLoadTaskRequestPreview = async (
+    taskId: string,
+  ): Promise<TaskRequestPreviewResponse> => {
+    if (!selectedProjectId) throw new Error("请先选择项目");
+    setRunResultsError(null);
+    try {
+      return await getTaskRequestPreview({
+        projectId: selectedProjectId,
+        taskId,
+      });
+    } catch (error) {
+      const message = safeRunResultsError(error);
+      setRunResultsError(message);
+      throw new Error(message, { cause: error });
+    }
+  };
+
   const handleReadResult = async (taskId: string) => {
     if (!selectedProjectId) return;
     setRunResultsError(null);
+    const showFailure = async () => {
+      const detail = await getTask({
+        projectId: selectedProjectId,
+        taskId,
+      });
+      setTaskDetails((current) => ({ ...current, [taskId]: detail }));
+      setSelectedTaskId(taskId);
+      setResultPreview(null);
+      setFailurePreview(detail);
+    };
+    const task = runTasks.find((item) => item.id === taskId);
+    if (task?.status === "failed" && !task.hasResult) {
+      try {
+        await showFailure();
+      } catch (error) {
+        setRunResultsError(safeRunResultsError(error));
+      }
+      return;
+    }
     try {
       const result = await readResult({
         projectId: selectedProjectId,
         taskId,
       });
+      setFailurePreview(null);
       setResultPreview(result);
     } catch (error) {
+      if (isIpcError(error) && error.code === "output_result_not_found") {
+        try {
+          const detail = await getTask({
+            projectId: selectedProjectId,
+            taskId,
+          });
+          if (detail.task.status === "failed") {
+            setTaskDetails((current) => ({ ...current, [taskId]: detail }));
+            setSelectedTaskId(taskId);
+            setResultPreview(null);
+            setFailurePreview(detail);
+            return;
+          }
+        } catch (detailError) {
+          setRunResultsError(safeRunResultsError(detailError));
+          return;
+        }
+      }
       setRunResultsError(safeRunResultsError(error));
     }
   };
@@ -1061,6 +1121,7 @@ export function App() {
       taskDetails={taskDetails}
       isLoadingRunResults={isLoadingRunResults}
       onLoadTaskDetail={handleLoadTaskDetail}
+      onLoadTaskRequestPreview={handleLoadTaskRequestPreview}
       onOpenResult={handleReadResult}
       onRetryTask={handleRetryTask}
       onRetryTasks={handleRetryTasks}
@@ -1069,7 +1130,11 @@ export function App() {
       isBatchRetrying={isBatchRetrying}
       batchRetryTargetCount={batchRetryTargetCount}
       resultPreview={resultPreview}
-      onCloseResultPreview={() => setResultPreview(null)}
+      failurePreview={failurePreview}
+      onCloseResultPreview={() => {
+        setResultPreview(null);
+        setFailurePreview(null);
+      }}
       isCreatingRun={isCreatingRun}
       apiProfileError={apiProfileError}
       apiProfiles={apiProfiles}
@@ -1250,6 +1315,7 @@ function safeRunResultsError(error: unknown): string {
       project_not_found: "项目不存在。",
       run_not_found: "Run 不存在或不属于当前项目。",
       task_not_found: "Task 不存在或不属于当前项目。",
+      task_source_changed: "目标文件内容已经变化，无法还原该 Task 的原请求。",
       task_cannot_retry: "当前失败不支持重试，请查看尝试详情。",
       run_active_exists: "已有其他 Run 正在执行，暂时不能重试。",
       run_not_active: "原 Run 当前不能重新执行。",
@@ -1258,7 +1324,9 @@ function safeRunResultsError(error: unknown): string {
       output_result_not_found: "当前 Task 没有可读取的结果。",
       output_result_too_large: "结果超过可预览大小。",
       output_result_read_failed: "结果文件暂时无法读取。",
-      security_path_escape: "结果路径无效，已阻止读取。",
+      project_path_unavailable: "项目路径不可用，无法读取请求内容。",
+      scan_file_unreadable: "目标文件暂时无法读取。",
+      security_path_escape: "文件路径无效，已阻止读取。",
       validation_invalid_value: "运行列表分页参数无效。",
       validation_limit_exceeded: "运行列表分页大小无效。",
     };
