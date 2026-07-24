@@ -448,6 +448,19 @@ impl From<&DomainProject> for ProjectSummaryDto {
 
 impl From<&DomainProject> for ProjectDetailDto {
     fn from(project: &DomainProject) -> Self {
+        Self::with_prompt_presets(project, &project.filter_rules.prompt_presets)
+    }
+}
+
+impl ProjectDetailDto {
+    /// Builds a project detail DTO with the client-wide prompt library supplied
+    /// by the application layer. The domain project retains legacy presets only
+    /// for backwards-compatible data import.
+    #[must_use]
+    pub fn with_prompt_presets(
+        project: &DomainProject,
+        prompt_presets: &[DomainPromptPreset],
+    ) -> Self {
         Self {
             schema_version: DTO_SCHEMA_VERSION,
             id: project.id.clone(),
@@ -455,12 +468,7 @@ impl From<&DomainProject> for ProjectDetailDto {
             source_directory: project.source_directory.clone(),
             path_status: project.path_status,
             default_prompt: project.default_prompt.clone(),
-            prompt_presets: project
-                .filter_rules
-                .prompt_presets
-                .iter()
-                .map(PromptPresetDto::from)
-                .collect(),
+            prompt_presets: prompt_presets.iter().map(PromptPresetDto::from).collect(),
             active_prompt_id: project.filter_rules.active_prompt_id.clone(),
             default_model: project.default_model.clone(),
             context_model: project.context_model.clone(),

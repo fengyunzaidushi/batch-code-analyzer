@@ -65,6 +65,7 @@ pub enum ProjectServiceError {
     ApiProfileNotFound,
     InvalidConcurrency,
     PromptNotFound,
+    PromptNameConflict,
     InvalidPrompt,
     PathUnavailable,
     Persistence(PersistenceError),
@@ -75,7 +76,9 @@ impl ProjectServiceError {
     pub const fn code(&self) -> &'static str {
         match self {
             Self::NotFound => "project_not_found",
-            Self::ApiProfileNotFound | Self::InvalidConcurrency => "validation_invalid_value",
+            Self::ApiProfileNotFound | Self::InvalidConcurrency | Self::PromptNameConflict => {
+                "validation_invalid_value"
+            }
             Self::PromptNotFound => "prompt_not_found",
             Self::InvalidPrompt => "validation_required_field",
             Self::PathUnavailable => "project_path_unavailable",
@@ -974,10 +977,8 @@ impl<'database> ProjectService<'database> {
         })
     }
 
-    /// Saves a named prompt preset and makes it the project's active default.
-    /// Prompt content is kept in the existing project filter JSON column so
-    /// this operation remains compatible with databases created before the
-    /// prompt library existed.
+    /// Saves a named client-wide prompt preset and makes it the selected
+    /// project's active default.
     ///
     /// # Errors
     ///
@@ -1000,14 +1001,27 @@ impl<'database> ProjectService<'database> {
             .get_project(project_id)
             .await?
             .ok_or(ProjectServiceError::NotFound)?;
+        self.migrate_legacy_prompt_presets().await?;
+        if self
+            .database
+            .repository()
+            .find_prompt_preset_by_name(name)
+            .await?
+            .is_some()
+        {
+            return Err(ProjectServiceError::PromptNameConflict);
+        }
         let preset = PromptPreset {
             id: new_prompt_id(),
             name: name.to_owned(),
             prompt: prompt.to_owned(),
         };
+        self.database
+            .repository()
+            .create_prompt_preset(&preset, &timestamp_now())
+            .await?;
         project.default_prompt = preset.prompt.clone();
         project.filter_rules.active_prompt_id = Some(preset.id.clone());
-        project.filter_rules.prompt_presets.push(preset);
         let config_mirror_warning = self.persist_project(&project).await?;
         Ok(ProjectPromptResult {
             project,
@@ -1015,7 +1029,7 @@ impl<'database> ProjectService<'database> {
         })
     }
 
-    /// Selects an existing prompt preset as the project's active default.
+    /// Selects a client-wide prompt preset as the project's active default.
     ///
     /// # Errors
     ///
@@ -1032,12 +1046,12 @@ impl<'database> ProjectService<'database> {
             .get_project(project_id)
             .await?
             .ok_or(ProjectServiceError::NotFound)?;
-        let preset = project
-            .filter_rules
-            .prompt_presets
-            .iter()
-            .find(|preset| preset.id == prompt_id)
-            .cloned()
+        self.migrate_legacy_prompt_presets().await?;
+        let preset = self
+            .database
+            .repository()
+            .get_prompt_preset(prompt_id)
+            .await?
             .ok_or(ProjectServiceError::PromptNotFound)?;
         project.default_prompt = preset.prompt;
         project.filter_rules.active_prompt_id = Some(preset.id);
@@ -1046,6 +1060,80 @@ impl<'database> ProjectService<'database> {
             project,
             config_mirror_warning,
         })
+    }
+
+    /// Returns the client-wide prompt library after importing legacy prompt
+    /// presets that were incorrectly persisted inside individual projects.
+    ///
+    /// # Errors
+    ///
+    /// Returns a persistence error when the global library cannot be read or a
+    /// legacy preset cannot be imported.
+    pub async fn list_prompt_presets(&self) -> Result<Vec<PromptPreset>, ProjectServiceError> {
+        self.migrate_legacy_prompt_presets().await?;
+        Ok(self.database.repository().list_prompt_presets().await?)
+    }
+
+    async fn migrate_legacy_prompt_presets(&self) -> Result<(), ProjectServiceError> {
+        let projects = self.database.repository().list_projects().await?;
+        for project in projects {
+            for legacy in &project.filter_rules.prompt_presets {
+                if self
+                    .database
+                    .repository()
+                    .get_prompt_preset(&legacy.id)
+                    .await?
+                    .is_some()
+                {
+                    continue;
+                }
+
+                let mut migrated = legacy.clone();
+                let base_name = migrated.name.trim();
+                if base_name.is_empty() || migrated.prompt.trim().is_empty() {
+                    continue;
+                }
+                migrated.name = self
+                    .unique_legacy_prompt_name(base_name, &project.name)
+                    .await?;
+                self.database
+                    .repository()
+                    .create_prompt_preset(&migrated, &timestamp_now())
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn unique_legacy_prompt_name(
+        &self,
+        name: &str,
+        project_name: &str,
+    ) -> Result<String, ProjectServiceError> {
+        if self
+            .database
+            .repository()
+            .find_prompt_preset_by_name(name)
+            .await?
+            .is_none()
+        {
+            return Ok(name.to_owned());
+        }
+
+        let prefix = format!("{name} ({project_name})");
+        let mut candidate = prefix.clone();
+        let mut suffix = 2_u32;
+        while self
+            .database
+            .repository()
+            .find_prompt_preset_by_name(&candidate)
+            .await?
+            .is_some()
+        {
+            candidate = format!("{prefix} {suffix}");
+            suffix += 1;
+        }
+        Ok(candidate)
     }
 
     async fn persist_project(&self, project: &Project) -> Result<bool, ProjectServiceError> {
@@ -2913,7 +3001,6 @@ struct ProjectConfigMirror<'project> {
     name: &'project str,
     source_directory: &'project str,
     default_prompt: &'project str,
-    prompt_presets: &'project [PromptPreset],
     active_prompt_id: &'project Option<String>,
     default_model: &'project Option<String>,
     context_model: &'project Option<String>,
@@ -2933,7 +3020,6 @@ fn write_project_mirror(project: &Project) -> std::io::Result<()> {
         name: &project.name,
         source_directory: &project.source_directory,
         default_prompt: &project.default_prompt,
-        prompt_presets: &project.filter_rules.prompt_presets,
         active_prompt_id: &project.filter_rules.active_prompt_id,
         default_model: &project.default_model,
         context_model: &project.context_model,
@@ -3007,9 +3093,9 @@ mod tests {
         time::Duration,
     };
 
-    use batch_code_analyzer_domain::ApiProfileId;
+    use batch_code_analyzer_domain::{ApiProfileId, PromptPreset};
     use batch_code_analyzer_model_providers::OpenAiResponsesProvider;
-    use batch_code_analyzer_persistence::Database;
+    use batch_code_analyzer_persistence::{Database, ProjectRowMetadata};
     use batch_code_analyzer_repository_scanner::ScanCancellation;
     use batch_code_analyzer_secret_store::{MemorySecretStore, SecretStore, SecretValue};
     use batch_code_analyzer_security_core::SafeRoot;
@@ -4304,37 +4390,53 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn project_prompt_library_saves_multiple_presets_and_selects_one() {
+    async fn global_prompt_library_is_shared_without_rewriting_other_project_defaults() {
         let database = Database::open_in_memory()
             .await
             .expect("database should open");
-        let path = temporary_directory("prompt-library");
-        let project = ProjectService::new(&database)
-            .add_project(&path)
+        let first_path = temporary_directory("prompt-library-first");
+        let second_path = temporary_directory("prompt-library-second");
+        let first_project = ProjectService::new(&database)
+            .add_project(&first_path)
             .await
             .expect("project should add")
+            .project;
+        let second_project = ProjectService::new(&database)
+            .add_project(&second_path)
+            .await
+            .expect("second project should add")
             .project;
         let service = ProjectService::new(&database);
 
         let first = service
-            .save_prompt(&project.id, "职责说明", "解释模块职责。")
+            .save_prompt(&first_project.id, "职责说明", "解释模块职责。")
             .await
             .expect("first prompt should save");
         assert_eq!(first.project.default_prompt, "解释模块职责。");
-        assert_eq!(first.project.filter_rules.prompt_presets.len(), 1);
-        let first_id = first.project.filter_rules.prompt_presets[0].id.clone();
+        assert!(first.project.filter_rules.prompt_presets.is_empty());
+        let first_id = service
+            .list_prompt_presets()
+            .await
+            .expect("global prompts should load")
+            .into_iter()
+            .find(|preset| preset.name == "职责说明")
+            .expect("saved prompt should be global")
+            .id;
 
-        let second = service
-            .save_prompt(&project.id, "影响分析", "分析修改影响。")
+        service
+            .save_prompt(&first_project.id, "影响分析", "分析修改影响。")
             .await
             .expect("second prompt should save");
-        assert_eq!(second.project.filter_rules.prompt_presets.len(), 2);
-        assert_eq!(second.project.default_prompt, "分析修改影响。");
+        let global_prompts = service
+            .list_prompt_presets()
+            .await
+            .expect("global prompts should load");
+        assert_eq!(global_prompts.len(), 2);
 
         let selected = service
-            .select_prompt(&project.id, &first_id)
+            .select_prompt(&second_project.id, &first_id)
             .await
-            .expect("saved prompt should be selectable");
+            .expect("global prompt should be selectable by another project");
         assert_eq!(selected.project.default_prompt, "解释模块职责。");
         assert_eq!(
             selected.project.filter_rules.active_prompt_id.as_deref(),
@@ -4342,7 +4444,24 @@ mod tests {
         );
         assert_eq!(
             service
-                .save_prompt(&project.id, "", "内容")
+                .get_project(&first_project.id)
+                .await
+                .expect("first project should be readable")
+                .expect("first project should exist")
+                .default_prompt,
+            "分析修改影响。"
+        );
+        assert_eq!(
+            service
+                .save_prompt(&first_project.id, "职责说明", "不同内容")
+                .await
+                .expect_err("duplicate prompt names should be rejected")
+                .code(),
+            "validation_invalid_value"
+        );
+        assert_eq!(
+            service
+                .save_prompt(&first_project.id, "", "内容")
                 .await
                 .expect_err("empty prompt name should be rejected")
                 .code(),
@@ -4350,13 +4469,94 @@ mod tests {
         );
         assert_eq!(
             service
-                .select_prompt(&project.id, "missing")
+                .select_prompt(&second_project.id, "missing")
                 .await
                 .expect_err("unknown prompt should be rejected")
                 .code(),
             "prompt_not_found"
         );
+        let _ = fs::remove_dir_all(first_path);
+        let _ = fs::remove_dir_all(second_path);
+    }
+
+    #[tokio::test]
+    async fn legacy_project_prompt_presets_are_imported_once_with_their_ids() {
+        let database = Database::open_in_memory()
+            .await
+            .expect("database should open");
+        let path = temporary_directory("legacy-prompt-library");
+        let second_path = temporary_directory("legacy-prompt-library-conflict");
+        let mut project = ProjectService::new(&database)
+            .add_project(&path)
+            .await
+            .expect("project should add")
+            .project;
+        project.filter_rules.prompt_presets.push(PromptPreset {
+            id: "legacy-prompt-id".into(),
+            name: "遗留说明".into(),
+            prompt: "解释遗留模块。".into(),
+        });
+        project.filter_rules.active_prompt_id = Some("legacy-prompt-id".into());
+        database
+            .repository()
+            .update_project(
+                &project,
+                ProjectRowMetadata {
+                    canonical_source_directory: project.source_directory.clone(),
+                    created_at: project.last_opened_at.clone(),
+                    updated_at: timestamp_now(),
+                },
+            )
+            .await
+            .expect("legacy project should persist");
+        let mut conflicting_project = ProjectService::new(&database)
+            .add_project(&second_path)
+            .await
+            .expect("conflicting project should add")
+            .project;
+        conflicting_project
+            .filter_rules
+            .prompt_presets
+            .push(PromptPreset {
+                id: "legacy-prompt-conflict-id".into(),
+                name: "遗留说明".into(),
+                prompt: "解释另一套遗留模块。".into(),
+            });
+        database
+            .repository()
+            .update_project(
+                &conflicting_project,
+                ProjectRowMetadata {
+                    canonical_source_directory: conflicting_project.source_directory.clone(),
+                    created_at: conflicting_project.last_opened_at.clone(),
+                    updated_at: timestamp_now(),
+                },
+            )
+            .await
+            .expect("conflicting legacy project should persist");
+
+        let service = ProjectService::new(&database);
+        let first_read = service
+            .list_prompt_presets()
+            .await
+            .expect("legacy prompts should import");
+        assert!(first_read.iter().any(|preset| {
+            preset.id == "legacy-prompt-id"
+                && preset.name == "遗留说明"
+                && preset.prompt == "解释遗留模块。"
+        }));
+        assert!(first_read.iter().any(|preset| {
+            preset.id == "legacy-prompt-conflict-id"
+                && preset.name.starts_with("遗留说明 (")
+                && preset.prompt == "解释另一套遗留模块。"
+        }));
+        let second_read = service
+            .list_prompt_presets()
+            .await
+            .expect("repeat import should be idempotent");
+        assert_eq!(first_read, second_read);
         let _ = fs::remove_dir_all(path);
+        let _ = fs::remove_dir_all(second_path);
     }
 
     #[tokio::test]

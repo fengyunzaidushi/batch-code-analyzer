@@ -5,8 +5,8 @@ use std::collections::HashSet;
 use batch_code_analyzer_domain::{
     ApiProfile, ApiProfileId, ApiRouting, Attempt, AttemptId, ContextStatus, ContextVersion,
     ContextVersionId, FileRecord, FileRecordId, FileResultStatus, FileSourceStatus, Project,
-    ProjectId, Rfc3339Timestamp, Run, RunId, RunStateMachine, RunStats, RunStatus, RunTransition,
-    SensitiveFinding, Task, TaskId, TaskStateMachine, TaskStatus, TaskTransition,
+    ProjectId, PromptPreset, Rfc3339Timestamp, Run, RunId, RunStateMachine, RunStats, RunStatus,
+    RunTransition, SensitiveFinding, Task, TaskId, TaskStateMachine, TaskStatus, TaskTransition,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
@@ -138,6 +138,95 @@ impl Repository<'_> {
         }
         .await;
         finish_read(transaction, result).await
+    }
+
+    /// Lists the client-wide prompt library in stable creation order.
+    ///
+    /// # Errors
+    ///
+    /// Returns a persistence error when the prompt rows cannot be read.
+    pub async fn list_prompt_presets(&self) -> Result<Vec<PromptPreset>, PersistenceError> {
+        let mut transaction = self.database.begin_write().await?;
+        let result = async {
+            let rows = sqlx::query(
+                "SELECT id, name, content FROM prompt_library ORDER BY created_at ASC, id ASC",
+            )
+            .fetch_all(transaction.connection())
+            .await
+            .map_err(|_| PersistenceError::TransactionFailed)?;
+            rows.into_iter()
+                .map(|row| prompt_preset_from_row(&row))
+                .collect()
+        }
+        .await;
+        finish_read(transaction, result).await
+    }
+
+    /// Finds a global prompt preset by its stable ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns a persistence error when the prompt row cannot be read.
+    pub async fn get_prompt_preset(
+        &self,
+        prompt_id: &str,
+    ) -> Result<Option<PromptPreset>, PersistenceError> {
+        let mut transaction = self.database.begin_write().await?;
+        let result = sqlx::query("SELECT id, name, content FROM prompt_library WHERE id = ?")
+            .bind(prompt_id)
+            .fetch_optional(transaction.connection())
+            .await
+            .map_err(|_| PersistenceError::TransactionFailed)?
+            .map(|row| prompt_preset_from_row(&row))
+            .transpose();
+        finish_read(transaction, result).await
+    }
+
+    /// Finds a global prompt preset by its user-visible unique name.
+    ///
+    /// # Errors
+    ///
+    /// Returns a persistence error when the prompt row cannot be read.
+    pub async fn find_prompt_preset_by_name(
+        &self,
+        name: &str,
+    ) -> Result<Option<PromptPreset>, PersistenceError> {
+        let mut transaction = self.database.begin_write().await?;
+        let result = sqlx::query("SELECT id, name, content FROM prompt_library WHERE name = ?")
+            .bind(name)
+            .fetch_optional(transaction.connection())
+            .await
+            .map_err(|_| PersistenceError::TransactionFailed)?
+            .map(|row| prompt_preset_from_row(&row))
+            .transpose();
+        finish_read(transaction, result).await
+    }
+
+    /// Inserts a user-managed global prompt preset.
+    ///
+    /// # Errors
+    ///
+    /// Returns a persistence error when the preset cannot be committed.
+    pub async fn create_prompt_preset(
+        &self,
+        preset: &PromptPreset,
+        now: &Rfc3339Timestamp,
+    ) -> Result<(), PersistenceError> {
+        let mut transaction = self.database.begin_write().await?;
+        let result = sqlx::query(
+            "INSERT INTO prompt_library (id, name, content, is_builtin, created_at, updated_at)
+             VALUES (?, ?, ?, 0, ?, ?)",
+        )
+        .bind(&preset.id)
+        .bind(&preset.name)
+        .bind(&preset.prompt)
+        .bind(now.as_str())
+        .bind(now.as_str())
+        .execute(transaction.connection())
+        .await
+        .map_err(|_| PersistenceError::TransactionFailed)
+        .map(|_| ());
+        finish_write(transaction, result).await
     }
 
     /// Inserts an API profile's non-sensitive metadata.
@@ -2250,6 +2339,14 @@ fn project_from_row(row: &SqliteRow) -> Result<Project, PersistenceError> {
         last_opened_at: get(row, "last_opened_at")?,
     }
     .try_into()
+}
+
+fn prompt_preset_from_row(row: &SqliteRow) -> Result<PromptPreset, PersistenceError> {
+    Ok(PromptPreset {
+        id: get(row, "id")?,
+        name: get(row, "name")?,
+        prompt: get(row, "content")?,
+    })
 }
 
 fn file_record_from_row(row: &SqliteRow) -> Result<FileRecord, PersistenceError> {

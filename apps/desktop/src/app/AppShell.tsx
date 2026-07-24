@@ -1,5 +1,8 @@
 import {
   Activity,
+  ArrowDown,
+  ArrowUp,
+  ArrowUpDown,
   ChevronRight,
   CircleAlert,
   Eye,
@@ -974,6 +977,14 @@ function PromptWorkspace({
     selectableFiles.length > 0 &&
     selectableFiles.every((file) => file.included);
   const [isUpdatingAllFiles, setIsUpdatingAllFiles] = useState(false);
+  const [runTaskSort, setRunTaskSort] = useState<RunTaskSort>(null);
+  const toggleRunTaskSort = (key: RunTaskSortKey) => {
+    setRunTaskSort((current) => ({
+      direction:
+        current?.key === key && current.direction === "asc" ? "desc" : "asc",
+      key,
+    }));
+  };
   const toggleAllFiles = async () => {
     if (isUpdatingAllFiles || selectableFiles.length === 0) return;
     const included = !allFilesIncluded;
@@ -1013,10 +1024,10 @@ function PromptWorkspace({
       <section className="prompt-band">
         <div className="prompt-band-heading">
           <label htmlFor="project-prompt">项目默认提示词</label>
-          <span>{promptPresets.length} 个已保存</span>
+          <span>{promptPresets.length} 个常用提示词</span>
         </div>
         <div className="prompt-library-controls">
-          <label htmlFor="prompt-name">提示词名称</label>
+          <label htmlFor="prompt-name">常用提示词名称</label>
           <input
             disabled={!hasProject}
             id="prompt-name"
@@ -1024,7 +1035,7 @@ function PromptWorkspace({
             placeholder="例如：架构说明"
             value={promptName}
           />
-          <label htmlFor="prompt-preset-select">选择已保存提示词</label>
+          <label htmlFor="prompt-preset-select">选择常用提示词</label>
           <select
             disabled={!hasProject || promptPresets.length === 0}
             id="prompt-preset-select"
@@ -1067,7 +1078,7 @@ function PromptWorkspace({
           <span>
             {promptSaveError ??
               (hasProject
-                ? "保存后可在下拉菜单中切换提示词"
+                ? "保存后可在所有项目的下拉菜单中切换"
                 : "添加项目后可以编辑提示词")}
           </span>
           <div>
@@ -1089,7 +1100,7 @@ function PromptWorkspace({
               }}
               type="button"
             >
-              保存为项目默认
+              保存为项目默认并加入常用
             </button>
             <button
               className="primary-button"
@@ -1246,11 +1257,13 @@ function PromptWorkspace({
         onRetryTask={onRetryTask}
         onRetryTasks={onRetryTasks}
         onSelectRun={onSelectRun}
+        onToggleSort={toggleRunTaskSort}
         retryBlocked={retryBlocked}
         retryingTaskIds={retryingTaskIds}
         isBatchRetrying={isBatchRetrying}
         batchRetryTargetCount={batchRetryTargetCount}
         runHistory={runHistory}
+        sort={runTaskSort}
         runTasks={runTasks}
         selectedRunId={selectedRunId}
         selectedTaskId={selectedTaskId}
@@ -1269,11 +1282,13 @@ function RunResultsPanel({
   onRetryTask,
   onRetryTasks,
   onSelectRun,
+  onToggleSort,
   retryBlocked,
   retryingTaskIds,
   isBatchRetrying,
   batchRetryTargetCount,
   runHistory,
+  sort,
   runTasks,
   selectedRunId,
   selectedTaskId,
@@ -1289,11 +1304,13 @@ function RunResultsPanel({
   onRetryTask: (taskId: string) => Promise<void>;
   onRetryTasks: (taskIds: readonly string[]) => Promise<void>;
   onSelectRun: (runId: string) => void;
+  onToggleSort: (key: RunTaskSortKey) => void;
   retryBlocked: boolean;
   retryingTaskIds: readonly string[];
   isBatchRetrying: boolean;
   batchRetryTargetCount: number;
   runHistory: readonly RunSummaryDto[];
+  sort: RunTaskSort;
   runTasks: readonly TaskSummaryDto[];
   selectedRunId: string | null;
   selectedTaskId: string | null;
@@ -1303,6 +1320,10 @@ function RunResultsPanel({
     useState<TaskRequestPreviewResponse | null>(null);
   const [loadingPromptTaskId, setLoadingPromptTaskId] = useState<string | null>(
     null,
+  );
+  const sortedTasks = useMemo(
+    () => sortRunTasks(runTasks, sort),
+    [runTasks, sort],
   );
   const selectedTask = runTasks.find((task) => task.id === selectedTaskId);
   const selectedDetail = selectedTaskId ? taskDetails[selectedTaskId] : null;
@@ -1397,29 +1418,50 @@ function RunResultsPanel({
               )}
           </div>
           <VirtualTaskTable
+            ariaLabel="运行结果任务"
             className="run-results-task-table"
             emptyLabel="该 Run 没有 Task"
             getRowKey={(task) => task.id}
             header={
               <>
-                <span>文件</span>
-                <span>状态</span>
-                <span>模型</span>
-                <span>提示词</span>
-                <span>结果 / Attempt</span>
+                <span role="columnheader">文件</span>
+                <SortableTaskHeader
+                  activeSort={sort}
+                  label="状态"
+                  onSort={() => onToggleSort("status")}
+                  sortKey="status"
+                />
+                <SortableTaskHeader
+                  activeSort={sort}
+                  label="请求时间"
+                  onSort={() => onToggleSort("startedAt")}
+                  sortKey="startedAt"
+                />
+                <span role="columnheader">模型</span>
+                <span role="columnheader">提示词</span>
+                <span role="columnheader">结果 / Attempt</span>
               </>
             }
-            items={runTasks}
+            items={sortedTasks}
             renderRow={(task) => {
               const detail = taskDetails[task.id];
               return (
                 <>
-                  <span className="run-task-path" title={task.relativePath}>
+                  <span
+                    className="run-task-path"
+                    role="cell"
+                    title={task.relativePath}
+                  >
                     {task.relativePath}
                   </span>
-                  <span>{taskStatusLabel(task.status)}</span>
-                  <span title={task.modelSnapshot}>{task.modelSnapshot}</span>
-                  <span className="run-task-prompt">
+                  <span role="cell">{taskStatusLabel(task.status)}</span>
+                  <span className="run-task-request-time" role="cell">
+                    {formatTaskStartedAt(task.startedAt)}
+                  </span>
+                  <span role="cell" title={task.modelSnapshot}>
+                    {task.modelSnapshot}
+                  </span>
+                  <span className="run-task-prompt" role="cell">
                     <button
                       aria-busy={loadingPromptTaskId === task.id}
                       aria-label={`查看提示词 ${task.relativePath}`}
@@ -1432,7 +1474,7 @@ function RunResultsPanel({
                       查看提示词
                     </button>
                   </span>
-                  <span className="run-task-actions">
+                  <span className="run-task-actions" role="cell">
                     {task.hasResult || task.status === "failed" ? (
                       <button
                         aria-label={`查看结果 ${task.relativePath}`}
@@ -1503,6 +1545,114 @@ function RunResultsPanel({
       ) : null}
     </section>
   );
+}
+
+type RunTaskSortKey = "status" | "startedAt";
+type RunTaskSort = {
+  key: RunTaskSortKey;
+  direction: "asc" | "desc";
+} | null;
+
+const TASK_STATUS_SORT_ORDER: Record<TaskSummaryDto["status"], number> = {
+  pending: 0,
+  queued: 1,
+  running: 2,
+  succeeded: 3,
+  failed: 4,
+  cancelled: 5,
+  interrupted: 6,
+  source_changed: 7,
+};
+
+function SortableTaskHeader({
+  activeSort,
+  label,
+  onSort,
+  sortKey,
+}: {
+  activeSort: RunTaskSort;
+  label: string;
+  onSort: () => void;
+  sortKey: RunTaskSortKey;
+}) {
+  const direction = activeSort?.key === sortKey ? activeSort.direction : null;
+  const nextDirection = direction === "asc" ? "desc" : "asc";
+  const SortIcon =
+    direction === "asc"
+      ? ArrowUp
+      : direction === "desc"
+        ? ArrowDown
+        : ArrowUpDown;
+  const nextDirectionLabel = nextDirection === "asc" ? "升序" : "降序";
+
+  return (
+    <span
+      aria-sort={
+        direction === "asc"
+          ? "ascending"
+          : direction === "desc"
+            ? "descending"
+            : undefined
+      }
+      className="task-table-column-header"
+      role="columnheader"
+    >
+      <button
+        aria-label={`按${label}${nextDirectionLabel}排序`}
+        className={`task-table-sort-button${direction ? " is-active" : ""}`}
+        onClick={onSort}
+        title={`按${label}${nextDirectionLabel}排序`}
+        type="button"
+      >
+        <span>{label}</span>
+        <SortIcon aria-hidden="true" size={13} />
+      </button>
+    </span>
+  );
+}
+
+function sortRunTasks(
+  tasks: readonly TaskSummaryDto[],
+  sort: RunTaskSort,
+): readonly TaskSummaryDto[] {
+  if (!sort) return tasks;
+
+  return tasks
+    .map((task, originalIndex) => ({ originalIndex, task }))
+    .sort((left, right) => {
+      const comparison =
+        sort.key === "status"
+          ? (TASK_STATUS_SORT_ORDER[left.task.status] -
+              TASK_STATUS_SORT_ORDER[right.task.status]) *
+            (sort.direction === "asc" ? 1 : -1)
+          : compareStartedAt(
+              left.task.startedAt,
+              right.task.startedAt,
+              sort.direction,
+            );
+      if (comparison === 0) return left.originalIndex - right.originalIndex;
+      return comparison;
+    })
+    .map(({ task }) => task);
+}
+
+function compareStartedAt(
+  left: string | null,
+  right: string | null,
+  direction: "asc" | "desc",
+): number {
+  const leftTime = parseTimestamp(left);
+  const rightTime = parseTimestamp(right);
+  if (leftTime === null && rightTime === null) return 0;
+  if (leftTime === null) return 1;
+  if (rightTime === null) return -1;
+  return (leftTime - rightTime) * (direction === "asc" ? 1 : -1);
+}
+
+function parseTimestamp(value: string | null): number | null {
+  if (value === null) return null;
+  const timestamp = Date.parse(value);
+  return Number.isNaN(timestamp) ? null : timestamp;
 }
 
 function AttemptDetailPanel({
@@ -1729,6 +1879,15 @@ function PromptDetailPanel({
 
 function formatRunLabel(run: RunSummaryDto): string {
   return `${formatRunCreatedAt(run.createdAt) ?? run.id} · ${historyRunStatusLabel(run.status)}`;
+}
+
+function formatTaskStartedAt(startedAt: string | null): string {
+  if (startedAt === null) return "—";
+  const date = new Date(startedAt);
+  if (Number.isNaN(date.getTime())) return "—";
+
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
 function formatRunCreatedAt(createdAt: string): string | null {

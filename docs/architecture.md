@@ -499,6 +499,7 @@ CREATE TABLE attempts (
   UNIQUE(task_id, sequence)
 );
 
+-- 客户端全局常用提示词库；不属于某一个 Project，项目仅保存当前默认值和选中条目 ID。
 CREATE TABLE prompt_library (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL UNIQUE,
@@ -682,6 +683,12 @@ Rust Event 到达后，前端只更新受影响查询缓存或执行精确失效
 - 单元格只显示摘要，不内嵌完整编辑器；
 - 详细编辑进入 Drawer；
 - 分页查询不是强制要求，但 IPC 必须支持游标或 offset/limit；
+- 运行结果的状态与请求时间排序由前端基于 `TaskSummaryDto.status` 和
+  `TaskSummaryDto.startedAt` 生成稳定派生列表，不原地修改查询缓存，也不逐行调用
+  `task_get` 加载 Attempt；
+- 状态使用显式业务顺序，时间使用时间戳比较；时间为空或无效时在升序、降序中均置后，
+  相同值保持 IPC 返回的原始相对顺序；
+- 排序状态由结果工作区持有，查询刷新、Task 局部更新和历史 Run 切换不重置当前排序；
 - 状态更新按 Task ID 局部合并；
 - Markdown 结果按需加载；
 - 失败 Task 的结果预览复用按需加载的 `task_get` Attempt 历史，优先展示最近一次失败

@@ -73,8 +73,8 @@ project_relocate
 - `project_update_run_settings`：更新未来 Run 使用的主 API Profile、项目默认模型和并发数；
   `concurrency` 为必填的 `1..=30` 整数，Profile 引用必须存在。响应返回更新后的
   `ProjectDetailDto`（包含 `concurrency`）和配置镜像写入警告；既有 Run 快照不变。
-- `project_prompt_save`：将命名提示词保存到当前项目的提示词库，并立即设为项目默认；
-- `project_prompt_select`：从当前项目提示词库选择一个预设，并将其内容设为项目默认；
+- `project_prompt_save`：将命名提示词保存到客户端全局常用提示词库，并立即设为当前项目默认；
+- `project_prompt_select`：从客户端全局常用提示词库选择一个预设，并将其内容设为当前项目默认；
 - `project_remove`：只移除客户端登记，不删除仓库或历史输出。
 - `project_relocate`：重新绑定不可用项目，必须校验项目 ID 或仓库配置的一致性。
 
@@ -155,6 +155,11 @@ prompt_generate
 密钥、项目默认模型和当前上下文摘要生成一个可编辑候选。命令只返回候选提示词，不保存
 项目配置，也不创建 Run；用户确认后由前端回填当前提示词输入框，再可通过
 `project_prompt_save` 保存为项目预设。
+
+`ProjectDetailDto.promptPresets` 是客户端全局常用提示词库，`activePromptId` 只表示当前项目
+选择的条目。保存或选择仅更新请求中的 `projectId` 对应项目的 `defaultPrompt`；全局条目不会
+写入项目配置镜像。为兼容旧版本，首次读取全局库时会导入旧项目 `filterRules.promptPresets`
+中的条目，保留 ID；名称冲突且内容不同的条目会附加稳定项目名后缀，而非静默丢弃。
 
 ### 4.4 API Profile
 

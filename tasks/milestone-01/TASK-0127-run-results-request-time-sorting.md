@@ -1,7 +1,7 @@
 # TASK-0127：运行结果请求时间与列排序
 
-- Status: Ready
-- Owner: Unassigned
+- Status: Done（全量 Rust 基线门禁存在既有阻塞，见验证记录）
+- Owner: Codex
 - Branch: feat/m1-run-results-request-time-sorting
 - Dependencies: TASK-0116, TASK-0119
 
@@ -109,19 +109,35 @@ tauri.conf.json
 
 ## 验收标准
 
-- [ ] 运行结果表格在状态后显示“请求时间”列，时间精确到秒，空值显示 `—`；
-- [ ] 状态列点击后可在规定业务顺序的升序和降序之间切换；
-- [ ] 请求时间列点击后可在时间升序和降序之间切换，空值始终置后；
-- [ ] 活动排序方向有清晰视觉标识和可访问语义；
-- [ ] 排序稳定，不修改原始数据，也不影响虚拟滚动和现有 Task 操作；
-- [ ] 刷新、状态更新、人工重试和切换 Run 后保持当前排序；
-- [ ] 桌面和窄屏下表头、时间内容与操作区无错位或重叠；
-- [ ] 成功路径、空值、相同值和排序切换边界均有测试；
-- [ ] PRD 与架构文档同步，公共 IPC 契约保持不变；
-- [ ] `pnpm format:check`、`pnpm lint`、`pnpm typecheck`、`pnpm test` 通过；
-- [ ] `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets -- -D warnings`、
+- [x] 运行结果表格在状态后显示“请求时间”列，时间精确到秒，空值显示 `—`；
+- [x] 状态列点击后可在规定业务顺序的升序和降序之间切换；
+- [x] 请求时间列点击后可在时间升序和降序之间切换，空值始终置后；
+- [x] 活动排序方向有清晰视觉标识和可访问语义；
+- [x] 排序稳定，不修改原始数据，也不影响虚拟滚动和现有 Task 操作；
+- [x] 刷新、状态更新、人工重试和切换 Run 后保持当前排序；
+- [x] 桌面和窄屏下表头、时间内容与操作区无错位或重叠；
+- [x] 成功路径、空值、相同值和排序切换边界均有测试；
+- [x] PRD 与架构文档同步，公共 IPC 契约保持不变；
+- [x] `pnpm format:check`、`pnpm lint`、`pnpm typecheck`、`pnpm test` 通过；
+- [x] `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets -- -D warnings`、
       `cargo test --workspace` 已执行并记录结果；
-- [ ] `git diff` 不包含允许目录之外的本任务修改。
+- [x] `git diff` 不包含允许目录之外的本任务修改。
+
+## 验证记录
+
+- `pnpm install --frozen-lockfile`：通过，Workspace 依赖已是最新状态，锁文件未变化。
+- `pnpm format:check`、`pnpm lint`、`pnpm typecheck`、`pnpm ipc:check`：通过。
+- `pnpm test`：通过，前端 7 个测试文件共 54 个测试通过。
+- `AppShell.test.tsx` 专项测试：29 个测试通过，覆盖全部 Task 状态的稳定双向排序、请求
+  时间本地秒级格式、相同时间稳定排序、空值双向置后、排序字段切换、刷新与历史 Run
+  切换保持排序，以及排序后操作仍使用正确 Task ID。
+- `cargo fmt --all -- --check`：通过。
+- `cargo clippy --workspace --all-targets -- -D warnings`：被未修改的
+  `crates/secret-store/src/lib.rs` 7 条既有 Pedantic 告警阻断。
+- `cargo test --workspace`：本任务及先执行到的包通过；未修改的
+  `crates/persistence/src/database.rs` 有 3 个 Windows 临时 SQLite 清理测试因
+  `os error 32` 失败。
+- Vite 开发服务器已启动于 `http://localhost:1420`，HTTP 状态为 200。
 
 ## 交付格式
 

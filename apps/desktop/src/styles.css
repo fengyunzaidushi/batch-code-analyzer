@@ -881,8 +881,35 @@ button:disabled {
 .run-results-task-table .task-table-header,
 .run-results-task-table .task-table-row {
   grid-template-columns:
-    minmax(220px, 2fr) minmax(90px, 0.7fr) minmax(100px, 0.8fr)
-    minmax(100px, 0.8fr) minmax(150px, 1.2fr);
+    minmax(220px, 2fr) minmax(90px, 0.7fr) minmax(148px, 1fr)
+    minmax(100px, 0.8fr) minmax(100px, 0.8fr) minmax(170px, 1.2fr);
+}
+.task-table-column-header {
+  min-width: 0;
+}
+.task-table-sort-button {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 0;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  gap: 4px;
+  font: inherit;
+  font-weight: inherit;
+  cursor: pointer;
+}
+.task-table-sort-button:hover,
+.task-table-sort-button.is-active {
+  color: #315f84;
+}
+.task-table-sort-button:focus-visible {
+  outline: 2px solid #6f9abd;
+  outline-offset: 2px;
+}
+.run-task-request-time {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 .task-table-viewport {
   overflow-y: auto;
@@ -1655,7 +1682,7 @@ button:disabled {
   }
   .run-results-task-table .task-table-header,
   .run-results-task-table .task-table-row {
-    min-width: 760px;
+    min-width: 940px;
   }
   .api-config-band {
     display: block;

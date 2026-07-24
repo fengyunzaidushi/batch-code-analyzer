@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type {
@@ -138,7 +138,7 @@ describe("AppShell", () => {
     ).toBeInTheDocument();
   });
 
-  it("saves the current prompt as a named project preset", async () => {
+  it("saves the current prompt as a named global prompt", async () => {
     const user = userEvent.setup();
     const onSaveProjectPrompt = vi.fn().mockResolvedValue(undefined);
     render(
@@ -148,14 +148,16 @@ describe("AppShell", () => {
       />,
     );
 
-    await user.clear(screen.getByLabelText("提示词名称"));
-    await user.type(screen.getByLabelText("提示词名称"), "架构说明");
+    await user.clear(screen.getByLabelText("常用提示词名称"));
+    await user.type(screen.getByLabelText("常用提示词名称"), "架构说明");
     await user.clear(screen.getByLabelText("项目默认提示词"));
     await user.type(
       screen.getByLabelText("项目默认提示词"),
       "请说明模块边界。",
     );
-    const saveButton = screen.getByRole("button", { name: "保存为项目默认" });
+    const saveButton = screen.getByRole("button", {
+      name: "保存为项目默认并加入常用",
+    });
     expect(saveButton).toBeEnabled();
     await user.click(saveButton);
 
@@ -166,7 +168,7 @@ describe("AppShell", () => {
     });
   });
 
-  it("selects a saved prompt preset and fills the editor", async () => {
+  it("selects a global prompt and fills the editor", async () => {
     const user = userEvent.setup();
     const onSelectProjectPrompt = vi.fn().mockResolvedValue(undefined);
     render(
@@ -186,7 +188,7 @@ describe("AppShell", () => {
     );
 
     await user.selectOptions(
-      screen.getByLabelText("选择已保存提示词"),
+      screen.getByLabelText("选择常用提示词"),
       "prompt-2",
     );
     expect(onSelectProjectPrompt).toHaveBeenCalledWith({
@@ -625,6 +627,287 @@ describe("AppShell", () => {
     expect(onLoadTaskDetail).toHaveBeenCalledWith(task.id);
   });
 
+  it("sorts run tasks by status in the stable business order", async () => {
+    const user = userEvent.setup();
+    const tasks = [
+      taskSummary({
+        id: "task-success-a",
+        relativePath: "src/success-a.ts",
+        status: "succeeded",
+      }),
+      taskSummary({
+        id: "task-failed",
+        relativePath: "src/failed.ts",
+        status: "failed",
+      }),
+      taskSummary({
+        id: "task-queued",
+        relativePath: "src/queued.ts",
+        status: "queued",
+      }),
+      taskSummary({
+        id: "task-success-b",
+        relativePath: "src/success-b.ts",
+        status: "succeeded",
+      }),
+      taskSummary({
+        id: "task-pending",
+        relativePath: "src/pending.ts",
+        status: "pending",
+      }),
+      taskSummary({
+        id: "task-source-changed",
+        relativePath: "src/source-changed.ts",
+        status: "source_changed",
+      }),
+      taskSummary({
+        id: "task-running",
+        relativePath: "src/running.ts",
+        status: "running",
+      }),
+      taskSummary({
+        id: "task-cancelled",
+        relativePath: "src/cancelled.ts",
+        status: "cancelled",
+      }),
+      taskSummary({
+        id: "task-interrupted",
+        relativePath: "src/interrupted.ts",
+        status: "interrupted",
+      }),
+    ];
+    const originalOrder = tasks.map((task) => task.relativePath);
+    const view = render(
+      <AppShell
+        projects={[project()]}
+        runHistory={[runSummary()]}
+        runTasks={tasks}
+        selectedRunId="run-1"
+      />,
+    );
+
+    expect(runTaskPaths()).toEqual(originalOrder);
+    await user.click(screen.getByRole("button", { name: "按状态升序排序" }));
+    expect(runTaskPaths()).toEqual([
+      "src/pending.ts",
+      "src/queued.ts",
+      "src/running.ts",
+      "src/success-a.ts",
+      "src/success-b.ts",
+      "src/failed.ts",
+      "src/cancelled.ts",
+      "src/interrupted.ts",
+      "src/source-changed.ts",
+    ]);
+    expect(
+      screen.getByRole("button", { name: "按状态降序排序" }).parentElement,
+    ).toHaveAttribute("aria-sort", "ascending");
+
+    const refreshedTasks = tasks.map((task) =>
+      task.id === "task-failed"
+        ? { ...task, status: "pending" as const }
+        : task,
+    );
+    view.rerender(
+      <AppShell
+        projects={[project()]}
+        runHistory={[runSummary()]}
+        runTasks={refreshedTasks}
+        selectedRunId="run-1"
+      />,
+    );
+    expect(runTaskPaths()).toEqual([
+      "src/failed.ts",
+      "src/pending.ts",
+      "src/queued.ts",
+      "src/running.ts",
+      "src/success-a.ts",
+      "src/success-b.ts",
+      "src/cancelled.ts",
+      "src/interrupted.ts",
+      "src/source-changed.ts",
+    ]);
+
+    await user.click(screen.getByRole("button", { name: "按状态降序排序" }));
+    expect(runTaskPaths()).toEqual([
+      "src/source-changed.ts",
+      "src/interrupted.ts",
+      "src/cancelled.ts",
+      "src/success-a.ts",
+      "src/success-b.ts",
+      "src/running.ts",
+      "src/queued.ts",
+      "src/failed.ts",
+      "src/pending.ts",
+    ]);
+    expect(
+      screen.getByRole("button", { name: "按状态升序排序" }).parentElement,
+    ).toHaveAttribute("aria-sort", "descending");
+    expect(tasks.map((task) => task.relativePath)).toEqual(originalOrder);
+  });
+
+  it("formats and sorts request times while keeping empty values last", async () => {
+    const user = userEvent.setup();
+    const earlyTime = new Date(2026, 0, 2, 3, 4, 5).toISOString();
+    const lateTime = new Date(2026, 0, 2, 4, 5, 6).toISOString();
+    const tasks = [
+      taskSummary({
+        id: "task-late",
+        relativePath: "src/late.ts",
+        startedAt: lateTime,
+      }),
+      taskSummary({
+        id: "task-empty",
+        relativePath: "src/empty.ts",
+        startedAt: null,
+      }),
+      taskSummary({
+        id: "task-early-a",
+        relativePath: "src/early-a.ts",
+        startedAt: earlyTime,
+      }),
+      taskSummary({
+        id: "task-early-b",
+        relativePath: "src/early-b.ts",
+        startedAt: earlyTime,
+      }),
+    ];
+    render(
+      <AppShell
+        projects={[project()]}
+        runHistory={[runSummary()]}
+        runTasks={tasks}
+        selectedRunId="run-1"
+      />,
+    );
+
+    const table = screen.getByRole("table", { name: "运行结果任务" });
+    const columnHeaders = within(table).getAllByRole("columnheader");
+    expect(columnHeaders).toHaveLength(6);
+    expect(columnHeaders[2]).toHaveTextContent("请求时间");
+    for (const row of within(table).getAllByRole("row").slice(1)) {
+      expect(within(row).getAllByRole("cell")).toHaveLength(6);
+    }
+    expect(within(table).getAllByText("2026-01-02 03:04:05")).toHaveLength(2);
+    expect(runTaskRequestTime("src/empty.ts")).toBe("—");
+
+    await user.click(
+      screen.getByRole("button", { name: "按请求时间升序排序" }),
+    );
+    expect(runTaskPaths()).toEqual([
+      "src/early-a.ts",
+      "src/early-b.ts",
+      "src/late.ts",
+      "src/empty.ts",
+    ]);
+    expect(
+      screen.getByRole("button", { name: "按请求时间降序排序" }).parentElement,
+    ).toHaveAttribute("aria-sort", "ascending");
+    expect(
+      screen.getByRole("button", { name: "按状态升序排序" }).parentElement,
+    ).not.toHaveAttribute("aria-sort");
+
+    await user.click(
+      screen.getByRole("button", { name: "按请求时间降序排序" }),
+    );
+    expect(runTaskPaths()).toEqual([
+      "src/late.ts",
+      "src/early-a.ts",
+      "src/early-b.ts",
+      "src/empty.ts",
+    ]);
+
+    await user.click(screen.getByRole("button", { name: "按状态升序排序" }));
+    expect(
+      screen.getByRole("button", { name: "按请求时间升序排序" }).parentElement,
+    ).not.toHaveAttribute("aria-sort");
+  });
+
+  it("keeps request-time sorting across Run changes and preserves Task actions", async () => {
+    const user = userEvent.setup();
+    const onOpenResult = vi.fn().mockResolvedValue(undefined);
+    const onSelectRun = vi.fn();
+    const earlyTime = new Date(2026, 1, 3, 4, 5, 6).toISOString();
+    const lateTime = new Date(2026, 1, 3, 5, 6, 7).toISOString();
+    const runOne = runSummary();
+    const runTwo = runSummary({ id: "run-2" });
+    const firstTasks = [
+      taskSummary({
+        id: "task-late",
+        relativePath: "src/late.ts",
+        startedAt: lateTime,
+      }),
+      taskSummary({
+        id: "task-early",
+        relativePath: "src/early.ts",
+        startedAt: earlyTime,
+      }),
+    ];
+    const view = render(
+      <AppShell
+        onOpenResult={onOpenResult}
+        onSelectRun={onSelectRun}
+        projects={[project()]}
+        runHistory={[runOne, runTwo]}
+        runTasks={firstTasks}
+        selectedRunId={runOne.id}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: "按请求时间升序排序" }),
+    );
+    await user.selectOptions(
+      screen.getByRole("combobox", { name: "选择 Run" }),
+      runTwo.id,
+    );
+    expect(onSelectRun).toHaveBeenCalledWith(runTwo.id);
+
+    const refreshedTasks = [
+      taskSummary({
+        id: "task-empty",
+        relativePath: "src/empty.ts",
+        runId: runTwo.id,
+        startedAt: null,
+      }),
+      taskSummary({
+        id: "task-late",
+        relativePath: "src/late.ts",
+        runId: runTwo.id,
+        startedAt: lateTime,
+      }),
+      taskSummary({
+        id: "task-early",
+        relativePath: "src/early.ts",
+        runId: runTwo.id,
+        startedAt: earlyTime,
+      }),
+    ];
+    view.rerender(
+      <AppShell
+        onOpenResult={onOpenResult}
+        onSelectRun={onSelectRun}
+        projects={[project()]}
+        runHistory={[runOne, runTwo]}
+        runTasks={refreshedTasks}
+        selectedRunId={runTwo.id}
+      />,
+    );
+
+    expect(runTaskPaths()).toEqual([
+      "src/early.ts",
+      "src/late.ts",
+      "src/empty.ts",
+    ]);
+    expect(
+      screen.getByRole("button", { name: "按请求时间降序排序" }).parentElement,
+    ).toHaveAttribute("aria-sort", "ascending");
+    await user.click(
+      screen.getByRole("button", { name: "查看结果 src/early.ts" }),
+    );
+    expect(onOpenResult).toHaveBeenCalledWith("task-early");
+  });
+
   it("disables prompt preview while the complete request is loading", async () => {
     const user = userEvent.setup();
     const run = runSummary();
@@ -892,7 +1175,7 @@ describe("AppShell", () => {
   });
 });
 
-function runSummary(): RunSummaryDto {
+function runSummary(overrides: Partial<RunSummaryDto> = {}): RunSummaryDto {
   return {
     completedAt: "2026-07-20T10:02:00Z",
     contextVersionId: null,
@@ -913,10 +1196,11 @@ function runSummary(): RunSummaryDto {
       total: 1,
     },
     status: "completed",
+    ...overrides,
   };
 }
 
-function taskSummary(): TaskSummaryDto {
+function taskSummary(overrides: Partial<TaskSummaryDto> = {}): TaskSummaryDto {
   return {
     completedAt: "2026-07-20T10:02:00Z",
     createdAt: "2026-07-20T10:00:01Z",
@@ -933,7 +1217,25 @@ function taskSummary(): TaskSummaryDto {
     schemaVersion: 1,
     startedAt: "2026-07-20T10:00:02Z",
     status: "succeeded",
+    ...overrides,
   };
+}
+
+function runTaskPaths(): string[] {
+  const table = screen.getByRole("table", { name: "运行结果任务" });
+  return within(table)
+    .getAllByRole("row")
+    .slice(1)
+    .map((row) => within(row).getAllByRole("cell")[0]?.textContent ?? "");
+}
+
+function runTaskRequestTime(path: string): string {
+  const table = screen.getByRole("table", { name: "运行结果任务" });
+  const row = within(table)
+    .getAllByRole("row")
+    .find((candidate) => candidate.textContent?.includes(path));
+  if (!row) throw new Error(`Missing Task row: ${path}`);
+  return within(row).getAllByRole("cell")[2]?.textContent ?? "";
 }
 
 function attemptDto(): AttemptDto {

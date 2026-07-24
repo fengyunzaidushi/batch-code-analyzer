@@ -8,7 +8,7 @@ use batch_code_analyzer_api_profiles::{
 };
 use batch_code_analyzer_app_core::{
     domain::{
-        ApiModelInfo, ApiProfile, ApiProfileConnectionStatus, ApiProfileId, ProjectId,
+        ApiModelInfo, ApiProfile, ApiProfileConnectionStatus, ApiProfileId, Project, ProjectId,
         RunTransition,
     },
     timestamp_now, ApiProfileService, ApiProfileServiceError, ContextService, ContextServiceError,
@@ -86,7 +86,7 @@ pub(crate) async fn project_add(
         .await
         .map_err(project_service_error)?;
     Ok(ProjectAddResponse {
-        project: ProjectDetailDto::from(&result.project),
+        project: project_detail(database, &result.project).await?,
         created: result.created,
         config_mirror_warning: result.config_mirror_warning,
     })
@@ -103,7 +103,7 @@ pub(crate) async fn project_get(
         .await
         .map_err(|error| persistence_error(&error))?
         .ok_or_else(|| project_not_found(project_id.as_str()))?;
-    Ok(ProjectDetailDto::from(&project))
+    project_detail(database, &project).await
 }
 
 #[tauri::command]
@@ -175,7 +175,7 @@ pub(crate) async fn project_update_run_settings(
         .await
         .map_err(project_service_error)?;
     Ok(ProjectRunSettingsUpdateResponse {
-        project: ProjectDetailDto::from(&result.project),
+        project: project_detail(database, &result.project).await?,
         config_mirror_warning: result.config_mirror_warning,
     })
 }
@@ -191,7 +191,7 @@ pub(crate) async fn project_prompt_save(
         .await
         .map_err(project_service_error)?;
     Ok(ProjectPromptSaveResponse {
-        project: ProjectDetailDto::from(&result.project),
+        project: project_detail(database, &result.project).await?,
         config_mirror_warning: result.config_mirror_warning,
     })
 }
@@ -207,9 +207,23 @@ pub(crate) async fn project_prompt_select(
         .await
         .map_err(project_service_error)?;
     Ok(ProjectPromptSelectResponse {
-        project: ProjectDetailDto::from(&result.project),
+        project: project_detail(database, &result.project).await?,
         config_mirror_warning: result.config_mirror_warning,
     })
+}
+
+async fn project_detail(
+    database: &batch_code_analyzer_persistence::Database,
+    project: &Project,
+) -> Result<ProjectDetailDto, IpcError> {
+    let prompt_presets = ProjectService::new(database)
+        .list_prompt_presets()
+        .await
+        .map_err(project_service_error)?;
+    Ok(ProjectDetailDto::with_prompt_presets(
+        project,
+        &prompt_presets,
+    ))
 }
 
 #[tauri::command]
@@ -1296,6 +1310,12 @@ fn project_service_error(error: ProjectServiceError) -> IpcError {
             "prompt_not_found",
             ErrorCategory::Validation,
             "提示词不存在",
+            false,
+        ),
+        ProjectServiceError::PromptNameConflict => ipc_error(
+            "validation_invalid_value",
+            ErrorCategory::Validation,
+            "常用提示词名称已存在，请使用其他名称",
             false,
         ),
         ProjectServiceError::InvalidPrompt => ipc_error(
