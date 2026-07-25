@@ -46,6 +46,43 @@ describe("FileTreeTable", () => {
     expect(screen.getByText("README.md")).toHaveAttribute("title", "README.md");
   });
 
+  it("shows file size and a conservative token estimate", () => {
+    render(<FileTreeTable files={[file({ sizeBytes: 2048 })]} />);
+
+    expect(screen.getByText("大小 / 预估 Token")).toBeInTheDocument();
+    expect(screen.getByText("2 KB")).toBeInTheDocument();
+    expect(screen.getByText("约 1,024 tokens")).toBeInTheDocument();
+  });
+
+  it("warns when an included file exceeds the token threshold", () => {
+    render(<FileTreeTable files={[file({ sizeBytes: 64_002 })]} />);
+
+    expect(
+      screen.getByText("约 32,001 tokens · 代码文件过长"),
+    ).toBeInTheDocument();
+  });
+
+  it("does not warn at the threshold or when a long file is excluded", () => {
+    render(
+      <FileTreeTable
+        files={[
+          file({ id: "threshold", sizeBytes: 64_000 }),
+          file({
+            exclusionReason: "user_excluded",
+            id: "excluded",
+            included: false,
+            relativePath: "src/large.ts",
+            sizeBytes: 128_000,
+          }),
+        ]}
+      />,
+    );
+
+    expect(screen.queryByText(/代码文件过长/)).not.toBeInTheDocument();
+    expect(screen.getByText("约 32,000 tokens")).toBeInTheDocument();
+    expect(screen.getByText("约 64,000 tokens")).toBeInTheDocument();
+  });
+
   it("collapses a directory without losing its tree node", async () => {
     const user = userEvent.setup();
     render(

@@ -884,6 +884,12 @@ button:disabled {
     minmax(220px, 2fr) minmax(90px, 0.7fr) minmax(148px, 1fr)
     minmax(100px, 0.8fr) minmax(100px, 0.8fr) minmax(170px, 1.2fr);
 }
+.file-tree-table .task-table-header,
+.file-tree-table .task-table-row {
+  grid-template-columns:
+    minmax(240px, 2fr) minmax(150px, 1fr) minmax(150px, 0.9fr)
+    minmax(90px, 0.6fr) minmax(100px, 0.7fr);
+}
 .task-table-column-header {
   min-width: 0;
 }
@@ -1140,6 +1146,29 @@ button:disabled {
 }
 .file-tree-muted {
   color: #9aa6b1;
+}
+.file-size-cell {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.file-token-estimate {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 3px;
+  overflow: hidden;
+  color: #8794a1;
+  font-size: 9px;
+  text-overflow: ellipsis;
+}
+.file-size-cell.is-warning,
+.file-size-cell.is-warning .file-token-estimate {
+  color: #9a5a00;
+  font-weight: 650;
 }
 .file-status-cell {
   display: inline-flex;
@@ -1683,6 +1712,10 @@ button:disabled {
   .run-results-task-table .task-table-header,
   .run-results-task-table .task-table-row {
     min-width: 940px;
+  }
+  .file-tree-table .task-table-header,
+  .file-tree-table .task-table-row {
+    min-width: 820px;
   }
   .api-config-band {
     display: block;

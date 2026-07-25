@@ -5,6 +5,7 @@ import {
   Folder,
   FolderOpen,
   ShieldCheck,
+  TriangleAlert,
 } from "lucide-react";
 import { useMemo, useState } from "react";
 import type { FileRecordSummaryDto } from "@batch-code-analyzer/ipc-types";
@@ -62,6 +63,9 @@ const EXCLUSION_LABELS: Record<string, string> = {
   user_excluded: "用户手动排除",
 };
 
+const TOKEN_ESTIMATION_BYTES_PER_TOKEN = 2;
+const LONG_FILE_TOKEN_WARNING_THRESHOLD = 32_000;
+
 export function FileTreeTable({
   files,
   emptyLabel = "暂无文件",
@@ -117,12 +121,15 @@ export function FileTreeTable({
 
   return (
     <VirtualTaskTable
+      ariaLabel="扫描文件列表"
+      className="file-tree-table"
       emptyLabel={emptyLabel}
       getRowKey={(row) => row.key}
       header={
         <>
           <span>文件</span>
           <span>状态</span>
+          <span>大小 / 预估 Token</span>
           <span>模型</span>
           <span>结果</span>
         </>
@@ -170,9 +177,15 @@ export function FileTreeTable({
               <span className="file-tree-muted">目录</span>
               <span className="file-tree-muted">—</span>
               <span className="file-tree-muted">—</span>
+              <span className="file-tree-muted">—</span>
             </>
           );
         }
+
+        const estimatedTokens = estimateFileTokens(row.file.sizeBytes);
+        const isLongIncludedFile =
+          row.file.included &&
+          estimatedTokens > LONG_FILE_TOKEN_WARNING_THRESHOLD;
 
         return (
           <>
@@ -224,6 +237,23 @@ export function FileTreeTable({
                 </button>
               ) : null}
             </span>
+            <span
+              className={`file-size-cell${isLongIncludedFile ? " is-warning" : ""}`}
+              title={
+                isLongIncludedFile
+                  ? `预估 ${formatTokenCount(estimatedTokens)} tokens，代码文件过长，建议排除、拆分或更换上下文更大的模型`
+                  : `预估 ${formatTokenCount(estimatedTokens)} tokens`
+              }
+            >
+              <span>{formatFileSize(row.file.sizeBytes)}</span>
+              <span className="file-token-estimate">
+                {isLongIncludedFile ? (
+                  <TriangleAlert aria-hidden="true" size={12} />
+                ) : null}
+                约 {formatTokenCount(estimatedTokens)} tokens
+                {isLongIncludedFile ? " · 代码文件过长" : null}
+              </span>
+            </span>
             <span>—</span>
             <span>{fileResultStatusLabel(row.file.resultStatus)}</span>
           </>
@@ -231,6 +261,20 @@ export function FileTreeTable({
       }}
     />
   );
+}
+
+function estimateFileTokens(sizeBytes: number): number {
+  return Math.ceil(Math.max(0, sizeBytes) / TOKEN_ESTIMATION_BYTES_PER_TOKEN);
+}
+
+function formatFileSize(sizeBytes: number): string {
+  if (sizeBytes < 1024) return `${sizeBytes} B`;
+  if (sizeBytes < 1024 * 1024) return `${Math.round(sizeBytes / 1024)} KB`;
+  return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatTokenCount(tokenCount: number): string {
+  return new Intl.NumberFormat("zh-CN").format(tokenCount);
 }
 
 function buildFileTree(files: readonly FileRecordSummaryDto[]): DirectoryNode {
