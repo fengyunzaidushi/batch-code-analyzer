@@ -55,32 +55,33 @@ describe("FileTreeTable", () => {
   });
 
   it("warns when an included file exceeds the token threshold", () => {
-    render(<FileTreeTable files={[file({ sizeBytes: 64_002 })]} />);
+    render(<FileTreeTable files={[file({ sizeBytes: 20_002 })]} />);
 
-    expect(
-      screen.getByText("约 32,001 tokens · 代码文件过长"),
-    ).toBeInTheDocument();
+    const warning = screen.getByText("约 10,001 tokens · 代码文件过长");
+    expect(warning).toBeInTheDocument();
+    expect(warning.parentElement).toHaveClass("is-warning");
   });
 
-  it("does not warn at the threshold or when a long file is excluded", () => {
+  it("does not warn at the threshold but warns when a long file is excluded", () => {
     render(
       <FileTreeTable
         files={[
-          file({ id: "threshold", sizeBytes: 64_000 }),
+          file({ id: "threshold", sizeBytes: 20_000 }),
           file({
             exclusionReason: "user_excluded",
             id: "excluded",
             included: false,
             relativePath: "src/large.ts",
-            sizeBytes: 128_000,
+            sizeBytes: 40_000,
           }),
         ]}
       />,
     );
 
-    expect(screen.queryByText(/代码文件过长/)).not.toBeInTheDocument();
-    expect(screen.getByText("约 32,000 tokens")).toBeInTheDocument();
-    expect(screen.getByText("约 64,000 tokens")).toBeInTheDocument();
+    expect(screen.getByText("约 10,000 tokens")).toBeInTheDocument();
+    const warning = screen.getByText("约 20,000 tokens · 代码文件过长");
+    expect(warning).toBeInTheDocument();
+    expect(warning.parentElement).toHaveClass("is-warning");
   });
 
   it("collapses a directory without losing its tree node", async () => {

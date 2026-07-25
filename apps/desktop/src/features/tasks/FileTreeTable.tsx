@@ -64,7 +64,7 @@ const EXCLUSION_LABELS: Record<string, string> = {
 };
 
 const TOKEN_ESTIMATION_BYTES_PER_TOKEN = 2;
-const LONG_FILE_TOKEN_WARNING_THRESHOLD = 32_000;
+const LONG_FILE_TOKEN_WARNING_THRESHOLD = 10_000;
 
 export function FileTreeTable({
   files,
@@ -183,9 +183,7 @@ export function FileTreeTable({
         }
 
         const estimatedTokens = estimateFileTokens(row.file.sizeBytes);
-        const isLongIncludedFile =
-          row.file.included &&
-          estimatedTokens > LONG_FILE_TOKEN_WARNING_THRESHOLD;
+        const isLongFile = estimatedTokens > LONG_FILE_TOKEN_WARNING_THRESHOLD;
 
         return (
           <>
@@ -238,20 +236,20 @@ export function FileTreeTable({
               ) : null}
             </span>
             <span
-              className={`file-size-cell${isLongIncludedFile ? " is-warning" : ""}`}
+              className={`file-size-cell${isLongFile ? " is-warning" : ""}`}
               title={
-                isLongIncludedFile
+                isLongFile
                   ? `预估 ${formatTokenCount(estimatedTokens)} tokens，代码文件过长，建议排除、拆分或更换上下文更大的模型`
                   : `预估 ${formatTokenCount(estimatedTokens)} tokens`
               }
             >
               <span>{formatFileSize(row.file.sizeBytes)}</span>
               <span className="file-token-estimate">
-                {isLongIncludedFile ? (
+                {isLongFile ? (
                   <TriangleAlert aria-hidden="true" size={12} />
                 ) : null}
                 约 {formatTokenCount(estimatedTokens)} tokens
-                {isLongIncludedFile ? " · 代码文件过长" : null}
+                {isLongFile ? " · 代码文件过长" : null}
               </span>
             </span>
             <span>—</span>

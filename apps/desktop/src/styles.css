@@ -1167,7 +1167,7 @@ button:disabled {
 }
 .file-size-cell.is-warning,
 .file-size-cell.is-warning .file-token-estimate {
-  color: #9a5a00;
+  color: #a94e4a;
   font-weight: 650;
 }
 .file-status-cell {
