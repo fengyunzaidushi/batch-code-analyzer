@@ -35,9 +35,12 @@ pub enum RunStatus {
 | Cancelling | all_tasks_terminal | Cancelled | 所有任务进入终态 |
 | Running | all_tasks_succeeded | Completed | 全部成功 |
 | Running | all_tasks_terminal_with_errors | CompletedWithErrors | 存在失败/取消/中断 |
+| CompletedWithErrors | manual_retry_requested | Running | 可重试失败 Task 人工重新排队 |
 | Running/Pausing/Cancelling | process_interrupted | Interrupted | 应用异常退出或进程失联 |
 
-终态：`Cancelled`、`Completed`、`CompletedWithErrors`、`Interrupted`。
+`CompletedWithErrors` 在没有人工重试操作时视为稳定状态，但允许通过
+`manual_retry_requested` 重新进入 `Running`。`Cancelled`、`Completed` 和
+`Interrupted` 仍为终态；其中取消和中断任务的重新排队需先经过重复计费确认流程。
 
 ## 3. Task 状态
 
@@ -65,16 +68,23 @@ pub enum TaskStatus {
 | Running | fail | Failed |
 | Running | cancel_confirmed | Cancelled |
 | Running | process_interrupted | Interrupted |
-| Pending/Queued | source_hash_changed | SourceChanged |
+| Pending/Queued/Running | source_hash_changed | SourceChanged |
 | Failed/Cancelled/Interrupted | manual_retry | Queued |
 
 ### 3.2 特殊规则
 
 - `Succeeded` 不通过 retry 转回 Queued；用户“重新生成”必须创建新 Task 版本。
 - `SourceChanged` 不自动执行；用户需重新扫描并创建新 Run，或明确创建新版本。
+- 实际发送前发现源码哈希与 Run 快照不一致时，Running Task 直接进入
+  `SourceChanged`，不得创建 Attempt 或发送模型请求。
 - 运行中的 Task 不允许重复发送。
 - 自动重试不会让 Task 离开 `Running`；每次网络尝试通过 Attempt 表示。
 - 人工重试保留原 Attempt，并新增 Attempt。
+- 失败 Task 人工重试必须在同一事务内将父 Run 从 `CompletedWithErrors` 转为
+  `Running`，并清空 Run/Task 的完成时间；不得在终态 Run 下留下 Queued Task。
+- Failed Task 只有在最新 Attempt 的脱敏错误标记为 `retryable: true` 时才能人工
+  重试。Cancelled/Interrupted Task 仍按 PRD 支持重新排队，但必须先完成重复计费确认，
+  并通过各自合法的父 Run 状态转换实现。
 
 ## 4. Attempt 状态
 

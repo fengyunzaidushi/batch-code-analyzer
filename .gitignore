@@ -6,11 +6,12 @@ coverage/
 *.log
 
 # Rust
-/target/
+**/target/
 **/*.rs.bk
 
 # Tauri / local builds
 src-tauri/target/
+**/src-tauri/gen/
 *.AppImage
 *.dmg
 *.msi

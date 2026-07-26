@@ -15,19 +15,34 @@
 - 安全存储：系统 Keychain/Credential Manager/Secret Service，必要时 Stronghold 降级
 - 发布：GitHub Actions、Tauri Updater
 
+## 下载和发布安装包
+
+推送版本标签后，GitHub Actions 会自动构建并上传三平台安装包到一个正式 Release：
+
+- Windows：`.msi`、`.exe`（NSIS）
+- macOS：Intel 和 Apple Silicon `.dmg`
+- Linux：`.AppImage`、`.deb`
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+发布工作流当前未配置代码签名。macOS 首次打开可能需要在“隐私与安全性”中允许，Windows 可能显示 SmartScreen 提示。开发者也可以运行 `pnpm tauri:build` 在本机生成安装包。
+
 ## 文档导航
 
-| 文档 | 用途 |
-| --- | --- |
-| `AGENTS.md` | 所有 AI Agent 和开发者必须遵守的仓库规则 |
-| `docs/prd.md` | 产品需求、范围、默认决策和验收标准 |
-| `docs/architecture.md` | 总体架构、模块划分、数据设计、发布方案 |
-| `docs/contracts/ipc-contract.md` | Tauri Command、Event 和 DTO 约定 |
-| `docs/contracts/database-schema.md` | SQLite 表、索引、事务和迁移约定 |
-| `docs/contracts/task-state-machine.md` | Run、Task、Attempt 状态与合法转换 |
-| `docs/contracts/error-codes.md` | 稳定错误结构、分类与错误码命名 |
-| `docs/decisions/` | 已批准的架构决策记录 |
-| `tasks/` | 可直接交给 Agent 的任务书与模板 |
+| 文档                                   | 用途                                     |
+| -------------------------------------- | ---------------------------------------- |
+| `AGENTS.md`                            | 所有 AI Agent 和开发者必须遵守的仓库规则 |
+| `docs/prd.md`                          | 产品需求、范围、默认决策和验收标准       |
+| `docs/architecture.md`                 | 总体架构、模块划分、数据设计、发布方案   |
+| `docs/contracts/ipc-contract.md`       | Tauri Command、Event 和 DTO 约定         |
+| `docs/contracts/database-schema.md`    | SQLite 表、索引、事务和迁移约定          |
+| `docs/contracts/task-state-machine.md` | Run、Task、Attempt 状态与合法转换        |
+| `docs/contracts/error-codes.md`        | 稳定错误结构、分类与错误码命名           |
+| `docs/decisions/`                      | 已批准的架构决策记录                     |
+| `tasks/`                               | 可直接交给 Agent 的任务书与模板          |
 
 ## 推荐启动方式
 
@@ -63,4 +78,44 @@ git worktree list
 
 ## 当前仓库状态
 
-这是一个“文档与任务骨架包”，尚未初始化 Tauri、pnpm 或 Cargo 工程。请从 `tasks/milestone-00/TASK-0001-workspace-bootstrap.md` 开始。
+仓库已完成基础工程初始化，包含 pnpm monorepo、Cargo workspace、`apps/desktop`（Tauri 2 + React + Vite）以及 `crates/*` 基础模块。
+
+## 本地启动（macOS）
+
+### 1. 前置依赖
+
+```bash
+xcode-select --install
+corepack enable
+corepack prepare pnpm@11.9.0 --activate
+rustup toolchain install stable
+```
+
+> 说明：Node.js 建议使用 20+（推荐 22 LTS）。
+
+### 2. 安装依赖
+
+```bash
+pnpm install
+```
+
+### 3. 启动方式
+
+启动桌面应用（推荐）：
+
+```bash
+pnpm tauri:dev
+```
+
+仅启动前端开发服务器：
+
+```bash
+pnpm dev
+```
+
+### 4. 启动前健康检查（可选）
+
+```bash
+cargo check --workspace
+pnpm typecheck
+```

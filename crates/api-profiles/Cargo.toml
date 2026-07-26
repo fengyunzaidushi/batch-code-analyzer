@@ -1,0 +1,18 @@
+[package]
+name = "batch-code-analyzer-api-profiles"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97"
+license = "UNLICENSED"
+
+[dependencies]
+batch-code-analyzer-secret-store = { path = "../secret-store" }
+serde = { version = "1.0.228", features = ["derive"] }
+url = "2.5.7"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }

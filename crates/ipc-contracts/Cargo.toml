@@ -1,0 +1,15 @@
+[package]
+name = "batch-code-analyzer-ipc-contracts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+batch-code-analyzer-domain = { path = "../domain" }
+serde.workspace = true
+serde_json.workspace = true
+ts-rs.workspace = true
+
+[lints]
+workspace = true

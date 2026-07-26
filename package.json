@@ -1,0 +1,23 @@
+{
+  "name": "batch-code-analyzer",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@11.9.0",
+  "scripts": {
+    "build": "pnpm --recursive --if-present build",
+    "dev": "pnpm --filter @batch-code-analyzer/desktop dev",
+    "format": "prettier --write \"apps/desktop/**/*.{css,html,json,ts,tsx}\" \"packages/**/*.{json,ts}\" \"!packages/ipc-types/src/generated/**\" \"*.{json,yaml,yml}\"",
+    "format:check": "prettier --check \"apps/desktop/**/*.{css,html,json,ts,tsx}\" \"packages/**/*.{json,ts}\" \"!packages/ipc-types/src/generated/**\" \"*.{json,yaml,yml}\"",
+    "ipc:check": "cargo run -p batch-code-analyzer-ipc-contracts --bin generate_ipc_types -- --check",
+    "ipc:generate": "cargo run -p batch-code-analyzer-ipc-contracts --bin generate_ipc_types",
+    "lint": "pnpm --recursive --if-present lint",
+    "tauri": "pnpm --filter @batch-code-analyzer/desktop tauri",
+    "tauri:build": "pnpm --filter @batch-code-analyzer/desktop tauri:build",
+    "tauri:dev": "pnpm --filter @batch-code-analyzer/desktop tauri dev",
+    "test": "pnpm --recursive --if-present test",
+    "typecheck": "pnpm --recursive --if-present typecheck"
+  },
+  "devDependencies": {
+    "prettier": "3.9.5"
+  }
+}

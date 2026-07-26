@@ -54,6 +54,7 @@ internal
 | `validation_invalid_value` | 否 | 否 | 字段格式或枚举非法 |
 | `validation_limit_exceeded` | 否 | 否 | 数量或长度超过应用限制 |
 | `validation_model_missing` | 否 | 否 | 无法解析任务实际模型 |
+| `api_profile_name_duplicate` | 否 | 否 | API Profile 名称已存在 |
 
 ### 4.2 Project
 
@@ -64,6 +65,7 @@ internal
 | `project_path_duplicate` | 否 | 否 | canonical path 已登记 |
 | `project_config_readonly` | 否 | 否 | 仓库不可写，已降级到应用配置 |
 | `project_relocation_mismatch` | 否 | 否 | 新路径与原项目身份不匹配 |
+| `api_profile_in_use` | 否 | 否 | API Profile 仍被项目主备路由引用 |
 
 ### 4.3 Scan
 
@@ -71,11 +73,14 @@ internal
 | --- | --- | --- | --- |
 | `scan_already_running` | 否 | 否 | 当前项目已有扫描 |
 | `scan_cancelled` | 否 | 否 | 用户取消扫描 |
+| `scan_failed` | 是 | 否 | 扫描未能完成 |
+| `scan_not_found` | 否 | 否 | 扫描操作不存在 |
 | `scan_file_unreadable` | 是 | 否 | 文件不可读取 |
 | `scan_gitignore_invalid_rule` | 否 | 否 | 忽略规则无法解析 |
 | `scan_file_too_large` | 否 | 否 | 文件超过大小限制 |
 | `scan_binary_file` | 否 | 否 | 检测为二进制文件 |
 | `scan_encoding_unsupported` | 否 | 否 | 不支持或无法安全识别编码 |
+| `context_discovery_failed` | 是 | 否 | 项目上下文资料无法安全读取 |
 
 ### 4.4 Security
 
@@ -84,10 +89,14 @@ internal
 | `security_path_escape` | 否 | 否 | 路径逃逸到允许根目录外 |
 | `security_symlink_outside_root` | 否 | 否 | 符号链接指向仓库外 |
 | `security_sensitive_file_blocked` | 否 | 否 | 默认敏感文件被阻止 |
+| `security_sensitive_confirmation_required` | 否 | 否 | 敏感文件授权请求缺少明确确认 |
 | `security_secret_detected` | 否 | 否 | 文件中发现疑似秘密 |
 | `security_consent_required` | 否 | 否 | 尚未确认向该服务发送源码 |
 | `security_external_url_blocked` | 否 | 否 | 外部链接协议或目标不允许 |
 | `security_secret_store_unavailable` | 是 | 否 | 系统安全存储不可用 |
+| `security_invalid_secret_reference` | 否 | 否 | SecretRef 或包含凭据的 URL 无效 |
+| `security_secret_not_found` | 否 | 否 | SecretRef 不存在 |
+| `security_secret_store_failure` | 是 | 否 | 安全存储后端操作失败 |
 
 ### 4.5 Persistence
 
@@ -128,6 +137,7 @@ internal
 | `run_not_paused` | 否 | 否 | 继续操作要求 Paused |
 | `run_already_terminal` | 否 | 否 | Run 已进入终态 |
 | `task_invalid_transition` | 否 | 否 | Task 状态转换非法 |
+| `task_not_found` | 否 | 否 | Task 不存在或不属于当前项目 |
 | `task_already_running` | 否 | 否 | Task 已执行中 |
 | `task_cannot_retry` | 否 | 否 | 当前 Task 不允许重试 |
 | `task_source_changed` | 否 | 否 | 文件内容与 Task 快照不一致 |
@@ -139,6 +149,9 @@ internal
 | `output_directory_unavailable` | 是 | 否 | 输出根目录不可用 |
 | `output_path_mapping_failed` | 否 | 否 | 无法安全映射结果路径 |
 | `output_write_failed` | 是 | 否 | 原子写入失败 |
+| `output_result_not_found` | 否 | 否 | 当前 Task 没有可读取的结果 |
+| `output_result_too_large` | 否 | 否 | 结果超过可预览大小限制 |
+| `output_result_read_failed` | 是 | 否 | 结果文件无法读取 |
 | `output_export_failed` | 是 | 否 | 模型请求成功但导出镜像失败 |
 
 ### 4.9 Recovery

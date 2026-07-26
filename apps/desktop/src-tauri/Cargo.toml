@@ -1,0 +1,29 @@
+[package]
+name = "batch-code-analyzer-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[lib]
+name = "batch_code_analyzer_desktop"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[build-dependencies]
+tauri-build.workspace = true
+
+[dependencies]
+batch-code-analyzer-app-core = { path = "../../../crates/app-core" }
+batch-code-analyzer-api-profiles = { path = "../../../crates/api-profiles" }
+batch-code-analyzer-ipc-contracts = { path = "../../../crates/ipc-contracts" }
+batch-code-analyzer-model-providers = { path = "../../../crates/model-providers" }
+batch-code-analyzer-persistence = { path = "../../../crates/persistence" }
+batch-code-analyzer-repository-scanner = { path = "../../../crates/repository-scanner" }
+batch-code-analyzer-secret-store = { path = "../../../crates/secret-store" }
+tauri.workspace = true
+tauri-plugin-dialog.workspace = true
+serde.workspace = true
+
+[lints]
+workspace = true

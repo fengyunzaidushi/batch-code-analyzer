@@ -229,7 +229,7 @@ batch-code-analyzer/
 │
 ├─ crates/
 │  ├─ domain/                         # 纯 Rust 领域实体和状态机
-│  ├─ application/                    # 用例服务
+│  ├─ app-core/                       # 用例服务与应用编排
 │  ├─ persistence/                    # SQLite Repository 实现
 │  ├─ repository-scanner/             # 扫描、ignore、编码和哈希
 │  ├─ model-providers/                # Responses API Adapter
@@ -320,6 +320,7 @@ Run 创建后，下列字段不可修改：
 - Task 的模型快照；
 - ContextVersion；
 - API 路由顺序；
+- 并发数；
 - 重试策略；
 - 应用版本；
 - Schema 版本。
@@ -498,6 +499,7 @@ CREATE TABLE attempts (
   UNIQUE(task_id, sequence)
 );
 
+-- 客户端全局常用提示词库；不属于某一个 Project，项目仅保存当前默认值和选中条目 ID。
 CREATE TABLE prompt_library (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL UNIQUE,
@@ -681,8 +683,17 @@ Rust Event 到达后，前端只更新受影响查询缓存或执行精确失效
 - 单元格只显示摘要，不内嵌完整编辑器；
 - 详细编辑进入 Drawer；
 - 分页查询不是强制要求，但 IPC 必须支持游标或 offset/limit；
+- 运行结果的状态与请求时间排序由前端基于 `TaskSummaryDto.status` 和
+  `TaskSummaryDto.startedAt` 生成稳定派生列表，不原地修改查询缓存，也不逐行调用
+  `task_get` 加载 Attempt；
+- 状态使用显式业务顺序，时间使用时间戳比较；时间为空或无效时在升序、降序中均置后，
+  相同值保持 IPC 返回的原始相对顺序；
+- 排序状态由结果工作区持有，查询刷新、Task 局部更新和历史 Run 切换不重置当前排序；
 - 状态更新按 Task ID 局部合并；
 - Markdown 结果按需加载；
+- 失败 Task 的结果预览复用按需加载的 `task_get` Attempt 历史，优先展示最近一次失败
+  原因，不为失败状态调用不存在的 Markdown `result_read`；
+- UI 只显示稳定错误码的本地文案或 `sanitized = true` 的 Attempt message；
 - 关闭预览后释放大文本引用。
 
 ### 9.5 Markdown 安全
@@ -765,6 +776,7 @@ result_open_in_folder
 
 app_get_settings
 app_update_settings
+health_check
 ```
 
 ### 10.3 Event 命名
@@ -1040,25 +1052,26 @@ PRD 默认不保存完整源文件副本。Run 创建后到发送前文件发生
 
 `RequestAssembler` 接收：
 
-- 系统安全约束；
-- ContextVersion；
+- ContextVersion 及其冻结来源清单；
 - Task 提示词；
 - 文件相对路径；
 - 文件内容；
 - 输出限制。
 
-组装时保持明确边界：
+正式单文件分析的 `ProviderRequest.instructions` 固定为空字符串。`input` 组装时保持明确
+边界：
 
 ```text
-SYSTEM / DEVELOPER SAFETY
-PROJECT MATERIAL
+PROJECT MATERIAL（仅 ContextVersion 含已纳入的 AGENTS.md/README* 时）
 USER TASK
 TARGET FILE PATH
 TARGET FILE CONTENT
 OUTPUT REQUIREMENTS
 ```
 
-项目资料和代码都视作不可信数据，不允许覆盖系统约束。
+当冻结 ContextVersion 不含符合条件的来源时，完全省略 `PROJECT MATERIAL`，不生成空标题
+或占位摘要。是否包含该段只依据冻结来源清单，不解析摘要文本，也不读取项目当前版本。
+项目资料和代码都视作不可信数据，不允许修改客户端权限、路由或任务快照。
 
 ### 13.2 Token 预估
 
@@ -1132,9 +1145,22 @@ estimated_input
 
 ### 14.3 并发控制
 
-使用 Tokio Semaphore：
+正式 Run 使用有界 Tokio worker 集合：
 
-- `global_request_semaphore`：Run 文件请求；
+- 项目设置接受 `1..=30` 的整数并发值，新项目默认值为 `3`；该范围必须由 Rust
+  领域服务校验，前端约束只用于即时反馈；
+- worker 上限读取 Run 创建时冻结的 `snapshot.concurrency`，项目设置变化不修改既有 Run；
+- 只有 worker 槽位空闲时才能事务性领取下一个 queued Task；
+- 单 Task 的自动重试和退避始终留在原 worker 内，不额外占用第二个槽位；
+- 所有 worker 收敛且队列为空后，才能计算最终统计并结束 Run；
+- 兼容旧数据时将 `concurrency = 0` 安全视为 `1`，避免 Run 永久排队；
+- 执行器内部失败时停止领取，等待 worker 收敛，并原子地将已领取 Task 标记为中断。
+- HTTP 请求可以并发，但同一进程的 SQLite 写事务通过共享异步门闩串行提交，避免多个
+  延迟事务从读取升级为写入时产生 `SQLITE_BUSY`；普通只读查询不经过该门闩。
+
+后续统一请求调度器仍使用全局 Semaphore：
+
+- `global_request_semaphore`：Run 文件请求和辅助请求的统一全局上限；
 - 辅助请求也使用统一调度队列；
 - 并发调低时不撤销已持有 permit；
 - 新请求等待 permit；
@@ -1178,6 +1204,29 @@ for profile in resolved routing chain:
 mark Task failed with aggregated attempts
 ```
 
+人工重试失败 Task 时复用同一个执行算法和 Run 快照。重新派发前必须在单个数据库
+事务中完成：
+
+```text
+校验 Task 属于请求 Project 且状态为 Failed
+→ 校验最新 Attempt.error.retryable = true
+→ 校验父 Run 为 CompletedWithErrors 且不存在其他活动 Run
+→ Run: CompletedWithErrors -> Running，清空 completedAt
+→ Task: Failed -> Queued，清空 startedAt/completedAt
+→ 重算并写入 RunStats
+→ 提交事务
+→ 统一执行器领取 Task，并在真实请求前追加新 Attempt
+```
+
+批量人工重试是上述事务的集合版本：请求中的 Task 必须属于同一 Project 和同一 Run；
+Repository 在一个写事务中验证全部 ID，重新排队其中最新错误仍允许重试的失败 Task，
+并返回被跳过的不可重试项。事务提交后只启动一个执行器，由现有有界 worker 集合按
+`snapshot.concurrency` 领取这些 Task，不得为每个 Task 分别启动执行器。单项连续点击
+由前端提交队列串行调用单项 IPC，避免活动 Run 冲突，同时不锁定未点击的失败行。
+
+事务失败不得留下 Running Run 或 Queued Task。实际发送前必须重新核对源码哈希；若与
+Task 文件快照不一致，Task 进入 `SourceChanged`，不创建 Attempt、不发送请求。
+
 ### 14.5 档案健康状态
 
 健康状态只在当前 Run 内生效：
@@ -1197,6 +1246,8 @@ disabled
 
 - `RunCancellationToken`：取消整个 Run；
 - `TaskCancellationToken`：取消单个 Task；
+- Run 级取消使用单个数据库事务和集合更新，一次收敛该 Run 的全部 queued/running Task，
+  不按 Task 数量循环调用 IPC；
 - reqwest 请求 Future 被 drop 后 Attempt 标记为 cancelled 或 interrupted；
 - 若无法判断服务端是否已完成，使用 `interrupted_unknown`；
 - 不自动重发结果未知请求。
@@ -1350,7 +1401,9 @@ API 档案复制时可共享 `SecretRef`。密钥记录维护引用计数或反�
 
 - 删除一个档案不会删除仍被其他档案使用的秘密；
 - 修改副本密钥生成新 SecretRef；
-- UI 显示共享状态，不显示密钥。
+- UI 默认不显示密钥；用户明确点击显示时，Rust 可从 SecretStore 读取并通过专用一次性
+  IPC 返回。响应不得写日志、缓存或普通 DTO，前端离开当前档案时立即清除。SQLite 只可
+  保存使用 OS 包装密钥保护的 AEAD 密文，不得保存明文。
 
 ---
 
@@ -1907,7 +1960,8 @@ Phase 5：质量和发布
 - 单元测试覆盖核心分支；
 - 集成测试覆盖失败路径；
 - Windows、macOS、Linux 无平台假设泄漏；
-- 不在前端保存 API Key；
+- 不在前端持久化 API Key；显式回显只允许存在于当前编辑器的短生命周期内；SQLite 仅保存
+  加密密文，包装密钥保存在 OS SecretStore；
 - 不直接读取仓库外路径；
 - 不覆盖历史 Attempt 或结果；
 - 文档和 ADR 已更新；

@@ -57,6 +57,10 @@ export interface PageResponse<T> {
 ```text
 project_list
 project_add
+project_get
+project_update_run_settings
+project_prompt_save
+project_prompt_select
 project_update
 project_remove
 project_relocate
@@ -65,6 +69,12 @@ project_relocate
 最低语义：
 
 - `project_add`：输入用户选择的目录，完成 canonical path 校验；重复目录返回已有项目。
+- `project_get`：按需返回当前项目详情；绝对仓库路径不进入项目列表摘要。
+- `project_update_run_settings`：更新未来 Run 使用的主 API Profile、项目默认模型和并发数；
+  `concurrency` 为必填的 `1..=30` 整数，Profile 引用必须存在。响应返回更新后的
+  `ProjectDetailDto`（包含 `concurrency`）和配置镜像写入警告；既有 Run 快照不变。
+- `project_prompt_save`：将命名提示词保存到客户端全局常用提示词库，并立即设为当前项目默认；
+- `project_prompt_select`：从客户端全局常用提示词库选择一个预设，并将其内容设为当前项目默认；
 - `project_remove`：只移除客户端登记，不删除仓库或历史输出。
 - `project_relocate`：重新绑定不可用项目，必须校验项目 ID 或仓库配置的一致性。
 
@@ -78,35 +88,113 @@ scan_get_report
 
 `scan_start` 返回操作 ID，不等待完整扫描结束；进度通过 Event 提供。任一项目同一时间最多一个扫描操作。
 
+本地实现使用以下稳定 DTO：
+
+```ts
+interface ScanStartRequest {
+  projectId: ProjectId;
+  temporaryExcludedPatterns?: string[];
+}
+
+interface ScanStartResponse {
+  schemaVersion: 1;
+  operationId: string;
+  projectId: ProjectId;
+}
+
+interface ScanReportDto {
+  schemaVersion: 1;
+  operationId: string;
+  projectId: ProjectId;
+  status: 'running' | 'completed' | 'cancelled' | 'failed';
+  visitedEntries: number;
+  scannedFiles: number;
+  includedFiles: number;
+  excludedByReason: Record<string, number>;
+  unreadableFiles: string[];
+  unsupportedEncodingFiles: string[];
+  sensitiveFiles: string[];
+  symlinkFiles: string[];
+  invalidGitignoreRules: string[];
+  cancelled: boolean;
+  fileCount: number | null;
+  generation: number | null;
+  errorCode: string | null;
+  updatedAt: Rfc3339Timestamp;
+  rules: ScanRuleSummaryDto;
+}
+
+interface ScanRuleSummaryDto {
+  builtinDirectories: string[];
+  builtinExtensions: string[];
+  gitignoreRules: string[];
+  temporaryExcludedPatterns: string[];
+  sensitiveDetectionEnabled: boolean;
+}
+```
+
+完成或取消前不会提交正式扫描代次；进度和最终报告通过
+`scan://progress` Event 发送，`scan_get_report` 可按 operation ID 查询最近状态。
+临时排除模式只在当前项目会话的扫描请求中生效，不会修改仓库 `.gitignore` 或持久化为项目规则。
+
 ### 4.3 Context
 
 ```text
 context_generate
 context_update_manual
 context_get
+prompt_generate
 ```
 
-上下文生成是独立辅助请求，不计入文件任务成功/失败统计。
+`context_generate` 接收 `projectId`，在仓库根目录发现 `README*` 与 `AGENTS.md`，生成
+不可变 `ContextVersion` 并更新项目当前版本引用。当前阶段只生成本地发现摘要，不调用
+模型，也不返回源码原文。`context_get` 返回当前项目版本或 `null`。上下文生成是独立
+辅助请求，不计入文件任务成功/失败统计。
+
+`prompt_generate` 接收当前项目和用户的分析目标，使用项目主 API Profile、实际可读取的
+密钥、项目默认模型和当前上下文摘要生成一个可编辑候选。命令只返回候选提示词，不保存
+项目配置，也不创建 Run；用户确认后由前端回填当前提示词输入框，再可通过
+`project_prompt_save` 保存为项目预设。
+
+`ProjectDetailDto.promptPresets` 是客户端全局常用提示词库，`activePromptId` 只表示当前项目
+选择的条目。保存或选择仅更新请求中的 `projectId` 对应项目的 `defaultPrompt`；全局条目不会
+写入项目配置镜像。为兼容旧版本，首次读取全局库时会导入旧项目 `filterRules.promptPresets`
+中的条目，保留 ID；名称冲突且内容不同的条目会附加稳定项目名后缀，而非静默丢弃。
 
 ### 4.4 API Profile
 
 ```text
 api_profile_list
 api_profile_save
+api_profile_secret_put
+api_profile_secret_get
 api_profile_test
 api_profile_delete
 api_models_fetch
 ```
 
-- API Key 只通过 SecretStore 写入，不通过读取命令返回前端。
+- API Key 只通过 SecretStore 持久化；SQLite、项目 JSON 和普通配置只保存不透明
+  `SecretRef`，不得保存 API Key 明文。
 - `api_profile_list` 只返回是否已配置密钥和脱敏摘要。
+- `api_profile_secret_get` 只允许在用户明确点击“显示 API Key”后调用。它从 SecretStore
+  读取并通过专用一次性响应返回当前值；不得记录日志、写入缓存、并入普通 Profile DTO
+  或跨 Profile 保留。隐藏、切换 Profile 或保存完成后，前端应清除未编辑的回显值。
 - 删除仍被项目引用的档案必须失败并返回稳定错误码。
+
+`api_profile_save` 只保存名称、Base URL、协议和默认模型等非敏感元数据。
+`api_profile_secret_put` 是一次性写入命令：密钥只进入 SecretStore，命令不返回密钥。
+`api_profile_secret_get` 的专用响应是“显式用户回显”的唯一例外，不得复用于列表、保存、
+测试或模型请求 DTO。`api_profile_test` 与 `api_models_fetch`
+通过 Provider 的模型列表请求验证连接并缓存脱敏模型元数据。
 
 ### 4.5 Run
 
 ```text
 run_preview
 run_create
+run_execute
+run_list
+run_get
 run_pause
 run_resume
 run_cancel
@@ -114,9 +202,31 @@ run_get
 run_list
 ```
 
-- `run_preview` 返回任务数量、排除数量、预计使用配置和阻塞项，不创建 Run。
+- `run_preview` 返回任务数量、排除数量、预计使用配置（包含将被冻结的 `concurrency`）
+  和阻塞项，不创建 Run。
 - `run_create` 在事务内创建不可变快照与 Task。
 - 首期存在活动 Run 时，第二次 `run_create` 返回 `run_active_exists`。
+- `run_cancel` 接收已有 `runId`，原子取消排队 Task、将已领取 Task 标记为中断，
+  并把 Run 收敛为 `cancelled`；该操作通过一个事务批量处理全部 Task，不按 Task 逐次
+  调用 IPC。若存在进程内请求，会同时触发请求取消令牌。
+- Run 预览、创建和执行前必须确认主 API Profile 的密钥引用当前可由 SecretStore
+  读取；只有数据库中存在引用但当前会话无法读取时，也必须返回
+  `security_secret_not_found`，不得创建必然失败的 Run。
+
+`run_preview` 和 `run_create` 接收 `projectId`，可选地接收当前提示词和模型覆盖。
+预览响应只包含相对路径、文件大小、内容哈希、解析后的模型和阻塞原因，不包含源文件内容。
+创建成功后返回 `RunSummaryDto` 和创建的 Task 数量；Run 初始状态为 `running`，Task 初始状态为
+`queued`，实际模型请求由后续调度器任务负责。
+
+`run_execute` 只接收已有的 `runId`，要求 Run 处于 `running` 状态。执行器按照 Run 快照
+中的 `concurrency` 有界并发领取 queued Task，并在每次真实请求前追加 `created` Attempt；
+单 Task 自动重试继续占用原 worker 槽位，不会作为另一个并发请求领取。Provider 成功时先原子写入结果
+Markdown，再提交 Attempt、Task 和 Run 统计；Provider、源码读取或结果写入失败时保存脱敏
+错误摘要并将 Task 收敛为 `failed`。命令只返回最终 `RunSummaryDto`，不返回源码、密钥或
+完整 Provider 响应。
+
+执行前置校验或持久化失败时，执行器会把仍处于活动状态的 Run 收敛为 `interrupted`，
+避免创建成功但永远占用活动 Run 限制。
 
 ### 4.6 File
 
@@ -124,23 +234,76 @@ run_list
 file_list
 file_update_override
 file_set_included
+file_authorize_sensitive
 ```
 
+`file_list` 接收 `projectId`、可选的数字游标和 `1..=500` 的 `limit`，返回
+`PageResponse<FileRecordSummaryDto>`。摘要只包含相对路径、文件状态、纳入标记和结果状态，
+不返回源码内容或绝对仓库路径。
+
 `file_update_override` 只更新未来 Run 的单文件覆盖，不修改已创建 Run 的 Task 快照。
+
+`file_set_included` 接收 `projectId`、`fileId` 和 `included`，返回
+`{ file: FileRecordSummaryDto }`。手动排除会持久化为当前 FileRecord 的用户覆盖，
+并在后续扫描中保留。敏感、二进制、过大、不可读取、编码不支持和已删除文件不能
+通过普通纳入命令绕过安全阻止。
+
+`file_authorize_sensitive` 接收 `projectId`、`fileId` 和明确的 `confirmed: true`。
+Rust 会重新校验仓库边界、符号链接、文件大小、二进制和编码，计算当前内容哈希并
+只保存脱敏的风险类型与位置。授权不会返回源码或秘密原文，文件仍保留 `sensitive`
+来源状态，但可以进入后续 Run。普通 `file_set_included(false)` 可以撤销授权；重新扫描
+后授权默认失效，需要用户再次确认。
 
 ### 4.7 Task
 
 ```text
 task_list
-task_get_detail
+task_get
+task_request_preview
 task_retry
+task_retry_batch
 task_regenerate
 task_cancel
 ```
 
-- `task_retry`：只对允许重试的失败、中断或取消任务创建新 Attempt。
+- `task_retry`：只对允许重试的失败、中断或取消任务创建新 Attempt。命令接收
+  `projectId` 和 `taskId`；失败 Task 路径原子地重新打开原 Run、重新排队 Task，再通过
+  统一执行器发送请求。每次真实请求仍在发送前新增 Attempt；取消/中断任务必须先完成
+  PRD 要求的重复计费确认流程。
+- `task_retry_batch`：接收 `projectId`、`runId` 和 `1..=10,000` 个 `taskIds`。所有 ID
+  必须属于指定 Project 和同一 Run，否则整个请求以 `task_not_found` 失败且不部分更新。
+  Repository 在一个事务中重新排队最新错误仍允许重试的失败 Task，并在响应中返回
+  `retriedTaskIds` 与 `skippedTaskIds`；没有可提交项时返回 `task_cannot_retry`。事务提交
+  后只启动一个执行器，按原 Run 的冻结并发快照执行。
 - `task_regenerate`：创建新的 Task 版本，不覆盖原 Task。
 - 运行中 Task 不允许重复提交。
+
+`task_retry` 成功返回最新 `RunSummaryDto` 和 `TaskSummaryDto`。重试复用原 Run 的
+文件、提示词、模型、上下文、API 路由、超时和重试策略快照；不得读取当前项目的新
+配置。Task 不存在或不属于 `projectId` 时统一返回 `task_not_found`；状态不允许、失败
+Task 的最新错误不可重试或重复提交时返回 `task_cannot_retry`；存在其他活动 Run 时
+返回 `run_active_exists`。
+
+`task_retry_batch` 成功返回最终 `RunSummaryDto`、`retriedTaskIds` 和 `skippedTaskIds`。
+批量请求长度为零或超过 10,000 时返回 `validation_limit_exceeded`。
+
+`run_list` 按 Project 返回分页的 `RunSummaryDto`，`run_get` 只允许读取该 Project
+所属的 Run。`task_list` 按 Run 返回分页的 `TaskSummaryDto`，`task_get` 返回一个
+Task、创建该 Task 时冻结的 `promptSnapshot` 和按 sequence 升序排列的 `AttemptDto`
+历史。`promptSnapshot` 只包含用户配置的分析提示词，不包含源文件内容、API Key 或
+供应商完整请求体。失败 Task 点击“查看结果”时，前端使用该响应展示最近一次失败原因和
+全部 Attempt 明细；只允许显示稳定错误码映射或 `sanitized = true` 的错误 message，不得
+回显未脱敏内容。跨 Project 的 ID 查询统一按不存在处理，不暴露其他项目是否存在。
+
+`task_request_preview` 只在用户明确点击“查看提示词”时调用。Rust 根据 Task 冻结的
+`promptSnapshot`、相对路径和 ContextVersion，读取当前目标文件并重新校验仓库边界与
+内容哈希，然后返回 `TaskSummaryDto`、`instructions` 和完整 `input`。`instructions` 固定
+为空字符串。`input` 包含用户任务目标、目标文件路径和未经截断的完整 UTF-8 文件内容；
+只有 Task 冻结 ContextVersion 的来源清单中存在已纳入的 `AGENTS.md` 或 `README*` 时才
+包含项目上下文摘要，否则完全省略该分段和占位文本。响应不得包含 API Key、认证请求头或
+绝对仓库路径。文件不可读取、路径逃逸或内容哈希变化时不得返回当前源码，分别复用
+`scan_file_unreadable`、`security_path_escape` 或 `task_source_changed`。该响应不得写入
+普通日志、数据库或结果文件。
 
 ### 4.8 Result
 
@@ -149,7 +312,13 @@ result_read
 result_open_in_folder
 ```
 
+`result_read` 只接收 Project ID 与 Task ID。Rust 从 SQLite 的当前结果引用和所属
+Run 输出目录重新解析路径，拒绝路径逃逸、外部符号链接、缺失和超大文件；响应只
+包含结果相对路径、版本和 Markdown 正文，不包含源文件、绝对路径、请求原文或密钥。
+
 - `result_read` 按需读取已完成结果；不得通过 `task_list` 返回完整 Markdown。
+- 失败 Task 没有 Markdown 结果时不得调用 `result_read`；“查看结果”复用 `task_get` 展示
+  Attempt 失败原因，避免用 `output_result_not_found` 覆盖实际错误。
 - `result_open_in_folder` 只能打开已验证位于允许输出根目录内的路径。
 
 ### 4.9 App
@@ -157,7 +326,26 @@ result_open_in_folder
 ```text
 app_get_settings
 app_update_settings
+health_check
 ```
+
+`health_check` 返回桌面核心的受控启动状态，可用于前端启动检测、自动化测试和故障诊断。`status: ready` 仅表示 Rust 核心可响应，不表示数据库、扫描或模型服务已经可用。
+
+```ts
+export interface HealthCheckResponse {
+  schemaVersion: 1;
+  status: "ready" | "degraded" | "unavailable";
+  appVersion: string;
+  databaseStatus:
+    | 'not_initialized'
+    | 'ready'
+    | 'migration_failed'
+    | 'unavailable';
+  databaseSchemaVersion: number;
+}
+```
+
+数据库基础设施尚未建立时，响应必须为 `databaseStatus: 'not_initialized'` 与 `databaseSchemaVersion: 0`。
 
 ## 5. Event 清单
 

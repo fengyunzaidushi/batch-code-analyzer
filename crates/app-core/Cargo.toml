@@ -1,0 +1,27 @@
+[package]
+name = "batch-code-analyzer-app-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+batch-code-analyzer-domain = { path = "../domain" }
+batch-code-analyzer-api-profiles = { path = "../api-profiles" }
+batch-code-analyzer-model-providers = { path = "../model-providers" }
+batch-code-analyzer-persistence = { path = "../persistence" }
+batch-code-analyzer-repository-scanner = { path = "../repository-scanner" }
+batch-code-analyzer-security-core = { path = "../security-core" }
+batch-code-analyzer-secret-store = { path = "../secret-store" }
+serde.workspace = true
+serde_json.workspace = true
+time.workspace = true
+tokio.workspace = true
+url.workspace = true
+tokio-util = "0.7.16"
+
+[dev-dependencies]
+reqwest = { version = "0.12.24", default-features = false, features = ["json", "rustls-tls"] }
+
+[lints]
+workspace = true
