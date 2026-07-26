@@ -1,6 +1,10 @@
 use std::{
+    borrow::Cow,
+    error::Error,
     fs,
+    future::Future,
     path::{Path, PathBuf},
+    pin::Pin,
     sync::Arc,
     time::Duration,
 };
@@ -12,7 +16,7 @@ use batch_code_analyzer_domain::{
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 use sqlx::{
-    migrate::Migrator,
+    migrate::{Migration, MigrationSource, MigrationType, Migrator},
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
     Sqlite, SqliteConnection, SqlitePool, Transaction,
 };
@@ -22,6 +26,42 @@ use crate::PersistenceError;
 
 pub const LATEST_SCHEMA_VERSION: u32 = 2;
 const DEFAULT_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
+// Embed migrations in the binary so installed Tauri bundles do not depend on
+// the repository's source tree being present at runtime.
+#[derive(Debug)]
+struct EmbeddedMigrationSource;
+
+impl MigrationSource<'static> for EmbeddedMigrationSource {
+    fn resolve(
+        self,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<Vec<Migration>, Box<dyn Error + Send + Sync + 'static>>>
+                + Send
+                + 'static,
+        >,
+    > {
+        Box::pin(async {
+            Ok(vec![
+                Migration::new(
+                    1,
+                    Cow::Borrowed("initial schema"),
+                    MigrationType::Simple,
+                    Cow::Borrowed(include_str!("../migrations/0001_initial_schema.sql")),
+                    false,
+                ),
+                Migration::new(
+                    2,
+                    Cow::Borrowed("encrypted secrets"),
+                    MigrationType::Simple,
+                    Cow::Borrowed(include_str!("../migrations/0002_encrypted_secrets.sql")),
+                    false,
+                ),
+            ])
+        })
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DatabaseHealth {
@@ -358,7 +398,7 @@ async fn apply_migrations(pool: &SqlitePool) -> Result<u32, PersistenceError> {
         });
     }
 
-    Migrator::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations"))
+    Migrator::new(EmbeddedMigrationSource)
         .await
         .map_err(|_| PersistenceError::MigrationFailed)?
         .run(pool)
