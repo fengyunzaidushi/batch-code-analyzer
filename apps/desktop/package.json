@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "tsc --noEmit && vite build",
+    "tauri:build": "tauri build",
     "dev": "vite",
     "lint": "eslint . --max-warnings 0",
     "preview": "vite preview",
