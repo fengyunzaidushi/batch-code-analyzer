@@ -12,7 +12,7 @@ pub(crate) fn schedule_database_reset(database_path: &Path) -> io::Result<()> {
     fs::rename(temporary, parent.join(RESET_MARKER))
 }
 
-/// Applies a user-confirmed reset before SQLite is opened on the next start.
+/// Applies a user-confirmed reset before `SQLite` is opened on the next start.
 /// Missing files are treated as already cleared; the marker is retained until
 /// every removal succeeds so a failed cleanup is retried on the next start.
 pub(crate) fn apply_pending_database_reset(database_path: &Path) -> io::Result<bool> {
@@ -42,7 +42,7 @@ pub(crate) fn apply_pending_database_reset(database_path: &Path) -> io::Result<b
 
 /// Restores the last startup backup only when the primary database is missing.
 /// An existing database is never replaced, including during an application
-/// upgrade. SQLite will validate and migrate the restored file afterwards.
+/// upgrade. `SQLite` will validate and migrate the restored file afterwards.
 pub(crate) fn restore_missing_database_from_backup(database_path: &Path) -> io::Result<bool> {
     if database_path.exists() {
         return Ok(false);

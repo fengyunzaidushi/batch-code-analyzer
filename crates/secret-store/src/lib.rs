@@ -288,8 +288,8 @@ impl SecretStore for KeyringSecretStore {
     }
 }
 
-/// SecretStore implementation that keeps encrypted secret payloads in the
-/// application SQLite database while keeping the wrapping key in the OS
+/// `SecretStore` implementation that keeps encrypted secret payloads in the
+/// application `SQLite` database while keeping the wrapping key in the OS
 /// credential manager. Existing non-SQLite references remain readable through
 /// the delegated backend, so switching storage does not invalidate profiles.
 pub struct SqliteSecretStore {
@@ -303,11 +303,11 @@ const WRAPPING_KEY_REF: &str = "sqlite-secret-wrapping-key-ref";
 const NONCE_LEN: usize = 12;
 
 impl SqliteSecretStore {
-    /// Opens the encrypted SQLite store using the platform keyring backend.
+    /// Opens the encrypted `SQLite` store using the platform keyring backend.
     ///
     /// # Errors
     ///
-    /// Returns a stable secret-store error when SQLite or the wrapping key
+    /// Returns a stable secret-store error when `SQLite` or the wrapping key
     /// cannot be initialized.
     pub async fn open(path: impl AsRef<Path>) -> Result<Self, SecretError> {
         let delegated = Arc::new(KeyringSecretStore::new()?) as Arc<dyn SecretStore>;
@@ -316,6 +316,11 @@ impl SqliteSecretStore {
 
     /// Opens the store with an injected backend, primarily for deterministic
     /// tests and platform adapters.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable secret-store error when the database, delegated
+    /// backend, or wrapping key cannot be initialized.
     pub async fn open_with_backend(
         path: impl AsRef<Path>,
         delegated: Arc<dyn SecretStore>,
@@ -331,46 +336,43 @@ impl SqliteSecretStore {
             .connect_with(options)
             .await
             .map_err(|_| SecretError::BackendFailure)?;
-        let wrapping_key =
-            match sqlx::query("SELECT value FROM secret_store_metadata WHERE key = ?")
+        let wrapping_key = if let Some(row) =
+            sqlx::query("SELECT value FROM secret_store_metadata WHERE key = ?")
                 .bind(WRAPPING_KEY_REF)
                 .fetch_optional(&pool)
                 .await
                 .map_err(|_| SecretError::BackendFailure)?
+        {
+            let reference: String = row
+                .try_get("value")
+                .map_err(|_| SecretError::BackendFailure)?;
+            let value = delegated
+                .get(&SecretRef::new(reference))
+                .await
+                .map_err(|_| SecretError::BackendFailure)?;
+            decode_wrapping_key(value.as_str())?
+        } else {
+            let mut bytes = [0_u8; 32];
+            SystemRandom::new()
+                .fill(&mut bytes)
+                .map_err(|_| SecretError::BackendFailure)?;
+            let encoded = BASE64.encode(bytes);
+            let reference = delegated
+                .put(SecretValue::new(encoded))
+                .await
+                .map_err(|_| SecretError::BackendFailure)?;
+            if sqlx::query("INSERT INTO secret_store_metadata (key, value) VALUES (?, ?)")
+                .bind(WRAPPING_KEY_REF)
+                .bind(reference.as_str())
+                .execute(&pool)
+                .await
+                .is_err()
             {
-                Some(row) => {
-                    let reference: String = row
-                        .try_get("value")
-                        .map_err(|_| SecretError::BackendFailure)?;
-                    let value = delegated
-                        .get(&SecretRef::new(reference))
-                        .await
-                        .map_err(|_| SecretError::BackendFailure)?;
-                    decode_wrapping_key(value.as_str())?
-                }
-                None => {
-                    let mut bytes = [0_u8; 32];
-                    SystemRandom::new()
-                        .fill(&mut bytes)
-                        .map_err(|_| SecretError::BackendFailure)?;
-                    let encoded = BASE64.encode(bytes);
-                    let reference = delegated
-                        .put(SecretValue::new(encoded))
-                        .await
-                        .map_err(|_| SecretError::BackendFailure)?;
-                    if sqlx::query("INSERT INTO secret_store_metadata (key, value) VALUES (?, ?)")
-                        .bind(WRAPPING_KEY_REF)
-                        .bind(reference.as_str())
-                        .execute(&pool)
-                        .await
-                        .is_err()
-                    {
-                        let _ = delegated.delete(&reference).await;
-                        return Err(SecretError::BackendFailure);
-                    }
-                    bytes
-                }
-            };
+                let _ = delegated.delete(&reference).await;
+                return Err(SecretError::BackendFailure);
+            }
+            bytes
+        };
         let unbound = aead::UnboundKey::new(&aead::AES_256_GCM, &wrapping_key)
             .map_err(|_| SecretError::BackendFailure)?;
         Ok(Self {
@@ -498,7 +500,10 @@ mod tests {
         sqlite::{SqliteConnectOptions, SqlitePoolOptions},
         Row,
     };
-    use std::{path::PathBuf, sync::Arc};
+    use std::{
+        path::{Path, PathBuf},
+        sync::Arc,
+    };
 
     #[tokio::test]
     async fn stores_and_deletes_without_exposing_the_value_in_debug() {
@@ -596,7 +601,7 @@ mod tests {
         reopened.delete(&reference).await.unwrap();
         reopened.pool.close().await;
         drop(reopened);
-        remove_database_artifacts(path);
+        remove_database_artifacts(&path);
     }
 
     #[test]
@@ -619,10 +624,10 @@ mod tests {
         );
     }
 
-    fn remove_database_artifacts(path: PathBuf) {
+    fn remove_database_artifacts(path: &Path) {
         for suffix in ["", "-wal", "-shm"] {
             let candidate = if suffix.is_empty() {
-                path.clone()
+                path.to_path_buf()
             } else {
                 PathBuf::from(format!("{}{}", path.display(), suffix))
             };
