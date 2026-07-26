@@ -46,6 +46,7 @@ import { FileTreeTable } from "../features/tasks/FileTreeTable";
 import { canIncludeFile } from "../features/tasks/fileSelection";
 import { VirtualTaskTable } from "../features/tasks/VirtualTaskTable";
 import { MarkdownPreview } from "../features/markdown/MarkdownPreview";
+import { DataManagementPanel } from "../features/data-management/DataManagementPanel";
 
 export type ShellProject = ProjectSummaryDto & {
   rootDirectory?: string;
@@ -133,6 +134,7 @@ interface AppShellProps {
     request: ProjectRunSettingsUpdateRequest,
   ) => Promise<void>;
   onSelectProject?: (id: string) => void;
+  onResetAppData?: () => Promise<void>;
   onStartScan?: () => void;
   projectError?: string | null;
   scanReport?: ScanReportDto | null;
@@ -210,6 +212,7 @@ export function AppShell({
   onTestApiProfile = async () => undefined,
   onUpdateProjectRunSettings = async () => undefined,
   onSelectProject,
+  onResetAppData = async () => undefined,
   onStartScan = () => undefined,
   projectError = null,
   scanReport = null,
@@ -224,6 +227,7 @@ export function AppShell({
   >(projects[0]?.id ?? null);
   const [search, setSearch] = useState("");
   const [tab, setTab] = useState<WorkspaceTab>("prompt");
+  const [dataManagementOpen, setDataManagementOpen] = useState(false);
   const [promptDraft, setPromptDraft] = useState({
     projectId: null as string | null,
     value: DEFAULT_PROMPT,
@@ -271,6 +275,7 @@ export function AppShell({
           activeRun={activeRun}
           onAddProject={onAddProject}
           onSelect={selectProject}
+          onOpenDataManagement={() => setDataManagementOpen(true)}
           projects={filteredProjects}
           projectError={projectError}
           search={search}
@@ -360,6 +365,11 @@ export function AppShell({
           onClose={onCloseResultPreview}
         />
       ) : null}
+      <DataManagementPanel
+        active={dataManagementOpen}
+        onClose={() => setDataManagementOpen(false)}
+        onResetAppData={onResetAppData}
+      />
     </div>
   );
 }
@@ -450,6 +460,7 @@ function ProjectSidebar({
   activeRun,
   onAddProject,
   onSelect,
+  onOpenDataManagement,
   projects,
   projectError,
   search,
@@ -460,6 +471,7 @@ function ProjectSidebar({
   activeRun: ActiveRunSummary | null;
   onAddProject: () => void;
   onSelect: (id: string) => void;
+  onOpenDataManagement: () => void;
   projects: readonly ShellProject[];
   projectError: string | null;
   search: string;
@@ -518,7 +530,11 @@ function ProjectSidebar({
         )}
       </div>
       <div className="sidebar-footer">
-        <button className="sidebar-footer-action" type="button">
+        <button
+          className="sidebar-footer-action"
+          onClick={onOpenDataManagement}
+          type="button"
+        >
           <Settings2 aria-hidden="true" size={16} />
           <span>工作区设置</span>
         </button>

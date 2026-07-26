@@ -7,6 +7,7 @@ use std::{path::Path, sync::Arc};
 use tauri::Manager;
 
 mod commands;
+mod data_directory;
 mod scan_state;
 
 pub(crate) use scan_state::ScanState;
@@ -45,6 +46,8 @@ pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             let database_path = app.path().app_data_dir()?.join("app.db");
+            data_directory::apply_pending_database_reset(&database_path)?;
+            data_directory::restore_missing_database_from_backup(&database_path)?;
             let startup =
                 tauri::async_runtime::block_on(Database::open_for_startup(&database_path));
             let state = match startup {
@@ -70,6 +73,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             commands::health_check,
+            commands::app_data_reset,
             commands::project_list,
             commands::project_add,
             commands::project_get,

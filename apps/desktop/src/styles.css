@@ -1945,6 +1945,112 @@ button:disabled {
   justify-content: flex-end;
 }
 
+.data-management-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgb(15 23 42 / 48%);
+}
+
+.data-management-panel {
+  width: min(620px, 100%);
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  border: 1px solid #d8dee6;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 18px 50px rgb(15 23 42 / 22%);
+}
+
+.data-management-panel > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 20px 22px;
+  border-bottom: 1px solid #e5e9ee;
+}
+
+.data-management-panel > header > div,
+.data-retention-note,
+.data-removal-row,
+.data-removal-actions {
+  display: flex;
+  align-items: center;
+}
+
+.data-management-panel h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.data-management-panel header p {
+  margin: 4px 0 0;
+  color: #64748b;
+  font-size: 13px;
+}
+
+.data-management-icon {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 34px;
+  place-items: center;
+  margin-right: 11px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  color: #334155;
+  background: #f8fafc;
+}
+
+.data-retention-note {
+  gap: 11px;
+  margin: 18px 22px 0;
+  padding: 13px 14px;
+  border: 1px solid #b9ddc5;
+  border-radius: 6px;
+  color: #245b35;
+  background: #f2faf4;
+}
+
+.data-retention-note div,
+.data-removal-row > div:first-child {
+  display: grid;
+  gap: 3px;
+}
+
+.data-retention-note span,
+.data-removal-row span,
+.data-removal-row small {
+  color: #64748b;
+  font-size: 13px;
+}
+
+.data-removal-row {
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+  margin: 18px 22px 22px;
+  padding: 16px 0 0;
+  border-top: 1px solid #e5e9ee;
+}
+
+.data-removal-row small {
+  margin-top: 5px;
+}
+
+.data-removal-actions {
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
+.data-management-panel > .project-error {
+  margin: 0 22px 22px;
+}
+
 @media (max-width: 620px) {
   .run-results-stats {
     grid-template-columns: repeat(2, minmax(90px, 1fr));
@@ -1963,6 +2069,25 @@ button:disabled {
   .prompt-generator-backdrop {
     align-items: end;
     padding: 0;
+  }
+  .data-management-backdrop {
+    align-items: end;
+    padding: 0;
+  }
+  .data-management-panel {
+    max-height: calc(100vh - 16px);
+    border-radius: 8px 8px 0 0;
+  }
+  .data-removal-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .data-removal-actions,
+  .data-removal-row .danger-button {
+    width: 100%;
+  }
+  .data-removal-actions > button {
+    flex: 1;
   }
   .prompt-generator-panel {
     max-height: calc(100vh - 16px);

@@ -21,31 +21,32 @@ use batch_code_analyzer_ipc_contracts::{
     ApiModelsFetchRequest, ApiModelsFetchResponse, ApiProfileDeleteRequest,
     ApiProfileDeleteResponse, ApiProfileListResponse, ApiProfileSaveRequest,
     ApiProfileSaveResponse, ApiProfileSecretGetRequest, ApiProfileSecretGetResponse,
-    ApiProfileSummaryDto, ApiProfileTestRequest, ApiProfileTestResponse, AttemptDto,
-    ContextGenerateRequest, ContextGenerateResponse, ContextGetRequest, ContextGetResponse,
-    DatabaseStatus, ErrorCategory, FileAuthorizeSensitiveRequest, FileAuthorizeSensitiveResponse,
-    FileListRequest, FileRecordSummaryDto, FileSetIncludedRequest, FileSetIncludedResponse,
-    HealthCheckResponse, HealthStatus, IpcError, PageResponse, ProjectAddRequest,
-    ProjectAddResponse, ProjectDetailDto, ProjectPromptSaveRequest, ProjectPromptSaveResponse,
-    ProjectPromptSelectRequest, ProjectPromptSelectResponse, ProjectRunSettingsUpdateRequest,
-    ProjectRunSettingsUpdateResponse, ProjectSummaryDto, PromptGenerateRequest,
-    PromptGenerateResponse, ResultReadRequest, ResultReadResponse, RunBlockingReasonDto,
-    RunCancelRequest, RunCancelResponse, RunCreateRequest, RunCreateResponse, RunExecuteRequest,
-    RunExecuteResponse, RunGetRequest, RunGetResponse, RunListRequest, RunPreviewRequest,
-    RunPreviewResponse, RunPreviewTaskDto, RunSummaryDto, ScanCancelRequest, ScanCancelResponse,
-    ScanOperationStatus, ScanReportDto, ScanRuleSummaryDto, ScanStartRequest, ScanStartResponse,
-    TaskGetRequest, TaskGetResponse, TaskListRequest, TaskRequestPreviewRequest,
-    TaskRequestPreviewResponse, TaskRetryBatchRequest, TaskRetryBatchResponse, TaskRetryRequest,
-    TaskRetryResponse, TaskSummaryDto, DTO_SCHEMA_VERSION, HEALTH_CHECK_SCHEMA_VERSION,
+    ApiProfileSummaryDto, ApiProfileTestRequest, ApiProfileTestResponse, AppDataResetRequest,
+    AppDataResetResponse, AttemptDto, ContextGenerateRequest, ContextGenerateResponse,
+    ContextGetRequest, ContextGetResponse, DatabaseStatus, ErrorCategory,
+    FileAuthorizeSensitiveRequest, FileAuthorizeSensitiveResponse, FileListRequest,
+    FileRecordSummaryDto, FileSetIncludedRequest, FileSetIncludedResponse, HealthCheckResponse,
+    HealthStatus, IpcError, PageResponse, ProjectAddRequest, ProjectAddResponse, ProjectDetailDto,
+    ProjectPromptSaveRequest, ProjectPromptSaveResponse, ProjectPromptSelectRequest,
+    ProjectPromptSelectResponse, ProjectRunSettingsUpdateRequest, ProjectRunSettingsUpdateResponse,
+    ProjectSummaryDto, PromptGenerateRequest, PromptGenerateResponse, ResultReadRequest,
+    ResultReadResponse, RunBlockingReasonDto, RunCancelRequest, RunCancelResponse,
+    RunCreateRequest, RunCreateResponse, RunExecuteRequest, RunExecuteResponse, RunGetRequest,
+    RunGetResponse, RunListRequest, RunPreviewRequest, RunPreviewResponse, RunPreviewTaskDto,
+    RunSummaryDto, ScanCancelRequest, ScanCancelResponse, ScanOperationStatus, ScanReportDto,
+    ScanRuleSummaryDto, ScanStartRequest, ScanStartResponse, TaskGetRequest, TaskGetResponse,
+    TaskListRequest, TaskRequestPreviewRequest, TaskRequestPreviewResponse, TaskRetryBatchRequest,
+    TaskRetryBatchResponse, TaskRetryRequest, TaskRetryResponse, TaskSummaryDto,
+    DTO_SCHEMA_VERSION, HEALTH_CHECK_SCHEMA_VERSION,
 };
 use batch_code_analyzer_model_providers::{ModelProvider, OpenAiResponsesProvider, ProviderError};
 use batch_code_analyzer_persistence::DatabaseHealth;
 use batch_code_analyzer_repository_scanner::{ImportReport, ScanCancellation};
 use batch_code_analyzer_secret_store::{SecretRef, SecretValue};
 use serde::Deserialize;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
-use crate::{scan_state::ScanStateError, PersistenceState};
+use crate::{data_directory, scan_state::ScanStateError, PersistenceState};
 
 static NEXT_SCAN_OPERATION_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -61,6 +62,64 @@ pub(crate) struct ApiProfileSecretPutRequest {
 #[tauri::command]
 pub(crate) fn health_check(state: State<'_, PersistenceState>) -> HealthCheckResponse {
     health_check_response(state.health)
+}
+
+#[tauri::command]
+pub(crate) async fn app_data_reset(
+    request: AppDataResetRequest,
+    app: AppHandle,
+    state: State<'_, PersistenceState>,
+) -> Result<AppDataResetResponse, IpcError> {
+    if !request.confirmed {
+        return Err(ipc_error(
+            "validation_invalid_value",
+            ErrorCategory::Validation,
+            "清空本地数据前需要明确确认",
+            false,
+        ));
+    }
+    let database = state.database.as_ref().ok_or_else(database_unavailable)?;
+    if !database
+        .repository()
+        .unfinished_runs()
+        .await
+        .map_err(|error| persistence_error(&error))?
+        .is_empty()
+    {
+        return Err(ipc_error(
+            "run_active_exists",
+            ErrorCategory::Scheduler,
+            "当前仍有活动 Run，结束后才能清空本地数据",
+            false,
+        ));
+    }
+    let profiles = database
+        .repository()
+        .list_api_profiles()
+        .await
+        .map_err(|error| persistence_error(&error))?;
+    for profile in profiles {
+        if let Some(reference) = profile.secret_ref {
+            let _ = state.secret_store.delete(&SecretRef::new(reference)).await;
+        }
+    }
+    let database_path = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| database_unavailable())?
+        .join("app.db");
+    data_directory::schedule_database_reset(&database_path).map_err(|_| {
+        ipc_error(
+            "persistence_transaction_failed",
+            ErrorCategory::Persistence,
+            "本地数据清理暂时无法安排",
+            true,
+        )
+    })?;
+    Ok(AppDataResetResponse {
+        scheduled: true,
+        restart_required: true,
+    })
 }
 
 #[tauri::command]

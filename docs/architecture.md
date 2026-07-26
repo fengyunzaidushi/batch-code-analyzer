@@ -348,6 +348,8 @@ macOS:   ~/Library/Application Support/<AppName>/app.db
 Linux:   ~/.local/share/<AppName>/app.db
 ```
 
+安装目录与用户数据目录必须分离。升级安装不得覆盖或清理 `app.db`；桌面端在主数据库缺失且同目录存在最近一次启动备份 `app.bak` 时，先原子恢复备份，再执行正常的 Schema 校验与 Migration。已有主数据库始终优先，不允许用备份静默覆盖。
+
 仓库不可用时，历史 Run 仍可从 SQLite 查看。
 
 ### 7.2 SQLite 配置
@@ -738,6 +740,7 @@ project_add
 project_update
 project_remove
 project_relocate
+app_data_reset
 
 scan_start
 scan_cancel
