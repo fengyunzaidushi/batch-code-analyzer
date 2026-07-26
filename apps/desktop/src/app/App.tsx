@@ -66,6 +66,7 @@ import {
   retryTasks,
 } from "../ipc/runs";
 import { generatePrompt } from "../ipc/prompt";
+import { resetAppData } from "../ipc/appData";
 import { AppShell, type ShellHealthState, type ShellProject } from "./AppShell";
 
 interface RetryQueueItem {
@@ -450,6 +451,16 @@ export function App() {
       setProjectError(safeProjectError(error));
     } finally {
       setIsAddingProject(false);
+    }
+  };
+
+  const handleResetAppData = async (): Promise<void> => {
+    try {
+      await resetAppData({ confirmed: true });
+    } catch (error) {
+      const message = safeProjectError(error);
+      setProjectError(message);
+      throw new Error(message, { cause: error });
     }
   };
 
@@ -1101,6 +1112,7 @@ export function App() {
         setHealthState("checking");
         setRequestId((current) => current + 1);
       }}
+      onResetAppData={handleResetAppData}
       onSetFileIncluded={handleSetFileIncluded}
       onPreviewRun={handleRunPreview}
       onCreateRun={handleRunCreate}
@@ -1173,8 +1185,10 @@ function safeProjectError(error: unknown): string {
       persistence_database_unavailable: "本地数据库暂不可用。",
       persistence_migration_failed: "本地数据库暂不可用。",
       persistence_transaction_failed: "项目数据暂时无法保存。",
+      project_not_found: "项目不存在或已经移除。",
       project_path_duplicate: "该目录已经登记，已保留原项目。",
       project_path_unavailable: "所选目录不可用。",
+      run_active_exists: "当前仍有活动 Run，结束后才能清空本地数据。",
       prompt_not_found: "保存的提示词不存在。",
       validation_required_field: "提示词名称和内容不能为空。",
       scan_already_running: "当前项目已有扫描。",

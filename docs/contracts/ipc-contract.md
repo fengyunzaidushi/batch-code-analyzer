@@ -327,7 +327,10 @@ Run 输出目录重新解析路径，拒绝路径逃逸、外部符号链接、�
 app_get_settings
 app_update_settings
 health_check
+app_data_reset
 ```
+
+`app_data_reset` 必须接收 `confirmed: true`。命令会清理可访问的 API 密钥引用并写入一次性重置标记，返回 `restartRequired: true`；下次启动会在打开 SQLite 前删除应用数据库、启动备份及 WAL sidecar。仓库源代码、`.batch-analysis` 配置镜像和结果目录不受影响。
 
 `health_check` 返回桌面核心的受控启动状态，可用于前端启动检测、自动化测试和故障诊断。`status: ready` 仅表示 Rust 核心可响应，不表示数据库、扫描或模型服务已经可用。
 

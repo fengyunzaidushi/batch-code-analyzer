@@ -327,6 +327,19 @@ pub struct ProjectPromptSelectResponse {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
+pub struct AppDataResetRequest {
+    pub confirmed: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct AppDataResetResponse {
+    pub scheduled: bool,
+    pub restart_required: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
 pub struct FileListRequest {
     pub project_id: ProjectId,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1040,6 +1053,8 @@ pub fn export_types(out_dir: &Path) -> Result<(), ExportError> {
     ProjectPromptSaveResponse::export_all(&config)?;
     ProjectPromptSelectRequest::export_all(&config)?;
     ProjectPromptSelectResponse::export_all(&config)?;
+    AppDataResetRequest::export_all(&config)?;
+    AppDataResetResponse::export_all(&config)?;
     ScanStartRequest::export_all(&config)?;
     ScanStartResponse::export_all(&config)?;
     ScanCancelRequest::export_all(&config)?;

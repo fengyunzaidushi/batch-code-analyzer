@@ -38,7 +38,7 @@ use batch_code_analyzer_repository_scanner::{
 };
 use batch_code_analyzer_secret_store::SecretRef;
 use batch_code_analyzer_security_core::{content_hash, detect_secrets, SafeRoot};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime, UtcOffset};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -845,33 +845,60 @@ impl<'database> ProjectService<'database> {
             });
         }
 
+        let mirror_result = read_project_mirror(&canonical);
+        let mirror_read_failed = mirror_result.is_err();
+        let mirror = mirror_result.ok().flatten();
         let now = timestamp_now();
+        let restored_execution_defaults = mirror
+            .as_ref()
+            .and_then(|value| value.execution_defaults.clone())
+            .filter(|value| {
+                (MIN_RUN_CONCURRENCY..=MAX_RUN_CONCURRENCY).contains(&value.concurrency)
+            });
         let project = Project {
             schema_version: LATEST_SCHEMA_VERSION,
-            id: new_project_id(),
-            name: display_name(&canonical),
+            id: mirror
+                .as_ref()
+                .and_then(|value| value.id.clone())
+                .filter(|value| !value.as_str().trim().is_empty())
+                .unwrap_or_else(new_project_id),
+            name: mirror
+                .as_ref()
+                .and_then(|value| value.name.clone())
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| display_name(&canonical)),
             source_directory: canonical_string.clone(),
             path_status: ProjectPathStatus::Available,
-            default_prompt: DEFAULT_PROMPT.into(),
-            default_model: None,
-            context_model: None,
+            default_prompt: mirror
+                .as_ref()
+                .and_then(|value| value.default_prompt.clone())
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| DEFAULT_PROMPT.into()),
+            default_model: mirror
+                .as_ref()
+                .and_then(|value| value.default_model.clone()),
+            context_model: mirror
+                .as_ref()
+                .and_then(|value| value.context_model.clone()),
+            // API profiles live in the application database. A portable mirror
+            // must not recreate dangling profile references after recovery.
             api_routing: ApiRouting {
                 primary_profile_id: None,
                 fallbacks: Vec::new(),
             },
-            execution_defaults: ExecutionDefaults {
+            execution_defaults: restored_execution_defaults.unwrap_or(ExecutionDefaults {
                 concurrency: DEFAULT_RUN_CONCURRENCY,
                 timeout_seconds: 120,
                 max_output_tokens: 4096,
                 retry_count_per_profile: 1,
-            },
+            }),
             project_context: ProjectContext {
                 enabled: true,
                 current_version_id: None,
                 status: ContextStatus::Ready,
             },
             filter_rules: FilterRules::default(),
-            output_root: None,
+            output_root: mirror.as_ref().and_then(|value| value.output_root.clone()),
             last_opened_at: now.clone(),
         };
         let create_result = self
@@ -909,7 +936,7 @@ impl<'database> ProjectService<'database> {
             return Err(ProjectServiceError::Persistence(error));
         }
 
-        let config_mirror_warning = write_project_mirror(&project).is_err();
+        let config_mirror_warning = mirror_read_failed || write_project_mirror(&project).is_err();
         Ok(ProjectAddResult {
             project,
             created: true,
@@ -3006,20 +3033,20 @@ fn normalize_profile_base_url(value: &str) -> Result<String, ApiProfileServiceEr
     Ok(trimmed.to_owned())
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ProjectConfigMirror<'project> {
+struct ProjectConfigMirror {
     schema_version: u32,
-    id: &'project ProjectId,
-    name: &'project str,
-    source_directory: &'project str,
-    default_prompt: &'project str,
-    active_prompt_id: &'project Option<String>,
-    default_model: &'project Option<String>,
-    context_model: &'project Option<String>,
-    api_routing: &'project ApiRouting,
-    execution_defaults: &'project ExecutionDefaults,
-    output_root: &'project Option<String>,
+    id: Option<ProjectId>,
+    name: Option<String>,
+    source_directory: Option<String>,
+    default_prompt: Option<String>,
+    active_prompt_id: Option<String>,
+    default_model: Option<String>,
+    context_model: Option<String>,
+    api_routing: Option<ApiRouting>,
+    execution_defaults: Option<ExecutionDefaults>,
+    output_root: Option<String>,
 }
 
 fn write_project_mirror(project: &Project) -> std::io::Result<()> {
@@ -3029,20 +3056,37 @@ fn write_project_mirror(project: &Project) -> std::io::Result<()> {
     let target = directory.join("project.json");
     let mirror = ProjectConfigMirror {
         schema_version: project.schema_version,
-        id: &project.id,
-        name: &project.name,
-        source_directory: &project.source_directory,
-        default_prompt: &project.default_prompt,
-        active_prompt_id: &project.filter_rules.active_prompt_id,
-        default_model: &project.default_model,
-        context_model: &project.context_model,
-        api_routing: &project.api_routing,
-        execution_defaults: &project.execution_defaults,
-        output_root: &project.output_root,
+        id: Some(project.id.clone()),
+        name: Some(project.name.clone()),
+        source_directory: Some(project.source_directory.clone()),
+        default_prompt: Some(project.default_prompt.clone()),
+        active_prompt_id: project.filter_rules.active_prompt_id.clone(),
+        default_model: project.default_model.clone(),
+        context_model: project.context_model.clone(),
+        api_routing: Some(project.api_routing.clone()),
+        execution_defaults: Some(project.execution_defaults.clone()),
+        output_root: project.output_root.clone(),
     };
     let bytes = serde_json::to_vec_pretty(&mirror).map_err(std::io::Error::other)?;
     fs::write(&temporary, bytes)?;
     fs::rename(temporary, target)
+}
+
+fn read_project_mirror(root: &Path) -> std::io::Result<Option<ProjectConfigMirror>> {
+    let target = root.join(".batch-analysis").join("project.json");
+    if !target.is_file() {
+        return Ok(None);
+    }
+    let bytes = fs::read(target)?;
+    let mirror: ProjectConfigMirror =
+        serde_json::from_slice(&bytes).map_err(std::io::Error::other)?;
+    if mirror.schema_version > LATEST_SCHEMA_VERSION {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "project mirror schema is newer than this application",
+        ));
+    }
+    Ok(Some(mirror))
 }
 
 fn display_name(path: &Path) -> String {
@@ -4657,6 +4701,75 @@ mod tests {
         assert!(!second.created);
         assert_eq!(second.project.id, first.project.id);
 
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[tokio::test]
+    async fn readding_project_restores_portable_prompt_and_settings_without_profile_references() {
+        let path = temporary_directory("mirror-recovery");
+        {
+            let database = Database::open_in_memory()
+                .await
+                .expect("database should open");
+            let project = ProjectService::new(&database)
+                .add_project(&path)
+                .await
+                .expect("project should add")
+                .project;
+            let profile = ApiProfileService::new(&database)
+                .save(
+                    None,
+                    "Recovery API".into(),
+                    "https://example.test/v1".into(),
+                    Some("gpt-5".into()),
+                )
+                .await
+                .expect("profile should save");
+            let service = ProjectService::new(&database);
+            service
+                .update_run_settings(&project.id, Some(profile.id), Some("gpt-5-mini".into()), 7)
+                .await
+                .expect("settings should save");
+            service
+                .save_prompt(&project.id, "恢复提示词", "解释恢复后的项目配置")
+                .await
+                .expect("prompt should save");
+        }
+
+        let recovered_database = Database::open_in_memory()
+            .await
+            .expect("replacement database should open");
+        let recovered = ProjectService::new(&recovered_database)
+            .add_project(&path)
+            .await
+            .expect("project should recover")
+            .project;
+
+        assert_eq!(recovered.default_prompt, "解释恢复后的项目配置");
+        assert_eq!(recovered.default_model.as_deref(), Some("gpt-5-mini"));
+        assert_eq!(recovered.execution_defaults.concurrency, 7);
+        assert!(recovered.api_routing.primary_profile_id.is_none());
+        assert!(recovered.api_routing.fallbacks.is_empty());
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[tokio::test]
+    async fn invalid_project_mirror_is_reported_without_being_overwritten() {
+        let database = Database::open_in_memory()
+            .await
+            .expect("database should open");
+        let path = temporary_directory("invalid-mirror");
+        let mirror_path = path.join(".batch-analysis/project.json");
+        fs::create_dir_all(mirror_path.parent().unwrap()).expect("mirror directory should exist");
+        fs::write(&mirror_path, b"{invalid-json").expect("invalid mirror should exist");
+
+        let result = ProjectService::new(&database)
+            .add_project(&path)
+            .await
+            .expect("project registration should still succeed");
+
+        assert!(result.config_mirror_warning);
+        assert_eq!(fs::read(&mirror_path).unwrap(), b"{invalid-json");
         let _ = fs::remove_dir_all(path);
     }
 

@@ -55,6 +55,8 @@ export type { ProjectPromptSaveRequest } from "./generated/ProjectPromptSaveRequ
 export type { ProjectPromptSaveResponse } from "./generated/ProjectPromptSaveResponse";
 export type { ProjectPromptSelectRequest } from "./generated/ProjectPromptSelectRequest";
 export type { ProjectPromptSelectResponse } from "./generated/ProjectPromptSelectResponse";
+export type { AppDataResetRequest } from "./generated/AppDataResetRequest";
+export type { AppDataResetResponse } from "./generated/AppDataResetResponse";
 export type { ProjectRunSettingsUpdateRequest } from "./generated/ProjectRunSettingsUpdateRequest";
 export type { ProjectRunSettingsUpdateResponse } from "./generated/ProjectRunSettingsUpdateResponse";
 export type { ProjectSummaryDto } from "./generated/ProjectSummaryDto";
