@@ -964,6 +964,7 @@ function PromptWorkspace({
     promptNameDraft.projectId === project?.id
       ? promptNameDraft.value
       : (activePreset?.name ?? "新的提示词");
+  const isEditingActivePreset = activePreset?.name === promptName.trim();
   const setPromptName = (value: string) => {
     setPromptNameDraft({ projectId: project?.id ?? null, value });
   };
@@ -1100,7 +1101,9 @@ function PromptWorkspace({
               }}
               type="button"
             >
-              保存为项目默认并加入常用
+              {isEditingActivePreset
+                ? "保存常用提示词修改"
+                : "保存为项目默认并加入常用"}
             </button>
             <button
               className="primary-button"
@@ -2033,7 +2036,7 @@ function RunPreviewPanel({
           </div>
         ) : (
           <div className="run-preview-ready" role="status">
-            将为每个目标文件创建一个 queued Task，暂不发送模型请求。
+            确认后将为每个目标文件创建一个 queued Task，并立即开始发送模型请求。
           </div>
         )}
         {error ? (
@@ -2062,7 +2065,7 @@ function RunPreviewPanel({
             onClick={onCreate}
             type="button"
           >
-            {isCreating ? "正在创建" : "创建 Run"}
+            {isCreating ? "正在启动分析" : "创建并开始分析"}
           </button>
         </div>
       </section>

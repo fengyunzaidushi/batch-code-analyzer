@@ -978,7 +978,8 @@ impl<'database> ProjectService<'database> {
     }
 
     /// Saves a named client-wide prompt preset and makes it the selected
-    /// project's active default.
+    /// project's active default. Saving the currently active preset under the
+    /// same name updates its content while preserving its stable ID.
     ///
     /// # Errors
     ///
@@ -1002,24 +1003,36 @@ impl<'database> ProjectService<'database> {
             .await?
             .ok_or(ProjectServiceError::NotFound)?;
         self.migrate_legacy_prompt_presets().await?;
-        if self
+        let existing = self
             .database
             .repository()
             .find_prompt_preset_by_name(name)
-            .await?
-            .is_some()
-        {
-            return Err(ProjectServiceError::PromptNameConflict);
-        }
-        let preset = PromptPreset {
-            id: new_prompt_id(),
-            name: name.to_owned(),
-            prompt: prompt.to_owned(),
-        };
-        self.database
-            .repository()
-            .create_prompt_preset(&preset, &timestamp_now())
             .await?;
+        let preset = match existing {
+            Some(mut preset)
+                if project.filter_rules.active_prompt_id.as_deref() == Some(preset.id.as_str()) =>
+            {
+                preset.prompt = prompt.to_owned();
+                self.database
+                    .repository()
+                    .update_prompt_preset(&preset, &timestamp_now())
+                    .await?;
+                preset
+            }
+            Some(_) => return Err(ProjectServiceError::PromptNameConflict),
+            None => {
+                let preset = PromptPreset {
+                    id: new_prompt_id(),
+                    name: name.to_owned(),
+                    prompt: prompt.to_owned(),
+                };
+                self.database
+                    .repository()
+                    .create_prompt_preset(&preset, &timestamp_now())
+                    .await?;
+                preset
+            }
+        };
         project.default_prompt = preset.prompt.clone();
         project.filter_rules.active_prompt_id = Some(preset.id.clone());
         let config_mirror_warning = self.persist_project(&project).await?;
@@ -4423,6 +4436,16 @@ mod tests {
             .expect("saved prompt should be global")
             .id;
 
+        let selected = service
+            .select_prompt(&second_project.id, &first_id)
+            .await
+            .expect("global prompt should be selectable by another project");
+        assert_eq!(selected.project.default_prompt, "解释模块职责。");
+        assert_eq!(
+            selected.project.filter_rules.active_prompt_id.as_deref(),
+            Some(first_id.as_str())
+        );
+
         service
             .save_prompt(&first_project.id, "影响分析", "分析修改影响。")
             .await
@@ -4433,15 +4456,6 @@ mod tests {
             .expect("global prompts should load");
         assert_eq!(global_prompts.len(), 2);
 
-        let selected = service
-            .select_prompt(&second_project.id, &first_id)
-            .await
-            .expect("global prompt should be selectable by another project");
-        assert_eq!(selected.project.default_prompt, "解释模块职责。");
-        assert_eq!(
-            selected.project.filter_rules.active_prompt_id.as_deref(),
-            Some(first_id.as_str())
-        );
         assert_eq!(
             service
                 .get_project(&first_project.id)
@@ -4474,6 +4488,65 @@ mod tests {
                 .expect_err("unknown prompt should be rejected")
                 .code(),
             "prompt_not_found"
+        );
+        let _ = fs::remove_dir_all(first_path);
+        let _ = fs::remove_dir_all(second_path);
+    }
+
+    #[tokio::test]
+    async fn saving_the_active_prompt_updates_content_without_rewriting_other_projects() {
+        let database = Database::open_in_memory()
+            .await
+            .expect("database should open");
+        let first_path = temporary_directory("prompt-update-first");
+        let second_path = temporary_directory("prompt-update-second");
+        let service = ProjectService::new(&database);
+        let first_project = service
+            .add_project(&first_path)
+            .await
+            .expect("first project should add")
+            .project;
+        let second_project = service
+            .add_project(&second_path)
+            .await
+            .expect("second project should add")
+            .project;
+
+        service
+            .save_prompt(&first_project.id, "职责说明", "解释模块职责。")
+            .await
+            .expect("prompt should save");
+        let prompt_id = service
+            .list_prompt_presets()
+            .await
+            .expect("global prompts should load")[0]
+            .id
+            .clone();
+        service
+            .select_prompt(&second_project.id, &prompt_id)
+            .await
+            .expect("second project should select the prompt");
+
+        let updated = service
+            .save_prompt(&first_project.id, "职责说明", "解释模块职责和边界。")
+            .await
+            .expect("active prompt should update");
+        let prompts = service
+            .list_prompt_presets()
+            .await
+            .expect("updated global prompts should load");
+        assert_eq!(updated.project.default_prompt, "解释模块职责和边界。");
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(prompts[0].id, prompt_id);
+        assert_eq!(prompts[0].prompt, "解释模块职责和边界。");
+        assert_eq!(
+            service
+                .get_project(&second_project.id)
+                .await
+                .expect("second project should be readable")
+                .expect("second project should exist")
+                .default_prompt,
+            "解释模块职责。"
         );
         let _ = fs::remove_dir_all(first_path);
         let _ = fs::remove_dir_all(second_path);

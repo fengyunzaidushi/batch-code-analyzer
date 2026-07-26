@@ -168,6 +168,38 @@ describe("AppShell", () => {
     });
   });
 
+  it("saves edits to the active global prompt", async () => {
+    const user = userEvent.setup();
+    const onSaveProjectPrompt = vi.fn().mockResolvedValue(undefined);
+    render(
+      <AppShell
+        onSaveProjectPrompt={onSaveProjectPrompt}
+        projects={[
+          project({
+            activePromptId: "prompt-1",
+            defaultPrompt: "解释模块职责。",
+            promptPresets: [
+              { id: "prompt-1", name: "职责说明", prompt: "解释模块职责。" },
+            ],
+          }),
+        ]}
+      />,
+    );
+
+    const promptEditor = screen.getByLabelText("项目默认提示词");
+    await user.clear(promptEditor);
+    await user.type(promptEditor, "解释模块职责和边界。");
+    await user.click(
+      screen.getByRole("button", { name: "保存常用提示词修改" }),
+    );
+
+    expect(onSaveProjectPrompt).toHaveBeenCalledWith({
+      name: "职责说明",
+      prompt: "解释模块职责和边界。",
+      projectId: "project-1",
+    });
+  });
+
   it("selects a global prompt and fills the editor", async () => {
     const user = userEvent.setup();
     const onSelectProjectPrompt = vi.fn().mockResolvedValue(undefined);
@@ -541,7 +573,12 @@ describe("AppShell", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("src/main.rs")).toBeInTheDocument();
     expect(screen.getByText("并发数").parentElement).toHaveTextContent("3");
-    await user.click(screen.getByRole("button", { name: "创建 Run" }));
+    expect(
+      screen.getByText(
+        "确认后将为每个目标文件创建一个 queued Task，并立即开始发送模型请求。",
+      ),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "创建并开始分析" }));
     expect(onCreateRun).toHaveBeenCalledOnce();
   });
 

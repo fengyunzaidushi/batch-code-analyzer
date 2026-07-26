@@ -1166,6 +1166,9 @@ export function App() {
 
 function safeProjectError(error: unknown): string {
   if (isIpcError(error)) {
+    if (error.code === "validation_invalid_value") {
+      return error.message;
+    }
     const messages: Record<string, string> = {
       persistence_database_unavailable: "本地数据库暂不可用。",
       persistence_migration_failed: "本地数据库暂不可用。",
@@ -1185,7 +1188,6 @@ function safeProjectError(error: unknown): string {
       scan_encoding_unsupported: "文件编码不支持，暂时不能纳入。",
       scan_binary_file: "二进制文件不能纳入分析。",
       scan_file_too_large: "文件超过大小限制，暂时不能纳入。",
-      validation_invalid_value: "文件状态无法修改。",
     };
     return messages[error.code] ?? "项目暂时无法添加。";
   }

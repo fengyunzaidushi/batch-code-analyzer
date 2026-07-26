@@ -229,6 +229,43 @@ impl Repository<'_> {
         finish_write(transaction, result).await
     }
 
+    /// Updates a user-managed global prompt preset while preserving its stable ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns a persistence error when the preset does not exist or cannot be
+    /// committed.
+    pub async fn update_prompt_preset(
+        &self,
+        preset: &PromptPreset,
+        now: &Rfc3339Timestamp,
+    ) -> Result<(), PersistenceError> {
+        let mut transaction = self.database.begin_write().await?;
+        let result = sqlx::query(
+            "UPDATE prompt_library
+             SET name = ?, content = ?, updated_at = ?
+             WHERE id = ? AND is_builtin = 0",
+        )
+        .bind(&preset.name)
+        .bind(&preset.prompt)
+        .bind(now.as_str())
+        .bind(&preset.id)
+        .execute(transaction.connection())
+        .await
+        .map_err(|_| PersistenceError::TransactionFailed)
+        .and_then(|result| {
+            if result.rows_affected() == 0 {
+                Err(PersistenceError::RecordNotFound {
+                    kind: "prompt_preset",
+                    id: preset.id.clone(),
+                })
+            } else {
+                Ok(())
+            }
+        });
+        finish_write(transaction, result).await
+    }
+
     /// Inserts an API profile's non-sensitive metadata.
     ///
     /// # Errors
