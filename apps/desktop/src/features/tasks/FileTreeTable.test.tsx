@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { FileRecordSummaryDto } from "@batch-code-analyzer/ipc-types";
@@ -82,6 +82,82 @@ describe("FileTreeTable", () => {
     const warning = screen.getByText("约 20,000 tokens · 代码文件过长");
     expect(warning).toBeInTheDocument();
     expect(warning.parentElement).toHaveClass("is-warning");
+  });
+
+  it("sorts files by estimated tokens in both directions", async () => {
+    const user = userEvent.setup();
+    render(
+      <FileTreeTable
+        files={[
+          file({ id: "large", relativePath: "src/large.ts", sizeBytes: 600 }),
+          file({ id: "small", relativePath: "src/small.ts", sizeBytes: 20 }),
+          file({ id: "medium", relativePath: "src/medium.ts", sizeBytes: 200 }),
+        ]}
+      />,
+    );
+
+    const table = screen.getByRole("table", { name: "扫描文件列表" });
+    await user.click(
+      screen.getByRole("button", {
+        name: "按文件列表大小 / 预估 Token升序排序",
+      }),
+    );
+    expect(
+      within(table)
+        .getAllByTitle(/src\/(small|medium|large)\.ts/)
+        .map((element) => element.getAttribute("title")),
+    ).toEqual(["src/small.ts", "src/medium.ts", "src/large.ts"]);
+    expect(
+      screen.getByRole("button", {
+        name: "按文件列表大小 / 预估 Token降序排序",
+      }).parentElement,
+    ).toHaveAttribute("aria-sort", "ascending");
+
+    await user.click(
+      screen.getByRole("button", {
+        name: "按文件列表大小 / 预估 Token降序排序",
+      }),
+    );
+    expect(
+      within(table)
+        .getAllByTitle(/src\/(small|medium|large)\.ts/)
+        .map((element) => element.getAttribute("title")),
+    ).toEqual(["src/large.ts", "src/medium.ts", "src/small.ts"]);
+  });
+
+  it("groups sensitive files together when sorting by status", async () => {
+    const user = userEvent.setup();
+    render(
+      <FileTreeTable
+        files={[
+          file({ id: "normal", relativePath: "src/normal.ts" }),
+          file({
+            id: "secret-a",
+            relativePath: "config/a.env",
+            included: false,
+            exclusionReason: "sensitive_filename",
+            sourceStatus: "sensitive",
+          }),
+          file({
+            id: "secret-b",
+            relativePath: "config/b.env",
+            included: false,
+            exclusionReason: "sensitive_content",
+            sourceStatus: "sensitive",
+          }),
+        ]}
+      />,
+    );
+
+    const table = screen.getByRole("table", { name: "扫描文件列表" });
+    await user.click(
+      screen.getByRole("button", { name: "按文件列表状态升序排序" }),
+    );
+    expect(
+      within(table)
+        .getAllByTitle(/(config|src)\//)
+        .map((element) => element.getAttribute("title")),
+    ).toEqual(["config/a.env", "config/b.env", "src/normal.ts"]);
   });
 
   it("collapses a directory without losing its tree node", async () => {
