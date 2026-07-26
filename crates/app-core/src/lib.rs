@@ -849,58 +849,12 @@ impl<'database> ProjectService<'database> {
         let mirror_read_failed = mirror_result.is_err();
         let mirror = mirror_result.ok().flatten();
         let now = timestamp_now();
-        let restored_execution_defaults = mirror
-            .as_ref()
-            .and_then(|value| value.execution_defaults.clone())
-            .filter(|value| {
-                (MIN_RUN_CONCURRENCY..=MAX_RUN_CONCURRENCY).contains(&value.concurrency)
-            });
-        let project = Project {
-            schema_version: LATEST_SCHEMA_VERSION,
-            id: mirror
-                .as_ref()
-                .and_then(|value| value.id.clone())
-                .filter(|value| !value.as_str().trim().is_empty())
-                .unwrap_or_else(new_project_id),
-            name: mirror
-                .as_ref()
-                .and_then(|value| value.name.clone())
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or_else(|| display_name(&canonical)),
-            source_directory: canonical_string.clone(),
-            path_status: ProjectPathStatus::Available,
-            default_prompt: mirror
-                .as_ref()
-                .and_then(|value| value.default_prompt.clone())
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or_else(|| DEFAULT_PROMPT.into()),
-            default_model: mirror
-                .as_ref()
-                .and_then(|value| value.default_model.clone()),
-            context_model: mirror
-                .as_ref()
-                .and_then(|value| value.context_model.clone()),
-            // API profiles live in the application database. A portable mirror
-            // must not recreate dangling profile references after recovery.
-            api_routing: ApiRouting {
-                primary_profile_id: None,
-                fallbacks: Vec::new(),
-            },
-            execution_defaults: restored_execution_defaults.unwrap_or(ExecutionDefaults {
-                concurrency: DEFAULT_RUN_CONCURRENCY,
-                timeout_seconds: 120,
-                max_output_tokens: 4096,
-                retry_count_per_profile: 1,
-            }),
-            project_context: ProjectContext {
-                enabled: true,
-                current_version_id: None,
-                status: ContextStatus::Ready,
-            },
-            filter_rules: FilterRules::default(),
-            output_root: mirror.as_ref().and_then(|value| value.output_root.clone()),
-            last_opened_at: now.clone(),
-        };
+        let project = project_from_mirror(
+            &canonical,
+            canonical_string.clone(),
+            mirror.as_ref(),
+            now.clone(),
+        );
         let create_result = self
             .database
             .repository()
@@ -3049,6 +3003,55 @@ struct ProjectConfigMirror {
     output_root: Option<String>,
 }
 
+fn project_from_mirror(
+    canonical: &Path,
+    canonical_string: String,
+    mirror: Option<&ProjectConfigMirror>,
+    now: Rfc3339Timestamp,
+) -> Project {
+    let restored_execution_defaults = mirror
+        .and_then(|value| value.execution_defaults.clone())
+        .filter(|value| (MIN_RUN_CONCURRENCY..=MAX_RUN_CONCURRENCY).contains(&value.concurrency));
+    Project {
+        schema_version: LATEST_SCHEMA_VERSION,
+        id: mirror
+            .and_then(|value| value.id.clone())
+            .filter(|value| !value.as_str().trim().is_empty())
+            .unwrap_or_else(new_project_id),
+        name: mirror
+            .and_then(|value| value.name.clone())
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| display_name(canonical)),
+        source_directory: canonical_string,
+        path_status: ProjectPathStatus::Available,
+        default_prompt: mirror
+            .and_then(|value| value.default_prompt.clone())
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| DEFAULT_PROMPT.into()),
+        default_model: mirror.and_then(|value| value.default_model.clone()),
+        context_model: mirror.and_then(|value| value.context_model.clone()),
+        // API profiles are database-local and must not be restored by a portable mirror.
+        api_routing: ApiRouting {
+            primary_profile_id: None,
+            fallbacks: Vec::new(),
+        },
+        execution_defaults: restored_execution_defaults.unwrap_or(ExecutionDefaults {
+            concurrency: DEFAULT_RUN_CONCURRENCY,
+            timeout_seconds: 120,
+            max_output_tokens: 4096,
+            retry_count_per_profile: 1,
+        }),
+        project_context: ProjectContext {
+            enabled: true,
+            current_version_id: None,
+            status: ContextStatus::Ready,
+        },
+        filter_rules: FilterRules::default(),
+        output_root: mirror.and_then(|value| value.output_root.clone()),
+        last_opened_at: now,
+    }
+}
+
 fn write_project_mirror(project: &Project) -> std::io::Result<()> {
     let directory = Path::new(&project.source_directory).join(".batch-analysis");
     fs::create_dir_all(&directory)?;
@@ -3114,8 +3117,7 @@ fn new_prompt_id() -> String {
 }
 
 fn new_file_id() -> FileRecordId {
-    let sequence = NEXT_FILE_ID.fetch_add(1, Ordering::Relaxed);
-    FileRecordId::new(format!("file-{sequence}"))
+    FileRecordId::new(unique_id("file", &NEXT_FILE_ID))
 }
 
 fn new_api_profile_id() -> ApiProfileId {
@@ -3161,7 +3163,7 @@ mod tests {
 
     use super::run_output_directory;
     use super::{
-        assemble_analysis_input, request_context_summary, retry_delay, timestamp_now,
+        assemble_analysis_input, request_context_summary, retry_delay, timestamp_now, unique_id,
         wait_for_retry, ApiProfileService, ApiProfileServiceError, ContextService,
         FileServiceError, ProjectService, ProjectServiceError, PromptGenerationService,
         RunExecutionService, RunPreparationInput, RunResultService, RunResultServiceError,
@@ -3183,6 +3185,17 @@ mod tests {
             directory,
             PathBuf::from("results").join("19700101080000000-run-42")
         );
+    }
+
+    #[test]
+    fn file_ids_do_not_reuse_legacy_sequence_only_ids() {
+        let sequence = AtomicU64::new(1);
+        let first = unique_id("file", &sequence);
+        sequence.store(1, Ordering::Relaxed);
+        let second = unique_id("file", &sequence);
+
+        assert_ne!(first, "file-1");
+        assert_ne!(second, "file-1");
     }
 
     #[test]
@@ -4608,6 +4621,7 @@ mod tests {
             .await
             .expect("project should add")
             .project;
+        project.name = "A legacy project".into();
         project.filter_rules.prompt_presets.push(PromptPreset {
             id: "legacy-prompt-id".into(),
             name: "遗留说明".into(),
@@ -4631,6 +4645,7 @@ mod tests {
             .await
             .expect("conflicting project should add")
             .project;
+        conflicting_project.name = "B legacy project".into();
         conflicting_project
             .filter_rules
             .prompt_presets
