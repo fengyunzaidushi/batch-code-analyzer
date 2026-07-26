@@ -18,7 +18,7 @@ use serde_json::Value;
 use sqlx::{
     migrate::{Migration, MigrationSource, MigrationType, Migrator},
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
-    Sqlite, SqliteConnection, SqlitePool, Transaction,
+    Row, Sqlite, SqliteConnection, SqlitePool, Transaction,
 };
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
@@ -44,19 +44,15 @@ impl MigrationSource<'static> for EmbeddedMigrationSource {
     > {
         Box::pin(async {
             Ok(vec![
-                Migration::new(
+                embedded_migration(
                     1,
                     Cow::Borrowed("initial schema"),
-                    MigrationType::Simple,
-                    Cow::Borrowed(include_str!("../migrations/0001_initial_schema.sql")),
-                    false,
+                    include_str!("../migrations/0001_initial_schema.sql"),
                 ),
-                Migration::new(
+                embedded_migration(
                     2,
                     Cow::Borrowed("encrypted secrets"),
-                    MigrationType::Simple,
-                    Cow::Borrowed(include_str!("../migrations/0002_encrypted_secrets.sql")),
-                    false,
+                    include_str!("../migrations/0002_encrypted_secrets.sql"),
                 ),
             ])
         })
@@ -398,9 +394,11 @@ async fn apply_migrations(pool: &SqlitePool) -> Result<u32, PersistenceError> {
         });
     }
 
-    Migrator::new(EmbeddedMigrationSource)
+    let migrator = Migrator::new(EmbeddedMigrationSource)
         .await
-        .map_err(|_| PersistenceError::MigrationFailed)?
+        .map_err(|_| PersistenceError::MigrationFailed)?;
+    reconcile_legacy_line_ending_checksums(pool, &migrator).await?;
+    migrator
         .run(pool)
         .await
         .map_err(|_| PersistenceError::MigrationFailed)?;
@@ -411,6 +409,77 @@ async fn apply_migrations(pool: &SqlitePool) -> Result<u32, PersistenceError> {
     }
 
     Ok(LATEST_SCHEMA_VERSION)
+}
+
+fn embedded_migration(
+    version: i64,
+    description: Cow<'static, str>,
+    sql: &'static str,
+) -> Migration {
+    Migration::new(
+        version,
+        description,
+        MigrationType::Simple,
+        Cow::Owned(normalize_line_endings_to_crlf(sql)),
+        false,
+    )
+}
+
+fn normalize_line_endings_to_crlf(sql: &str) -> String {
+    sql.replace("\r\n", "\n").replace('\n', "\r\n")
+}
+
+fn migration_with_lf_line_endings(migration: &Migration) -> Migration {
+    Migration::new(
+        migration.version,
+        migration.description.clone(),
+        migration.migration_type,
+        Cow::Owned(migration.sql.replace("\r\n", "\n")),
+        migration.no_tx,
+    )
+}
+
+async fn reconcile_legacy_line_ending_checksums(
+    pool: &SqlitePool,
+    migrator: &Migrator,
+) -> Result<(), PersistenceError> {
+    let migrations_table: Option<String> = sqlx::query_scalar(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| PersistenceError::DatabaseUnavailable)?;
+    if migrations_table.is_none() {
+        return Ok(());
+    }
+
+    let applied = sqlx::query("SELECT version, checksum FROM _sqlx_migrations")
+        .fetch_all(pool)
+        .await
+        .map_err(|_| PersistenceError::DatabaseUnavailable)?;
+
+    for migration in migrator.iter() {
+        let Some(applied_migration) = applied
+            .iter()
+            .find(|row| row.get::<i64, _>("version") == migration.version)
+        else {
+            continue;
+        };
+        let stored_checksum: Vec<u8> = applied_migration.get("checksum");
+        let legacy_migration = migration_with_lf_line_endings(migration);
+        if stored_checksum == legacy_migration.checksum.as_ref()
+            && stored_checksum != migration.checksum.as_ref()
+        {
+            sqlx::query("UPDATE _sqlx_migrations SET checksum = ? WHERE version = ?")
+                .bind(migration.checksum.as_ref())
+                .bind(migration.version)
+                .execute(pool)
+                .await
+                .map_err(|_| PersistenceError::MigrationFailed)?;
+        }
+    }
+
+    Ok(())
 }
 
 async fn applied_schema_version(pool: &SqlitePool) -> Result<i64, PersistenceError> {
@@ -510,11 +579,11 @@ mod tests {
     };
 
     use super::{
-        apply_migrations, Database, DatabaseHealth, DatabaseStartup, PersistenceError,
-        LATEST_SCHEMA_VERSION,
+        apply_migrations, migration_with_lf_line_endings, Database, DatabaseHealth,
+        DatabaseStartup, EmbeddedMigrationSource, PersistenceError, LATEST_SCHEMA_VERSION,
     };
     use batch_code_analyzer_domain::{RunId, RunStatus, RunTransition};
-    use sqlx::{query, query_scalar};
+    use sqlx::{migrate::Migrator, query, query_scalar, Row};
     use tokio::sync::oneshot;
 
     const TIMESTAMP: &str = "2026-07-17T10:00:00+08:00";
@@ -555,6 +624,56 @@ mod tests {
 
         assert_eq!(version, LATEST_SCHEMA_VERSION);
         assert_eq!(migration_count, 2);
+    }
+
+    #[tokio::test]
+    async fn migration_accepts_legacy_lf_checksums_and_reconciles_them() {
+        let database = Database::open_in_memory()
+            .await
+            .expect("temporary database should initialize");
+        let migrator = Migrator::new(EmbeddedMigrationSource)
+            .await
+            .expect("embedded migrations should resolve");
+
+        for migration in migrator.iter() {
+            let legacy_migration = migration_with_lf_line_endings(migration);
+            query("UPDATE _sqlx_migrations SET checksum = ? WHERE version = ?")
+                .bind(legacy_migration.checksum.as_ref())
+                .bind(migration.version)
+                .execute(&database.pool)
+                .await
+                .expect("legacy checksum should be writable");
+        }
+
+        apply_migrations(&database.pool)
+            .await
+            .expect("legacy line-ending checksums should be accepted");
+
+        for migration in migrator.iter() {
+            let row = query("SELECT checksum FROM _sqlx_migrations WHERE version = ?")
+                .bind(migration.version)
+                .fetch_one(&database.pool)
+                .await
+                .expect("migration checksum should remain readable");
+            let checksum: Vec<u8> = row.get("checksum");
+            assert_eq!(checksum, migration.checksum.as_ref());
+        }
+    }
+
+    #[tokio::test]
+    async fn migration_rejects_non_line_ending_checksum_changes() {
+        let database = Database::open_in_memory()
+            .await
+            .expect("temporary database should initialize");
+        query("UPDATE _sqlx_migrations SET checksum = X'00' WHERE version = 1")
+            .execute(&database.pool)
+            .await
+            .expect("checksum fixture should update");
+
+        assert_eq!(
+            apply_migrations(&database.pool).await,
+            Err(PersistenceError::MigrationFailed)
+        );
     }
 
     #[tokio::test]

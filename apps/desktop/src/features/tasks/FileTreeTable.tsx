@@ -1,4 +1,7 @@
 import {
+  ArrowDown,
+  ArrowUp,
+  ArrowUpDown,
   ChevronDown,
   ChevronRight,
   FileCode2,
@@ -66,6 +69,10 @@ const EXCLUSION_LABELS: Record<string, string> = {
 const TOKEN_ESTIMATION_BYTES_PER_TOKEN = 2;
 const LONG_FILE_TOKEN_WARNING_THRESHOLD = 10_000;
 
+type FileSortKey = "status" | "tokens";
+type FileSortDirection = "asc" | "desc";
+type FileSort = { key: FileSortKey; direction: FileSortDirection } | null;
+
 export function FileTreeTable({
   files,
   emptyLabel = "暂无文件",
@@ -76,10 +83,15 @@ export function FileTreeTable({
     () => new Set(),
   );
   const [updatingFileId, setUpdatingFileId] = useState<string | null>(null);
+  const [fileSort, setFileSort] = useState<FileSort>(null);
   const root = useMemo(() => buildFileTree(files), [files]);
-  const rows = useMemo(
+  const treeRows = useMemo(
     () => flattenFileTree(root, collapsedDirectories),
     [collapsedDirectories, root],
+  );
+  const rows = useMemo(
+    () => (fileSort ? sortFileRows(files, fileSort) : treeRows),
+    [fileSort, files, treeRows],
   );
 
   const toggleDirectory = (key: string) => {
@@ -89,6 +101,14 @@ export function FileTreeTable({
       else next.add(key);
       return next;
     });
+  };
+
+  const toggleFileSort = (key: FileSortKey) => {
+    setFileSort((current) => ({
+      direction:
+        current?.key === key && current.direction === "asc" ? "desc" : "asc",
+      key,
+    }));
   };
 
   const toggleFile = async (file: FileRecordSummaryDto, included: boolean) => {
@@ -127,11 +147,21 @@ export function FileTreeTable({
       getRowKey={(row) => row.key}
       header={
         <>
-          <span>文件</span>
-          <span>状态</span>
-          <span>大小 / 预估 Token</span>
-          <span>模型</span>
-          <span>结果</span>
+          <span role="columnheader">文件</span>
+          <SortableFileHeader
+            activeSort={fileSort}
+            label="状态"
+            onSort={() => toggleFileSort("status")}
+            sortKey="status"
+          />
+          <SortableFileHeader
+            activeSort={fileSort}
+            label="大小 / 预估 Token"
+            onSort={() => toggleFileSort("tokens")}
+            sortKey="tokens"
+          />
+          <span role="columnheader">模型</span>
+          <span role="columnheader">结果</span>
         </>
       }
       items={rows}
@@ -261,6 +291,53 @@ export function FileTreeTable({
   );
 }
 
+function SortableFileHeader({
+  activeSort,
+  label,
+  onSort,
+  sortKey,
+}: {
+  activeSort: FileSort;
+  label: string;
+  onSort: () => void;
+  sortKey: FileSortKey;
+}) {
+  const direction = activeSort?.key === sortKey ? activeSort.direction : null;
+  const nextDirection = direction === "asc" ? "desc" : "asc";
+  const SortIcon =
+    direction === "asc"
+      ? ArrowUp
+      : direction === "desc"
+        ? ArrowDown
+        : ArrowUpDown;
+  const nextDirectionLabel = nextDirection === "asc" ? "升序" : "降序";
+
+  return (
+    <span
+      aria-sort={
+        direction === "asc"
+          ? "ascending"
+          : direction === "desc"
+            ? "descending"
+            : undefined
+      }
+      className="task-table-column-header"
+      role="columnheader"
+    >
+      <button
+        aria-label={`按文件列表${label}${nextDirectionLabel}排序`}
+        className={`task-table-sort-button${direction ? " is-active" : ""}`}
+        onClick={onSort}
+        title={`按文件列表${label}${nextDirectionLabel}排序`}
+        type="button"
+      >
+        <span>{label}</span>
+        <SortIcon aria-hidden="true" size={13} />
+      </button>
+    </span>
+  );
+}
+
 function estimateFileTokens(sizeBytes: number): number {
   return Math.ceil(Math.max(0, sizeBytes) / TOKEN_ESTIMATION_BYTES_PER_TOKEN);
 }
@@ -350,6 +427,54 @@ function flattenFileTree(
   };
   visit(root);
   return rows;
+}
+
+function sortFileRows(
+  files: readonly FileRecordSummaryDto[],
+  sort: Exclude<FileSort, null>,
+): FileNode[] {
+  return files
+    .map((file, originalIndex) => ({ file, originalIndex }))
+    .sort((left, right) => {
+      const comparison =
+        sort.key === "tokens"
+          ? estimateFileTokens(left.file.sizeBytes) -
+            estimateFileTokens(right.file.sizeBytes)
+          : fileStatusSortRank(left.file) - fileStatusSortRank(right.file);
+      if (comparison !== 0) {
+        return sort.direction === "asc" ? comparison : -comparison;
+      }
+      const pathComparison = left.file.relativePath.localeCompare(
+        right.file.relativePath,
+      );
+      return pathComparison === 0
+        ? left.originalIndex - right.originalIndex
+        : pathComparison;
+    })
+    .map(({ file }) => ({
+      kind: "file",
+      key: `file:${file.id}`,
+      name: file.relativePath.replaceAll("\\", "/"),
+      depth: 0,
+      file,
+    }));
+}
+
+function fileStatusSortRank(file: FileRecordSummaryDto): number {
+  if (
+    file.sourceStatus === "sensitive" ||
+    file.exclusionReason?.startsWith("sensitive")
+  ) {
+    return 0;
+  }
+  if (file.sourceStatus === "unreadable") return 1;
+  if (file.sourceStatus === "unsupported_encoding") return 2;
+  if (file.exclusionReason === "binary") return 3;
+  if (file.exclusionReason === "file_too_large") return 4;
+  if (file.sourceStatus === "deleted") return 5;
+  if (file.sourceStatus === "modified") return 6;
+  if (file.included) return 7;
+  return 8;
 }
 
 function fileSourceStatusLabel(file: FileRecordSummaryDto): string {

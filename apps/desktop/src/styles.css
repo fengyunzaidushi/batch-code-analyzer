@@ -890,6 +890,10 @@ button:disabled {
     minmax(240px, 2fr) minmax(150px, 1fr) minmax(150px, 0.9fr)
     minmax(90px, 0.6fr) minmax(100px, 0.7fr);
 }
+.file-tree-table .task-table-sort-button {
+  width: 100%;
+  justify-content: flex-start;
+}
 .task-table-column-header {
   min-width: 0;
 }
