@@ -7,4 +7,4 @@ import type { TaskId } from "./TaskId";
 import type { TaskStatus } from "./TaskStatus";
 import type { TaskValueSource } from "./TaskValueSource";
 
-export type TaskSummaryDto = { schemaVersion: 1, id: TaskId, runId: RunId, fileId: FileRecordId, relativePath: string, status: TaskStatus, promptSource: TaskValueSource, modelSnapshot: string, modelSource: TaskValueSource, hasResult: boolean, latestAttemptId: AttemptId | null, createdAt: Rfc3339Timestamp, startedAt: Rfc3339Timestamp | null, completedAt: Rfc3339Timestamp | null, };
+export type TaskSummaryDto = { schemaVersion: 1, id: TaskId, runId: RunId, fileId: FileRecordId, relativePath: string, status: TaskStatus, promptSource: TaskValueSource, modelSnapshot: string, modelSource: TaskValueSource, hasResult: boolean, resultVersion: number, latestAttemptId: AttemptId | null, createdAt: Rfc3339Timestamp, startedAt: Rfc3339Timestamp | null, completedAt: Rfc3339Timestamp | null, };

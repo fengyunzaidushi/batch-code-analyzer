@@ -7,7 +7,11 @@ license = "UNLICENSED"
 
 [dependencies]
 async-trait = "0.1.89"
+base64 = "0.22.1"
+keyring = "4.1.5"
+ring = "0.17.14"
 serde = { version = "1.0.228", features = ["derive"] }
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-rustls", "sqlite"] }
 tokio = { version = "1.52.3", features = ["macros", "rt-multi-thread", "sync"] }
 
 [lints.rust]

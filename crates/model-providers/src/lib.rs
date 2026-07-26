@@ -364,7 +364,10 @@ impl ModelProvider for OpenAiResponsesProvider {
         let body = serde_json::json!({
             "model": request.model,
             "input": request.input,
-            "instructions": request.instructions,
+            // Responses treats this as an optional system instruction. Send an
+            // explicit empty value when the caller has no instruction so a
+            // provider cannot substitute an implicit default instruction.
+            "instructions": request.instructions.as_deref().unwrap_or_default(),
             "max_output_tokens": request.max_output_tokens,
         });
         let timeout = request.timeout.unwrap_or(self.default_timeout);

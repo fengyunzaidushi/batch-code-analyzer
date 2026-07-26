@@ -39,6 +39,8 @@ Task    N ── 1 FileRecord
 ```text
 projects
 api_profiles
+encrypted_secrets
+secret_store_metadata
 file_records
 context_versions
 runs
@@ -55,7 +57,9 @@ app_settings
 ### projects
 
 - `canonical_source_directory` 全局唯一；
-- API Key 只能保存安全引用 ID；
+- API Key 默认只保存安全引用 ID；若启用加密 SQLite 后端，`encrypted_secrets` 只能保存
+  AEAD 密文和随机 nonce，包装密钥引用保存在 `secret_store_metadata`，实际包装密钥仍在
+  操作系统安全存储中；禁止出现 API Key 明文；
 - `filter_rules_json`、`execution_defaults_json` 和 `api_routing_json` 必须有独立版本字段；
 - 路径不可用时保留项目与历史 Run。
 

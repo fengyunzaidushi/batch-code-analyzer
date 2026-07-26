@@ -10,7 +10,7 @@ pub use entities::{
     ApiFallback, ApiModelInfo, ApiProfile, ApiProfileConnectionStatus, ApiProtocol, ApiRouting,
     Attempt, AttemptError, ContextStatus, ContextVersion, ContextVersionSourceFile,
     ExecutionDefaults, FileRecord, FileResultStatus, FileSnapshot, FileSourceStatus, FilterRules,
-    ModelRoutingStrategy, Project, ProjectContext, ProjectPathStatus, RetryPolicy,
+    ModelRoutingStrategy, Project, ProjectContext, ProjectPathStatus, PromptPreset, RetryPolicy,
     Rfc3339Timestamp, Run, RunSnapshot, RunStats, SensitiveFinding, Task, TaskValueSource,
 };
 pub use ids::{ApiProfileId, AttemptId, ContextVersionId, FileRecordId, ProjectId, RunId, TaskId};

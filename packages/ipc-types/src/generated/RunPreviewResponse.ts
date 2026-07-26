@@ -4,4 +4,4 @@ import type { RunBlockingReasonDto } from "./RunBlockingReasonDto";
 import type { RunPreviewTaskDto } from "./RunPreviewTaskDto";
 import type { TaskValueSource } from "./TaskValueSource";
 
-export type RunPreviewResponse = { schemaVersion: 1, projectId: ProjectId, tasks: Array<RunPreviewTaskDto>, blockers: Array<RunBlockingReasonDto>, model: string | null, promptSource: TaskValueSource, modelSource: TaskValueSource, outputDirectory: string, };
+export type RunPreviewResponse = { schemaVersion: 1, projectId: ProjectId, tasks: Array<RunPreviewTaskDto>, blockers: Array<RunBlockingReasonDto>, model: string | null, promptSource: TaskValueSource, modelSource: TaskValueSource, concurrency: number, outputDirectory: string, };

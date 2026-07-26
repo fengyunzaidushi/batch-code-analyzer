@@ -2,7 +2,11 @@
 
 #![forbid(unsafe_code)]
 
-use std::{io, time::Duration};
+use std::{
+    io,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -79,6 +83,7 @@ pub struct MockResponsesServer {
     base_url: String,
     shutdown: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<()>>,
+    requests: Arc<Mutex<Vec<Vec<u8>>>>,
 }
 
 /// Alias used by integration tests that refer to the fixture as a provider.
@@ -94,6 +99,8 @@ impl MockResponsesServer {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
         let address = listener.local_addr()?;
         let (shutdown_sender, mut shutdown_receiver) = oneshot::channel();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let request_log = Arc::clone(&requests);
         let task = tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -101,8 +108,9 @@ impl MockResponsesServer {
                     result = listener.accept() => {
                         let Ok((stream, _)) = result else { break };
                         let request_config = config.clone();
+                        let request_log = Arc::clone(&request_log);
                         tokio::spawn(async move {
-                            let _ = handle_connection(stream, request_config).await;
+                            let _ = handle_connection(stream, request_config, request_log).await;
                         });
                     }
                 }
@@ -112,6 +120,7 @@ impl MockResponsesServer {
             base_url: format!("http://{address}/v1"),
             shutdown: Some(shutdown_sender),
             task: Some(task),
+            requests,
         })
     }
 
@@ -138,6 +147,21 @@ impl MockResponsesServer {
         format!("{}/models", self.base_url)
     }
 
+    /// Returns request bodies captured by the fixture, in arrival order.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a request handler poisoned the shared request log mutex.
+    #[must_use]
+    pub fn request_bodies(&self) -> Vec<Vec<u8>> {
+        self.requests
+            .lock()
+            .expect("mock request log should not be poisoned")
+            .iter()
+            .cloned()
+            .collect()
+    }
+
     /// Stops the accept loop and waits for it to finish.
     pub async fn shutdown(mut self) {
         if let Some(sender) = self.shutdown.take() {
@@ -157,8 +181,16 @@ impl Drop for MockResponsesServer {
     }
 }
 
-async fn handle_connection(mut stream: TcpStream, config: MockServerConfig) -> io::Result<()> {
+async fn handle_connection(
+    mut stream: TcpStream,
+    config: MockServerConfig,
+    requests: Arc<Mutex<Vec<Vec<u8>>>>,
+) -> io::Result<()> {
     let request = read_request(&mut stream).await?;
+    requests
+        .lock()
+        .expect("mock request log should not be poisoned")
+        .push(request_body(&request));
     if config.delay > Duration::ZERO {
         tokio::time::sleep(config.delay).await;
     }
@@ -174,6 +206,17 @@ async fn handle_connection(mut stream: TcpStream, config: MockServerConfig) -> i
     );
     stream.write_all(header.as_bytes()).await?;
     stream.write_all(&body).await
+}
+
+fn request_body(request: &[u8]) -> Vec<u8> {
+    let Some(header_end) = request
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|position| position + 4)
+    else {
+        return Vec::new();
+    };
+    request[header_end..].to_vec()
 }
 
 async fn read_request(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
@@ -203,6 +246,7 @@ async fn read_request(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
         if count == 0 {
             break;
         }
+        headers.extend_from_slice(&chunk[..count]);
         remaining = remaining.saturating_sub(count);
     }
     Ok(headers)
@@ -350,6 +394,37 @@ mod tests {
             .await
             .expect("response should read");
         assert!(String::from_utf8_lossy(&response).contains("mock-model"));
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn captures_request_bodies_larger_than_the_read_buffer() {
+        let server = MockResponsesServer::start(MockServerConfig::new(MockScenario::Normal))
+            .await
+            .expect("server should bind");
+        let mut stream = TcpStream::connect(server.authority())
+            .await
+            .expect("server should accept");
+        let body = vec![b'x'; 4_096];
+        let headers = format!(
+            "POST /v1/responses HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        stream
+            .write_all(headers.as_bytes())
+            .await
+            .expect("headers should write");
+        stream
+            .write_all(&body)
+            .await
+            .expect("body should write");
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .await
+            .expect("response should read");
+
+        assert_eq!(server.request_bodies(), vec![body]);
         server.shutdown().await;
     }
 

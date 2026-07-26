@@ -9,9 +9,9 @@ use batch_code_analyzer_domain::{
     Attempt as DomainAttempt, AttemptError as DomainAttemptError, AttemptId, AttemptStatus,
     ContextStatus, ContextVersion as DomainContextVersion, ContextVersionId,
     FileRecord as DomainFileRecord, FileRecordId, FileResultStatus, FileSourceStatus,
-    Project as DomainProject, ProjectId, ProjectPathStatus, Rfc3339Timestamp, Run as DomainRun,
-    RunId, RunStats, RunStatus, RunTransition, Task as DomainTask, TaskId, TaskStatus,
-    TaskTransition, TaskValueSource,
+    Project as DomainProject, ProjectId, ProjectPathStatus, PromptPreset as DomainPromptPreset,
+    Rfc3339Timestamp, Run as DomainRun, RunId, RunStats, RunStatus, RunTransition,
+    Task as DomainTask, TaskId, TaskStatus, TaskTransition, TaskValueSource,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -173,6 +173,20 @@ pub struct ApiProfileListResponse {
     pub items: Vec<ApiProfileSummaryDto>,
 }
 
+/// One-shot response used only after an explicit reveal action. The value must
+/// not be logged, cached, persisted, or included in ordinary profile DTOs.
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiProfileSecretGetRequest {
+    pub profile_id: ApiProfileId,
+}
+
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiProfileSecretGetResponse {
+    pub secret: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiProfileTestRequest {
@@ -229,6 +243,14 @@ pub struct ProjectAddRequest {
     pub source_directory: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptPresetDto {
+    pub id: String,
+    pub name: String,
+    pub prompt: String,
+}
+
 /// Detail DTO intentionally exposes the selected project's path only on demand.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -240,9 +262,12 @@ pub struct ProjectDetailDto {
     pub source_directory: String,
     pub path_status: ProjectPathStatus,
     pub default_prompt: String,
+    pub prompt_presets: Vec<PromptPresetDto>,
+    pub active_prompt_id: Option<String>,
     pub default_model: Option<String>,
     pub context_model: Option<String>,
     pub api_routing: batch_code_analyzer_domain::ApiRouting,
+    pub concurrency: u16,
     pub output_root: Option<String>,
     pub last_opened_at: Rfc3339Timestamp,
 }
@@ -252,6 +277,51 @@ pub struct ProjectDetailDto {
 pub struct ProjectAddResponse {
     pub project: ProjectDetailDto,
     pub created: bool,
+    pub config_mirror_warning: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectRunSettingsUpdateRequest {
+    pub project_id: ProjectId,
+    pub primary_profile_id: Option<ApiProfileId>,
+    pub default_model: Option<String>,
+    pub concurrency: u16,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectRunSettingsUpdateResponse {
+    pub project: ProjectDetailDto,
+    pub config_mirror_warning: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectPromptSaveRequest {
+    pub project_id: ProjectId,
+    pub name: String,
+    pub prompt: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectPromptSaveResponse {
+    pub project: ProjectDetailDto,
+    pub config_mirror_warning: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectPromptSelectRequest {
+    pub project_id: ProjectId,
+    pub prompt_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectPromptSelectResponse {
+    pub project: ProjectDetailDto,
     pub config_mirror_warning: bool,
 }
 
@@ -273,6 +343,14 @@ pub struct FileSetIncludedRequest {
     pub included: bool,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct FileAuthorizeSensitiveRequest {
+    pub project_id: ProjectId,
+    pub file_id: FileRecordId,
+    pub confirmed: bool,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum ScanOperationStatus {
@@ -286,6 +364,9 @@ pub enum ScanOperationStatus {
 #[serde(rename_all = "camelCase")]
 pub struct ScanStartRequest {
     pub project_id: ProjectId,
+    #[serde(default)]
+    #[ts(optional)]
+    pub temporary_excluded_patterns: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
@@ -335,11 +416,22 @@ pub struct ScanReportDto {
     pub sensitive_files: Vec<String>,
     pub symlink_files: Vec<String>,
     pub invalid_gitignore_rules: Vec<String>,
+    pub rules: ScanRuleSummaryDto,
     pub cancelled: bool,
     pub file_count: Option<u32>,
     pub generation: Option<u32>,
     pub error_code: Option<String>,
     pub updated_at: Rfc3339Timestamp,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanRuleSummaryDto {
+    pub builtin_directories: Vec<String>,
+    pub builtin_extensions: Vec<String>,
+    pub gitignore_rules: Vec<String>,
+    pub temporary_excluded_patterns: Vec<String>,
+    pub sensitive_detection_enabled: bool,
 }
 
 impl From<&DomainProject> for ProjectSummaryDto {
@@ -356,6 +448,19 @@ impl From<&DomainProject> for ProjectSummaryDto {
 
 impl From<&DomainProject> for ProjectDetailDto {
     fn from(project: &DomainProject) -> Self {
+        Self::with_prompt_presets(project, &project.filter_rules.prompt_presets)
+    }
+}
+
+impl ProjectDetailDto {
+    /// Builds a project detail DTO with the client-wide prompt library supplied
+    /// by the application layer. The domain project retains legacy presets only
+    /// for backwards-compatible data import.
+    #[must_use]
+    pub fn with_prompt_presets(
+        project: &DomainProject,
+        prompt_presets: &[DomainPromptPreset],
+    ) -> Self {
         Self {
             schema_version: DTO_SCHEMA_VERSION,
             id: project.id.clone(),
@@ -363,11 +468,24 @@ impl From<&DomainProject> for ProjectDetailDto {
             source_directory: project.source_directory.clone(),
             path_status: project.path_status,
             default_prompt: project.default_prompt.clone(),
+            prompt_presets: prompt_presets.iter().map(PromptPresetDto::from).collect(),
+            active_prompt_id: project.filter_rules.active_prompt_id.clone(),
             default_model: project.default_model.clone(),
             context_model: project.context_model.clone(),
             api_routing: project.api_routing.clone(),
+            concurrency: project.execution_defaults.concurrency,
             output_root: project.output_root.clone(),
             last_opened_at: project.last_opened_at.clone(),
+        }
+    }
+}
+
+impl From<&DomainPromptPreset> for PromptPresetDto {
+    fn from(preset: &DomainPromptPreset) -> Self {
+        Self {
+            id: preset.id.clone(),
+            name: preset.name.clone(),
+            prompt: preset.prompt.clone(),
         }
     }
 }
@@ -411,6 +529,12 @@ impl From<&DomainFileRecord> for FileRecordSummaryDto {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct FileSetIncludedResponse {
+    pub file: FileRecordSummaryDto,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct FileAuthorizeSensitiveResponse {
     pub file: FileRecordSummaryDto,
 }
 
@@ -516,6 +640,7 @@ pub struct RunPreviewResponse {
     pub model: Option<String>,
     pub prompt_source: TaskValueSource,
     pub model_source: TaskValueSource,
+    pub concurrency: u16,
     pub output_directory: String,
 }
 
@@ -524,6 +649,144 @@ pub struct RunPreviewResponse {
 pub struct RunCreateResponse {
     pub run: RunSummaryDto,
     pub task_count: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct RunExecuteRequest {
+    pub run_id: RunId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct RunExecuteResponse {
+    pub run: RunSummaryDto,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct RunCancelRequest {
+    pub run_id: RunId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct RunCancelResponse {
+    pub run: RunSummaryDto,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct RunListRequest {
+    pub project_id: ProjectId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub cursor: Option<String>,
+    pub limit: u16,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct RunGetRequest {
+    pub project_id: ProjectId,
+    pub run_id: RunId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct RunGetResponse {
+    pub run: RunSummaryDto,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskListRequest {
+    pub project_id: ProjectId,
+    pub run_id: RunId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub cursor: Option<String>,
+    pub limit: u16,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskGetRequest {
+    pub project_id: ProjectId,
+    pub task_id: TaskId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskGetResponse {
+    pub task: TaskSummaryDto,
+    pub prompt_snapshot: String,
+    pub attempts: Vec<AttemptDto>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskRequestPreviewRequest {
+    pub project_id: ProjectId,
+    pub task_id: TaskId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskRequestPreviewResponse {
+    pub task: TaskSummaryDto,
+    pub instructions: String,
+    pub input: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskRetryRequest {
+    pub project_id: ProjectId,
+    pub task_id: TaskId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskRetryResponse {
+    pub run: RunSummaryDto,
+    pub task: TaskSummaryDto,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskRetryBatchRequest {
+    pub project_id: ProjectId,
+    pub run_id: RunId,
+    pub task_ids: Vec<TaskId>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskRetryBatchResponse {
+    pub run: RunSummaryDto,
+    pub retried_task_ids: Vec<TaskId>,
+    pub skipped_task_ids: Vec<TaskId>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ResultReadRequest {
+    pub project_id: ProjectId,
+    pub task_id: TaskId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ResultReadResponse {
+    #[ts(type = "1")]
+    pub schema_version: u32,
+    pub project_id: ProjectId,
+    pub run_id: RunId,
+    pub task_id: TaskId,
+    pub relative_path: String,
+    pub result_version: u32,
+    pub markdown: String,
 }
 
 impl From<&DomainRun> for RunSummaryDto {
@@ -556,6 +819,7 @@ pub struct TaskSummaryDto {
     pub model_snapshot: String,
     pub model_source: TaskValueSource,
     pub has_result: bool,
+    pub result_version: u32,
     pub latest_attempt_id: Option<AttemptId>,
     pub created_at: Rfc3339Timestamp,
     pub started_at: Option<Rfc3339Timestamp>,
@@ -575,6 +839,7 @@ impl From<&DomainTask> for TaskSummaryDto {
             model_snapshot: task.model_snapshot.clone(),
             model_source: task.model_source,
             has_result: task.current_result_path.is_some(),
+            result_version: task.result_version,
             latest_attempt_id: task.latest_attempt_id.clone(),
             created_at: task.created_at.clone(),
             started_at: task.started_at.clone(),
@@ -702,6 +967,43 @@ impl From<&DomainContextVersion> for ContextVersionDto {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextGenerateRequest {
+    pub project_id: ProjectId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextGenerateResponse {
+    pub context: ContextVersionDto,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextGetRequest {
+    pub project_id: ProjectId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextGetResponse {
+    pub context: Option<ContextVersionDto>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptGenerateRequest {
+    pub project_id: ProjectId,
+    pub goal: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptGenerateResponse {
+    pub prompt: String,
+}
+
 /// Exports all currently stable Rust DTOs to individual TypeScript modules.
 ///
 /// # Errors
@@ -716,6 +1018,8 @@ pub fn export_types(out_dir: &Path) -> Result<(), ExportError> {
     ApiProfileSaveRequest::export_all(&config)?;
     ApiProfileSaveResponse::export_all(&config)?;
     ApiProfileListResponse::export_all(&config)?;
+    ApiProfileSecretGetRequest::export_all(&config)?;
+    ApiProfileSecretGetResponse::export_all(&config)?;
     ApiProfileTestRequest::export_all(&config)?;
     ApiProfileTestResponse::export_all(&config)?;
     ApiProfileDeleteRequest::export_all(&config)?;
@@ -726,28 +1030,62 @@ pub fn export_types(out_dir: &Path) -> Result<(), ExportError> {
     PageResponse::<String>::export_all(&config)?;
     HealthCheckResponse::export_all(&config)?;
     ProjectSummaryDto::export_all(&config)?;
+    PromptPresetDto::export_all(&config)?;
     ProjectAddRequest::export_all(&config)?;
     ProjectDetailDto::export_all(&config)?;
     ProjectAddResponse::export_all(&config)?;
+    ProjectRunSettingsUpdateRequest::export_all(&config)?;
+    ProjectRunSettingsUpdateResponse::export_all(&config)?;
+    ProjectPromptSaveRequest::export_all(&config)?;
+    ProjectPromptSaveResponse::export_all(&config)?;
+    ProjectPromptSelectRequest::export_all(&config)?;
+    ProjectPromptSelectResponse::export_all(&config)?;
     ScanStartRequest::export_all(&config)?;
     ScanStartResponse::export_all(&config)?;
     ScanCancelRequest::export_all(&config)?;
     ScanCancelResponse::export_all(&config)?;
     ScanReportDto::export_all(&config)?;
+    ScanRuleSummaryDto::export_all(&config)?;
     FileListRequest::export_all(&config)?;
     FileSetIncludedRequest::export_all(&config)?;
     FileSetIncludedResponse::export_all(&config)?;
+    FileAuthorizeSensitiveRequest::export_all(&config)?;
+    FileAuthorizeSensitiveResponse::export_all(&config)?;
     FileRecordSummaryDto::export_all(&config)?;
     RunSummaryDto::export_all(&config)?;
     RunPreviewRequest::export_all(&config)?;
     RunPreviewResponse::export_all(&config)?;
     RunCreateRequest::export_all(&config)?;
     RunCreateResponse::export_all(&config)?;
+    RunExecuteRequest::export_all(&config)?;
+    RunExecuteResponse::export_all(&config)?;
+    RunCancelRequest::export_all(&config)?;
+    RunCancelResponse::export_all(&config)?;
+    RunListRequest::export_all(&config)?;
+    RunGetRequest::export_all(&config)?;
+    RunGetResponse::export_all(&config)?;
     RunBlockingReasonDto::export_all(&config)?;
     RunPreviewTaskDto::export_all(&config)?;
     TaskSummaryDto::export_all(&config)?;
+    TaskListRequest::export_all(&config)?;
+    TaskGetRequest::export_all(&config)?;
+    TaskGetResponse::export_all(&config)?;
+    TaskRequestPreviewRequest::export_all(&config)?;
+    TaskRequestPreviewResponse::export_all(&config)?;
+    TaskRetryRequest::export_all(&config)?;
+    TaskRetryResponse::export_all(&config)?;
+    TaskRetryBatchRequest::export_all(&config)?;
+    TaskRetryBatchResponse::export_all(&config)?;
     AttemptDto::export_all(&config)?;
+    ResultReadRequest::export_all(&config)?;
+    ResultReadResponse::export_all(&config)?;
     ContextVersionDto::export_all(&config)?;
+    ContextGenerateRequest::export_all(&config)?;
+    ContextGenerateResponse::export_all(&config)?;
+    ContextGetRequest::export_all(&config)?;
+    ContextGetResponse::export_all(&config)?;
+    PromptGenerateRequest::export_all(&config)?;
+    PromptGenerateResponse::export_all(&config)?;
     ProjectId::export_all(&config)?;
     FileRecordId::export_all(&config)?;
     RunId::export_all(&config)?;
@@ -818,6 +1156,16 @@ mod tests {
         assert!(task_summary.contains("TaskValueSource"));
         assert!(task_summary.contains("hasResult: boolean"));
         assert!(!task_summary.contains("currentResultPath"));
+
+        let task_get = fs::read_to_string(out_dir.join("TaskGetResponse.ts"))
+            .expect("task detail declaration should be generated");
+        assert!(task_get.contains("promptSnapshot: string"));
+        assert!(!task_get.contains("input: string"));
+
+        let request_preview = fs::read_to_string(out_dir.join("TaskRequestPreviewResponse.ts"))
+            .expect("request preview declaration should be generated");
+        assert!(request_preview.contains("instructions: string"));
+        assert!(request_preview.contains("input: string"));
 
         let file_summary = fs::read_to_string(out_dir.join("FileRecordSummaryDto.ts"))
             .expect("file summary declaration should be generated");

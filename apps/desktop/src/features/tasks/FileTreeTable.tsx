@@ -4,10 +4,13 @@ import {
   FileCode2,
   Folder,
   FolderOpen,
+  ShieldCheck,
+  TriangleAlert,
 } from "lucide-react";
 import { useMemo, useState } from "react";
 import type { FileRecordSummaryDto } from "@batch-code-analyzer/ipc-types";
 
+import { canIncludeFile } from "./fileSelection";
 import { VirtualTaskTable } from "./VirtualTaskTable";
 
 interface FileTreeTableProps {
@@ -17,6 +20,7 @@ interface FileTreeTableProps {
     file: FileRecordSummaryDto,
     included: boolean,
   ) => Promise<void>;
+  onAuthorizeSensitive?: (fileId: string) => Promise<void>;
 }
 
 interface DirectoryNode {
@@ -46,6 +50,7 @@ interface MutableDirectory extends DirectoryNode {
 const EXCLUSION_LABELS: Record<string, string> = {
   binary: "二进制文件",
   builtin_extension: "不支持的文件类型",
+  builtin_filename: "低价值文件",
   file_too_large: "文件过大",
   gitignore_or_user_pattern: "被忽略规则排除",
   not_included_extension: "不在纳入扩展名内",
@@ -58,10 +63,14 @@ const EXCLUSION_LABELS: Record<string, string> = {
   user_excluded: "用户手动排除",
 };
 
+const TOKEN_ESTIMATION_BYTES_PER_TOKEN = 2;
+const LONG_FILE_TOKEN_WARNING_THRESHOLD = 10_000;
+
 export function FileTreeTable({
   files,
   emptyLabel = "暂无文件",
   onSetIncluded,
+  onAuthorizeSensitive,
 }: FileTreeTableProps) {
   const [collapsedDirectories, setCollapsedDirectories] = useState<Set<string>>(
     () => new Set(),
@@ -94,14 +103,33 @@ export function FileTreeTable({
     }
   };
 
+  const authorizeSensitive = async (file: FileRecordSummaryDto) => {
+    if (!onAuthorizeSensitive || file.included) return;
+    const confirmed = window.confirm(
+      `文件“${file.relativePath}”被检测为敏感文件。授权后其当前内容可能发送给模型，确定继续吗？`,
+    );
+    if (!confirmed) return;
+    setUpdatingFileId(file.id);
+    try {
+      await onAuthorizeSensitive(file.id);
+    } catch {
+      // The application layer owns the user-facing error; this only clears the busy state.
+    } finally {
+      setUpdatingFileId(null);
+    }
+  };
+
   return (
     <VirtualTaskTable
+      ariaLabel="扫描文件列表"
+      className="file-tree-table"
       emptyLabel={emptyLabel}
       getRowKey={(row) => row.key}
       header={
         <>
           <span>文件</span>
           <span>状态</span>
+          <span>大小 / 预估 Token</span>
           <span>模型</span>
           <span>结果</span>
         </>
@@ -149,9 +177,13 @@ export function FileTreeTable({
               <span className="file-tree-muted">目录</span>
               <span className="file-tree-muted">—</span>
               <span className="file-tree-muted">—</span>
+              <span className="file-tree-muted">—</span>
             </>
           );
         }
+
+        const estimatedTokens = estimateFileTokens(row.file.sizeBytes);
+        const isLongFile = estimatedTokens > LONG_FILE_TOKEN_WARNING_THRESHOLD;
 
         return (
           <>
@@ -185,7 +217,41 @@ export function FileTreeTable({
                 {row.name}
               </span>
             </span>
-            <span>{fileSourceStatusLabel(row.file)}</span>
+            <span className="file-status-cell">
+              {fileSourceStatusLabel(row.file)}
+              {row.file.sourceStatus === "sensitive" &&
+              !row.file.included &&
+              onAuthorizeSensitive ? (
+                <button
+                  aria-label={`授权并纳入文件 ${row.file.relativePath}`}
+                  className="file-sensitive-authorize"
+                  disabled={updatingFileId === row.file.id}
+                  onClick={() => void authorizeSensitive(row.file)}
+                  title="确认后允许将当前敏感文件纳入分析"
+                  type="button"
+                >
+                  <ShieldCheck aria-hidden="true" size={13} />
+                  授权纳入
+                </button>
+              ) : null}
+            </span>
+            <span
+              className={`file-size-cell${isLongFile ? " is-warning" : ""}`}
+              title={
+                isLongFile
+                  ? `预估 ${formatTokenCount(estimatedTokens)} tokens，代码文件过长，建议排除、拆分或更换上下文更大的模型`
+                  : `预估 ${formatTokenCount(estimatedTokens)} tokens`
+              }
+            >
+              <span>{formatFileSize(row.file.sizeBytes)}</span>
+              <span className="file-token-estimate">
+                {isLongFile ? (
+                  <TriangleAlert aria-hidden="true" size={12} />
+                ) : null}
+                约 {formatTokenCount(estimatedTokens)} tokens
+                {isLongFile ? " · 代码文件过长" : null}
+              </span>
+            </span>
             <span>—</span>
             <span>{fileResultStatusLabel(row.file.resultStatus)}</span>
           </>
@@ -195,21 +261,18 @@ export function FileTreeTable({
   );
 }
 
-function canIncludeFile(file: FileRecordSummaryDto): boolean {
-  if (file.sourceStatus !== "normal" && file.sourceStatus !== "modified") {
-    return false;
-  }
-  return ![
-    "binary",
-    "builtin_extension",
-    "file_too_large",
-    "sensitive",
-    "sensitive_content",
-    "sensitive_filename",
-    "symlink",
-    "unreadable",
-    "unsupported_encoding",
-  ].includes(file.exclusionReason ?? "");
+function estimateFileTokens(sizeBytes: number): number {
+  return Math.ceil(Math.max(0, sizeBytes) / TOKEN_ESTIMATION_BYTES_PER_TOKEN);
+}
+
+function formatFileSize(sizeBytes: number): string {
+  if (sizeBytes < 1024) return `${sizeBytes} B`;
+  if (sizeBytes < 1024 * 1024) return `${Math.round(sizeBytes / 1024)} KB`;
+  return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatTokenCount(tokenCount: number): string {
+  return new Intl.NumberFormat("zh-CN").format(tokenCount);
 }
 
 function buildFileTree(files: readonly FileRecordSummaryDto[]): DirectoryNode {
@@ -290,6 +353,8 @@ function flattenFileTree(
 }
 
 function fileSourceStatusLabel(file: FileRecordSummaryDto): string {
+  if (file.included && file.sourceStatus === "sensitive")
+    return "已授权，待处理";
   if (file.included)
     return file.sourceStatus === "modified" ? "已修改" : "待处理";
   if (file.exclusionReason) {

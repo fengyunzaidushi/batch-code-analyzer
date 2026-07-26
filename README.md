@@ -15,6 +15,21 @@
 - 安全存储：系统 Keychain/Credential Manager/Secret Service，必要时 Stronghold 降级
 - 发布：GitHub Actions、Tauri Updater
 
+## 下载和发布安装包
+
+推送版本标签后，GitHub Actions 会自动构建并上传三平台安装包到一个正式 Release：
+
+- Windows：`.msi`、`.exe`（NSIS）
+- macOS：Intel 和 Apple Silicon `.dmg`
+- Linux：`.AppImage`、`.deb`
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+发布工作流当前未配置代码签名。macOS 首次打开可能需要在“隐私与安全性”中允许，Windows 可能显示 SmartScreen 提示。开发者也可以运行 `pnpm tauri:build` 在本机生成安装包。
+
 ## 文档导航
 
 | 文档                                   | 用途                                     |

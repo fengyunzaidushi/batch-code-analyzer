@@ -12,7 +12,7 @@ pub use database::{
     WriteTransaction, LATEST_SCHEMA_VERSION,
 };
 pub use error::PersistenceError;
-pub use repositories::Repository;
+pub use repositories::{Repository, SensitiveFileAuthorizationMetadata};
 pub use rows::{
     AttemptRow, AttemptRowMetadata, ContextVersionRow, FileRecordRow, FileRecordRowMetadata,
     ProjectRow, ProjectRowMetadata, RunRow, RunRowMetadata, TaskRow,

@@ -26,6 +26,33 @@
     }
   },
   "bundle": {
-    "active": false
+    "active": true,
+    "targets": ["appimage", "deb", "dmg", "msi", "nsis"],
+    "category": "Utility",
+    "shortDescription": "Batch AI analysis for local code repositories",
+    "longDescription": "A local desktop application for batch analysis of code files with OpenAI Responses API compatible models.",
+    "copyright": "Copyright 2026 Batch Code Analyzer",
+    "icon": [
+      "icons/32x32.png",
+      "icons/64x64.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico",
+      "icons/icon.icns"
+    ],
+    "windows": {
+      "nsis": {
+        "displayLanguageSelector": true,
+        "installMode": "currentUser"
+      },
+      "wix": {
+        "language": "en-US"
+      }
+    },
+    "linux": {
+      "deb": {
+        "depends": ["libwebkit2gtk-4.1-0", "libgtk-3-0"]
+      }
+    }
   }
 }

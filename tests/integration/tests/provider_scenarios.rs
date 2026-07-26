@@ -33,6 +33,39 @@ async fn normal_responses_include_id_usage_and_support_concurrent_requests() {
 }
 
 #[tokio::test]
+async fn requests_without_instructions_send_an_empty_override() {
+    let server = start(MockServerConfig::new(MockScenario::Normal)).await;
+    let (provider, profile) = provider_and_profile(&server).await;
+    provider
+        .execute(
+            ProviderRequest::new(profile.clone(), "mock-model", "fixture"),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("mock should succeed");
+
+    provider
+        .execute(
+            ProviderRequest::new(profile, "mock-model", "fixture")
+                .with_instructions("caller instruction"),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("mock should succeed");
+
+    let bodies = server.request_bodies();
+    assert_eq!(bodies.len(), 2);
+    let body = String::from_utf8(bodies.first().expect("request body").clone())
+        .expect("request body should be UTF-8");
+    assert!(body.contains(r#""instructions":""#));
+    assert!(!body.contains(r#""instructions":null#));
+    let explicit_body = String::from_utf8(bodies.get(1).expect("explicit request body").clone())
+        .expect("request body should be UTF-8");
+    assert!(explicit_body.contains(r#""instructions":"caller instruction"#));
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn model_listing_uses_the_same_local_server() {
     let server =
         start(MockServerConfig::new(MockScenario::Normal).with_model("mock-list-model")).await;

@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  FileAuthorizeSensitiveRequest,
+  FileAuthorizeSensitiveResponse,
   FileListRequest,
   FileRecordId,
   FileRecordSummaryDto,
@@ -8,6 +10,20 @@ import type {
   PageResponse,
   ProjectId,
 } from "@batch-code-analyzer/ipc-types";
+
+export function authorizeSensitiveFile(
+  projectId: ProjectId,
+  fileId: FileRecordId,
+): Promise<FileAuthorizeSensitiveResponse> {
+  const request: FileAuthorizeSensitiveRequest = {
+    confirmed: true,
+    fileId,
+    projectId,
+  };
+  return invoke<FileAuthorizeSensitiveResponse>("file_authorize_sensitive", {
+    request,
+  });
+}
 
 export function listFiles(
   projectId: ProjectId,

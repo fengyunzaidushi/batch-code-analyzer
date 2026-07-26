@@ -80,6 +80,7 @@ internal
 | `scan_file_too_large` | 否 | 否 | 文件超过大小限制 |
 | `scan_binary_file` | 否 | 否 | 检测为二进制文件 |
 | `scan_encoding_unsupported` | 否 | 否 | 不支持或无法安全识别编码 |
+| `context_discovery_failed` | 是 | 否 | 项目上下文资料无法安全读取 |
 
 ### 4.4 Security
 
@@ -88,6 +89,7 @@ internal
 | `security_path_escape` | 否 | 否 | 路径逃逸到允许根目录外 |
 | `security_symlink_outside_root` | 否 | 否 | 符号链接指向仓库外 |
 | `security_sensitive_file_blocked` | 否 | 否 | 默认敏感文件被阻止 |
+| `security_sensitive_confirmation_required` | 否 | 否 | 敏感文件授权请求缺少明确确认 |
 | `security_secret_detected` | 否 | 否 | 文件中发现疑似秘密 |
 | `security_consent_required` | 否 | 否 | 尚未确认向该服务发送源码 |
 | `security_external_url_blocked` | 否 | 否 | 外部链接协议或目标不允许 |
@@ -135,6 +137,7 @@ internal
 | `run_not_paused` | 否 | 否 | 继续操作要求 Paused |
 | `run_already_terminal` | 否 | 否 | Run 已进入终态 |
 | `task_invalid_transition` | 否 | 否 | Task 状态转换非法 |
+| `task_not_found` | 否 | 否 | Task 不存在或不属于当前项目 |
 | `task_already_running` | 否 | 否 | Task 已执行中 |
 | `task_cannot_retry` | 否 | 否 | 当前 Task 不允许重试 |
 | `task_source_changed` | 否 | 否 | 文件内容与 Task 快照不一致 |
@@ -146,6 +149,9 @@ internal
 | `output_directory_unavailable` | 是 | 否 | 输出根目录不可用 |
 | `output_path_mapping_failed` | 否 | 否 | 无法安全映射结果路径 |
 | `output_write_failed` | 是 | 否 | 原子写入失败 |
+| `output_result_not_found` | 否 | 否 | 当前 Task 没有可读取的结果 |
+| `output_result_too_large` | 否 | 否 | 结果超过可预览大小限制 |
+| `output_result_read_failed` | 是 | 否 | 结果文件无法读取 |
 | `output_export_failed` | 是 | 否 | 模型请求成功但导出镜像失败 |
 
 ### 4.9 Recovery
