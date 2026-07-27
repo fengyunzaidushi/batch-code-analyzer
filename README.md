@@ -1,6 +1,10 @@
 # Batch Code Analyzer
 
+简体中文 · [English](README.en.md)
+
 本仓库用于开发跨 Windows、macOS、Linux 的本地批量代码文件 AI 分析工具。
+
+Batch Code Analyzer 是一个本地优先（local-first）的桌面开发者工具：登记本地代码仓库，安全筛选真实项目文件，按文件调用兼容 OpenAI Responses API 的模型，并保存可追溯的 Markdown 分析结果、运行统计和请求历史。工具不会修改用户源代码。
 
 ## 产品能力
 
