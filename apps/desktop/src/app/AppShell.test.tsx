@@ -62,11 +62,19 @@ describe("AppShell", () => {
     expect(onAddProject).toHaveBeenCalledOnce();
   });
 
-  it("keeps an unavailable project visible and labels its path", () => {
-    render(<AppShell projects={[project({ pathStatus: "unavailable" })]} />);
+  it("keeps an unavailable project visible and delegates relocation", async () => {
+    const user = userEvent.setup();
+    const onRelocateProject = vi.fn().mockResolvedValue(undefined);
+    render(
+      <AppShell
+        onRelocateProject={onRelocateProject}
+        projects={[project({ pathStatus: "unavailable" })]}
+      />,
+    );
 
     expect(screen.getAllByText("路径不可用")).toHaveLength(2);
-    expect(screen.getByRole("button", { name: "重新定位" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "重新定位" }));
+    expect(onRelocateProject).toHaveBeenCalledOnce();
   });
 
   it("shows the active run and keeps the two tabs fixed", async () => {

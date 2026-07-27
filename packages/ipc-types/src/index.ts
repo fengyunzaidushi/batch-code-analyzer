@@ -49,6 +49,8 @@ export type { ModelRoutingStrategy } from "./generated/ModelRoutingStrategy";
 export type { ProjectId } from "./generated/ProjectId";
 export type { ProjectAddRequest } from "./generated/ProjectAddRequest";
 export type { ProjectAddResponse } from "./generated/ProjectAddResponse";
+export type { ProjectRelocateRequest } from "./generated/ProjectRelocateRequest";
+export type { ProjectRelocateResponse } from "./generated/ProjectRelocateResponse";
 export type { ProjectDetailDto } from "./generated/ProjectDetailDto";
 export type { ProjectPathStatus } from "./generated/ProjectPathStatus";
 export type { ProjectPromptSaveRequest } from "./generated/ProjectPromptSaveRequest";

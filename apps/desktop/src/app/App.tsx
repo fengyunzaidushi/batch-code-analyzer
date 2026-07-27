@@ -25,6 +25,7 @@ import {
   chooseProjectDirectory,
   getProject,
   listProjects,
+  relocateProject,
   saveProjectPrompt as savePromptPreset,
   selectProjectPrompt as selectPromptPreset,
   updateProjectRunSettings,
@@ -85,6 +86,7 @@ export function App() {
   );
   const [projectError, setProjectError] = useState<string | null>(null);
   const [isAddingProject, setIsAddingProject] = useState(false);
+  const [isRelocatingProject, setIsRelocatingProject] = useState(false);
   const [scanReports, setScanReports] = useState<Record<string, ScanReportDto>>(
     {},
   );
@@ -714,6 +716,8 @@ export function App() {
         project.id === detail.id
           ? {
               ...project,
+              name: detail.name,
+              pathStatus: detail.pathStatus,
               rootDirectory: detail.sourceDirectory,
               primaryProfileId: detail.apiRouting.primaryProfileId,
               defaultModel: detail.defaultModel,
@@ -724,6 +728,30 @@ export function App() {
           : project,
       ),
     );
+  };
+
+  const handleRelocateProject = async (): Promise<void> => {
+    if (!selectedProjectId) return;
+    setProjectError(null);
+    setIsRelocatingProject(true);
+    try {
+      const sourceDirectory = await chooseProjectDirectory();
+      if (!sourceDirectory) return;
+      const response = await relocateProject({
+        projectId: selectedProjectId,
+        sourceDirectory,
+      });
+      await refreshProjects();
+      applyProjectDetail(response.project);
+      setSelectedProjectId(response.project.id);
+      if (response.configMirrorWarning) {
+        setProjectError("项目路径已更新，但新仓库配置镜像未能写入。");
+      }
+    } catch (error) {
+      setProjectError(safeProjectError(error));
+    } finally {
+      setIsRelocatingProject(false);
+    }
   };
 
   const handleSaveProjectPrompt = async (
@@ -1094,8 +1122,10 @@ export function App() {
     <AppShell
       activeRun={activeRun}
       onCancelRun={() => void handleRunCancel()}
+      onRelocateProject={handleRelocateProject}
       healthState={healthState}
       isAddingProject={isAddingProject}
+      isRelocatingProject={isRelocatingProject}
       contextVersion={
         selectedProjectId ? (contexts[selectedProjectId] ?? null) : null
       }
