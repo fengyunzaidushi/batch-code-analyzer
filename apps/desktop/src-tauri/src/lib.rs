@@ -76,6 +76,7 @@ pub fn run() {
             commands::app_data_reset,
             commands::project_list,
             commands::project_add,
+            commands::project_relocate,
             commands::project_get,
             commands::project_update_run_settings,
             commands::project_prompt_save,

@@ -80,6 +80,8 @@ interface AppShellProps {
   activeRun?: ActiveRunSummary | null;
   onCancelRun?: () => void;
   onAddProject?: () => void;
+  onRelocateProject?: () => Promise<void>;
+  isRelocatingProject?: boolean;
   onAuthorizeSensitiveFile?: (fileId: string) => Promise<void>;
   onGenerateContext?: () => Promise<void> | void;
   onCancelScan?: () => void;
@@ -161,6 +163,8 @@ export function AppShell({
   activeRun = null,
   onCancelRun = () => undefined,
   onAddProject = () => undefined,
+  onRelocateProject = async () => undefined,
+  isRelocatingProject = false,
   onAuthorizeSensitiveFile = async () => undefined,
   onGenerateContext = async () => undefined,
   onCancelScan = () => undefined,
@@ -289,6 +293,8 @@ export function AppShell({
           fileTotal={fileTotal}
           contextVersion={contextVersion}
           onAuthorizeSensitiveFile={onAuthorizeSensitiveFile}
+          onRelocateProject={onRelocateProject}
+          isRelocatingProject={isRelocatingProject}
           onGenerateContext={onGenerateContext}
           isGeneratingContext={isGeneratingContext}
           onCancelScan={onCancelScan}
@@ -629,6 +635,8 @@ function ProjectWorkspace({
   fileTotal,
   contextVersion,
   onAuthorizeSensitiveFile,
+  onRelocateProject,
+  isRelocatingProject,
   onGenerateContext,
   isGeneratingContext,
   onCancelScan,
@@ -679,6 +687,8 @@ function ProjectWorkspace({
   fileTotal: number;
   contextVersion: ContextVersionDto | null;
   onAuthorizeSensitiveFile: (fileId: string) => Promise<void>;
+  onRelocateProject: () => Promise<void>;
+  isRelocatingProject: boolean;
   onGenerateContext: () => Promise<void> | void;
   isGeneratingContext: boolean;
   onCancelScan: () => void;
@@ -733,7 +743,12 @@ function ProjectWorkspace({
 }) {
   return (
     <main className="project-workspace">
-      <ProjectHeader activeRun={activeRun} project={project} />
+      <ProjectHeader
+        activeRun={activeRun}
+        isRelocatingProject={isRelocatingProject}
+        onRelocateProject={onRelocateProject}
+        project={project}
+      />
       <div className="workspace-tabs" role="tablist" aria-label="项目工作区">
         <TabButton
           active={tab === "prompt"}
@@ -808,9 +823,13 @@ function ProjectWorkspace({
 
 function ProjectHeader({
   activeRun,
+  isRelocatingProject,
+  onRelocateProject,
   project,
 }: {
   activeRun: ActiveRunSummary | null;
+  isRelocatingProject: boolean;
+  onRelocateProject: () => Promise<void>;
   project: ShellProject | null;
 }) {
   if (!project) {
@@ -846,7 +865,8 @@ function ProjectHeader({
       </div>
       <button
         className="outline-button"
-        disabled={project.pathStatus === "unavailable"}
+        disabled={isRelocatingProject}
+        onClick={() => void onRelocateProject()}
         type="button"
       >
         <FolderPlus aria-hidden="true" size={15} />

@@ -10,6 +10,8 @@ import type {
   ProjectPromptSaveResponse,
   ProjectPromptSelectRequest,
   ProjectPromptSelectResponse,
+  ProjectRelocateRequest,
+  ProjectRelocateResponse,
   ProjectRunSettingsUpdateRequest,
   ProjectRunSettingsUpdateResponse,
 } from "@batch-code-analyzer/ipc-types";
@@ -32,6 +34,12 @@ export function addProject(
   request: ProjectAddRequest,
 ): Promise<ProjectAddResponse> {
   return invoke<ProjectAddResponse>("project_add", { request });
+}
+
+export function relocateProject(
+  request: ProjectRelocateRequest,
+): Promise<ProjectRelocateResponse> {
+  return invoke<ProjectRelocateResponse>("project_relocate", { request });
 }
 
 export function getProject(projectId: ProjectId): Promise<ProjectDetailDto> {

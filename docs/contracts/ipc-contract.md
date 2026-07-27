@@ -76,7 +76,23 @@ project_relocate
 - `project_prompt_save`：将命名提示词保存到客户端全局常用提示词库，并立即设为当前项目默认；
 - `project_prompt_select`：从客户端全局常用提示词库选择一个预设，并将其内容设为当前项目默认；
 - `project_remove`：只移除客户端登记，不删除仓库或历史输出。
-- `project_relocate`：重新绑定不可用项目，必须校验项目 ID 或仓库配置的一致性。
+- `project_relocate`：接收 `projectId` 和用户选择的新目录，重新绑定项目路径并保留
+  Project ID、Run/Task/Attempt、结果和项目设置。Rust 必须执行 `SafeRoot` 校验，并检查
+  目标目录是否已被其他项目登记；若目标 `.batch-analysis/project.json` 存在项目 ID，
+  必须与请求项目一致。目标镜像缺失时可以在数据库提交后创建，写入失败只返回警告。
+  命令不自动扫描，前端在成功后显示新路径并允许用户手动扫描。
+
+```ts
+interface ProjectRelocateRequest {
+  projectId: ProjectId;
+  sourceDirectory: string;
+}
+
+interface ProjectRelocateResponse {
+  project: ProjectDetailDto;
+  configMirrorWarning: boolean;
+}
+```
 
 ### 4.2 Scan
 

@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   getProject: vi.fn(),
   listFiles: vi.fn(),
   listProjects: vi.fn(),
+  relocateProject: vi.fn(),
 }));
 
 vi.mock("../ipc/health", () => ({
@@ -19,6 +20,7 @@ vi.mock("../ipc/projects", () => ({
   chooseProjectDirectory: mocks.chooseProjectDirectory,
   getProject: mocks.getProject,
   listProjects: mocks.listProjects,
+  relocateProject: mocks.relocateProject,
 }));
 vi.mock("../ipc/files", () => ({
   listFiles: mocks.listFiles,
@@ -121,6 +123,49 @@ describe("App project flow", () => {
       screen.queryByText("internal path details must not reach UI"),
     ).not.toBeInTheDocument();
   });
+
+  it("does nothing when relocation directory selection is cancelled", async () => {
+    const user = userEvent.setup();
+    const detail = projectDetail();
+    arrangeProject(detail);
+    mocks.chooseProjectDirectory.mockResolvedValue(null);
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "重新定位" }));
+    await waitFor(() =>
+      expect(mocks.chooseProjectDirectory).toHaveBeenCalledOnce(),
+    );
+    expect(mocks.relocateProject).not.toHaveBeenCalled();
+  });
+
+  it("updates the project path after project_relocate succeeds", async () => {
+    const user = userEvent.setup();
+    const detail = projectDetail();
+    const relocated = {
+      ...detail,
+      sourceDirectory: "/workspace/moved-demo",
+    };
+    arrangeProject(detail);
+    mocks.chooseProjectDirectory.mockResolvedValue("/workspace/moved-demo");
+    mocks.relocateProject.mockResolvedValue({
+      configMirrorWarning: false,
+      project: relocated,
+    });
+    mocks.listProjects
+      .mockResolvedValueOnce([projectSummary(detail)])
+      .mockResolvedValueOnce([projectSummary(relocated)]);
+    mocks.getProject
+      .mockResolvedValueOnce(detail)
+      .mockResolvedValueOnce(relocated);
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "重新定位" }));
+    expect(await screen.findAllByText("/workspace/moved-demo")).toHaveLength(2);
+    expect(mocks.relocateProject).toHaveBeenCalledWith({
+      projectId: detail.id,
+      sourceDirectory: "/workspace/moved-demo",
+    });
+  });
 });
 
 function arrangeEmptyProject() {
@@ -133,6 +178,22 @@ function arrangeEmptyProject() {
   });
   mocks.listProjects.mockResolvedValue([]);
   mocks.listFiles.mockResolvedValue({ items: [], nextCursor: null, total: 0 });
+}
+
+function arrangeProject(detail: ReturnType<typeof projectDetail>) {
+  arrangeEmptyProject();
+  mocks.listProjects.mockResolvedValue([projectSummary(detail)]);
+  mocks.getProject.mockResolvedValue(detail);
+}
+
+function projectSummary(detail: ReturnType<typeof projectDetail>) {
+  return {
+    id: detail.id,
+    lastOpenedAt: detail.lastOpenedAt,
+    name: detail.name,
+    pathStatus: detail.pathStatus,
+    schemaVersion: 1,
+  };
 }
 
 function projectDetail() {

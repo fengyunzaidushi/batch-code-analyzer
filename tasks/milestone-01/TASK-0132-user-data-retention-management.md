@@ -1,6 +1,6 @@
 # TASK-0132：用户数据保留与项目数据管理
 
-- Status: Done（全量验证存在既有 Windows SQLite 临时文件占用失败）
+- Status: Done
 - Owner: Codex
 - Branch: main
 - Dependencies: TASK-0003, TASK-0101, TASK-0128
@@ -60,6 +60,6 @@ tauri.conf.json
 
 - `pnpm format:check`、`pnpm lint`、`pnpm typecheck`、`pnpm test`、`pnpm ipc:check`：通过，前端 62 个测试通过。
 - `cargo fmt --all -- --check`：通过。
-- `cargo test --workspace`：新增与相关测试通过；Persistence 中 3 个既有 Windows 磁盘清理测试因 `os error 32` 失败。
+- `cargo test --workspace`：通过。
 - 相关 Rust 包测试（App Core、IPC Contracts、Desktop）：通过。
-- 相关 Clippy：被未修改的 `crates/secret-store/src/lib.rs` 既有 6 条 Pedantic 告警阻断。
+- `cargo clippy --workspace --all-targets -- -D warnings`：通过。

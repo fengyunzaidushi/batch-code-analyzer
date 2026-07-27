@@ -28,16 +28,16 @@ use batch_code_analyzer_ipc_contracts::{
     FileRecordSummaryDto, FileSetIncludedRequest, FileSetIncludedResponse, HealthCheckResponse,
     HealthStatus, IpcError, PageResponse, ProjectAddRequest, ProjectAddResponse, ProjectDetailDto,
     ProjectPromptSaveRequest, ProjectPromptSaveResponse, ProjectPromptSelectRequest,
-    ProjectPromptSelectResponse, ProjectRunSettingsUpdateRequest, ProjectRunSettingsUpdateResponse,
-    ProjectSummaryDto, PromptGenerateRequest, PromptGenerateResponse, ResultReadRequest,
-    ResultReadResponse, RunBlockingReasonDto, RunCancelRequest, RunCancelResponse,
-    RunCreateRequest, RunCreateResponse, RunExecuteRequest, RunExecuteResponse, RunGetRequest,
-    RunGetResponse, RunListRequest, RunPreviewRequest, RunPreviewResponse, RunPreviewTaskDto,
-    RunSummaryDto, ScanCancelRequest, ScanCancelResponse, ScanOperationStatus, ScanReportDto,
-    ScanRuleSummaryDto, ScanStartRequest, ScanStartResponse, TaskGetRequest, TaskGetResponse,
-    TaskListRequest, TaskRequestPreviewRequest, TaskRequestPreviewResponse, TaskRetryBatchRequest,
-    TaskRetryBatchResponse, TaskRetryRequest, TaskRetryResponse, TaskSummaryDto,
-    DTO_SCHEMA_VERSION, HEALTH_CHECK_SCHEMA_VERSION,
+    ProjectPromptSelectResponse, ProjectRelocateRequest, ProjectRelocateResponse,
+    ProjectRunSettingsUpdateRequest, ProjectRunSettingsUpdateResponse, ProjectSummaryDto,
+    PromptGenerateRequest, PromptGenerateResponse, ResultReadRequest, ResultReadResponse,
+    RunBlockingReasonDto, RunCancelRequest, RunCancelResponse, RunCreateRequest, RunCreateResponse,
+    RunExecuteRequest, RunExecuteResponse, RunGetRequest, RunGetResponse, RunListRequest,
+    RunPreviewRequest, RunPreviewResponse, RunPreviewTaskDto, RunSummaryDto, ScanCancelRequest,
+    ScanCancelResponse, ScanOperationStatus, ScanReportDto, ScanRuleSummaryDto, ScanStartRequest,
+    ScanStartResponse, TaskGetRequest, TaskGetResponse, TaskListRequest, TaskRequestPreviewRequest,
+    TaskRequestPreviewResponse, TaskRetryBatchRequest, TaskRetryBatchResponse, TaskRetryRequest,
+    TaskRetryResponse, TaskSummaryDto, DTO_SCHEMA_VERSION, HEALTH_CHECK_SCHEMA_VERSION,
 };
 use batch_code_analyzer_model_providers::{ModelProvider, OpenAiResponsesProvider, ProviderError};
 use batch_code_analyzer_persistence::DatabaseHealth;
@@ -147,6 +147,22 @@ pub(crate) async fn project_add(
     Ok(ProjectAddResponse {
         project: project_detail(database, &result.project).await?,
         created: result.created,
+        config_mirror_warning: result.config_mirror_warning,
+    })
+}
+
+#[tauri::command]
+pub(crate) async fn project_relocate(
+    request: ProjectRelocateRequest,
+    state: State<'_, PersistenceState>,
+) -> Result<ProjectRelocateResponse, IpcError> {
+    let database = state.database.as_ref().ok_or_else(database_unavailable)?;
+    let result = ProjectService::new(database)
+        .relocate_project(&request.project_id, request.source_directory)
+        .await
+        .map_err(project_service_error)?;
+    Ok(ProjectRelocateResponse {
+        project: project_detail(database, &result.project).await?,
         config_mirror_warning: result.config_mirror_warning,
     })
 }
@@ -1389,6 +1405,12 @@ fn project_service_error(error: ProjectServiceError) -> IpcError {
             "所选目录不可用",
             true,
         ),
+        ProjectServiceError::RelocationMismatch => ipc_error(
+            "validation_invalid_value",
+            ErrorCategory::Validation,
+            "所选目录与当前项目不匹配",
+            false,
+        ),
         ProjectServiceError::Persistence(error) => persistence_error(&error),
     }
 }
@@ -1863,6 +1885,12 @@ mod tests {
         assert_eq!(concurrency_error.code, "validation_invalid_value");
         assert_eq!(concurrency_error.message, "并发数必须是 1 到 30 的整数");
         assert!(concurrency_error.details.is_none());
+
+        let relocation_error =
+            super::project_service_error(ProjectServiceError::RelocationMismatch);
+        assert_eq!(relocation_error.code, "validation_invalid_value");
+        assert_eq!(relocation_error.message, "所选目录与当前项目不匹配");
+        assert!(relocation_error.details.is_none());
 
         let persistence_error = super::persistence_error(
             &batch_code_analyzer_persistence::PersistenceError::TransactionFailed,

@@ -100,7 +100,7 @@ impl RecoveryDatabase {
         let schema_version = applied_schema_version(&pool).await?;
 
         Ok(ReadOnlyDatabase {
-            _pool: pool,
+            pool,
             schema_version: u32::try_from(schema_version)
                 .map_err(|_| PersistenceError::InvalidStoredState)?,
         })
@@ -109,7 +109,7 @@ impl RecoveryDatabase {
 
 #[derive(Debug)]
 pub struct ReadOnlyDatabase {
-    _pool: SqlitePool,
+    pool: SqlitePool,
     schema_version: u32,
 }
 
@@ -117,6 +117,11 @@ impl ReadOnlyDatabase {
     #[must_use]
     pub const fn schema_version(&self) -> u32 {
         self.schema_version
+    }
+
+    /// Closes the read-only connection pool before its backing file is removed.
+    pub async fn close(self) {
+        self.pool.close().await;
     }
 }
 
@@ -308,7 +313,13 @@ impl Database {
     }
 
     async fn from_pool(pool: SqlitePool) -> Result<Self, PersistenceError> {
-        let schema_version = apply_migrations(&pool).await?;
+        let schema_version = match apply_migrations(&pool).await {
+            Ok(schema_version) => schema_version,
+            Err(error) => {
+                pool.close().await;
+                return Err(error);
+            }
+        };
 
         Ok(Self {
             pool,
@@ -700,6 +711,7 @@ mod tests {
         assert_eq!(foreign_keys, 1);
         assert_eq!(busy_timeout, 5_000);
 
+        database.pool.close().await;
         drop(database);
         remove_temporary_database(&path);
     }
@@ -758,6 +770,7 @@ mod tests {
         let database = Database::open(&path)
             .await
             .expect("first disk database startup should initialize");
+        database.pool.close().await;
         drop(database);
 
         let database = Database::open(&path)
@@ -765,6 +778,7 @@ mod tests {
             .expect("second disk database startup should initialize");
 
         assert!(path.with_extension("bak").is_file());
+        database.pool.close().await;
         drop(database);
         remove_temporary_database(&path);
     }
@@ -844,6 +858,7 @@ mod tests {
         .execute(&database.pool)
         .await
         .expect("future migration marker should insert");
+        database.pool.close().await;
         drop(database);
 
         let startup = Database::open_for_startup(&path).await;
@@ -861,7 +876,7 @@ mod tests {
             .await
             .expect("recovery database should open read-only");
         assert_eq!(read_only.schema_version(), LATEST_SCHEMA_VERSION + 1);
-        drop(read_only);
+        read_only.close().await;
 
         remove_temporary_database(&path);
     }
@@ -1043,7 +1058,32 @@ mod tests {
             path.with_extension("bak-wal"),
         ] {
             if candidate.exists() {
-                fs::remove_file(candidate).expect("temporary database artifact should remove");
+                let mut last_error = None;
+                for _ in 0..200 {
+                    match fs::remove_file(&candidate) {
+                        Ok(()) => {
+                            last_error = None;
+                            break;
+                        }
+                        Err(error)
+                            if error.kind() == std::io::ErrorKind::PermissionDenied
+                                || error.raw_os_error() == Some(32) =>
+                        {
+                            last_error = Some(error);
+                            std::thread::sleep(Duration::from_millis(25));
+                        }
+                        Err(error) => {
+                            last_error = Some(error);
+                            break;
+                        }
+                    }
+                }
+                if let Some(error) = last_error {
+                    panic!(
+                        "temporary database artifact should remove ({}): {error:?}",
+                        candidate.display()
+                    );
+                }
             }
         }
     }

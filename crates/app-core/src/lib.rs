@@ -68,6 +68,7 @@ pub enum ProjectServiceError {
     PromptNameConflict,
     InvalidPrompt,
     PathUnavailable,
+    RelocationMismatch,
     Persistence(PersistenceError),
 }
 
@@ -76,9 +77,10 @@ impl ProjectServiceError {
     pub const fn code(&self) -> &'static str {
         match self {
             Self::NotFound => "project_not_found",
-            Self::ApiProfileNotFound | Self::InvalidConcurrency | Self::PromptNameConflict => {
-                "validation_invalid_value"
-            }
+            Self::ApiProfileNotFound
+            | Self::InvalidConcurrency
+            | Self::PromptNameConflict
+            | Self::RelocationMismatch => "validation_invalid_value",
             Self::PromptNotFound => "prompt_not_found",
             Self::InvalidPrompt => "validation_required_field",
             Self::PathUnavailable => "project_path_unavailable",
@@ -183,6 +185,12 @@ impl From<PersistenceError> for ApiProfileServiceError {
 pub struct ProjectAddResult {
     pub project: Project,
     pub created: bool,
+    pub config_mirror_warning: bool,
+}
+
+#[derive(Debug)]
+pub struct ProjectRelocationResult {
+    pub project: Project,
     pub config_mirror_warning: bool,
 }
 
@@ -898,6 +906,77 @@ impl<'database> ProjectService<'database> {
         })
     }
 
+    /// Rebinds a project to a new local directory without changing its
+    /// identity, settings, or historical runs.
+    ///
+    /// When the target contains a project mirror, its optional project ID must
+    /// match the project being relocated. A missing mirror is allowed and is
+    /// recreated after the database update.
+    ///
+    /// # Errors
+    ///
+    /// Returns a path, duplicate-directory, or mirror-consistency error before
+    /// changing the persisted project when validation fails.
+    pub async fn relocate_project(
+        &self,
+        project_id: &ProjectId,
+        source_directory: impl AsRef<Path>,
+    ) -> Result<ProjectRelocationResult, ProjectServiceError> {
+        let mut project = self
+            .database
+            .repository()
+            .get_project(project_id)
+            .await?
+            .ok_or(ProjectServiceError::NotFound)?;
+        let root =
+            SafeRoot::new(source_directory).map_err(|_| ProjectServiceError::PathUnavailable)?;
+        let canonical = root.path().to_path_buf();
+        let canonical_string = canonical.to_string_lossy().into_owned();
+
+        if let Some(existing) = self
+            .database
+            .repository()
+            .find_project_by_canonical_path(&canonical_string)
+            .await?
+        {
+            if existing.id != project.id {
+                return Err(ProjectServiceError::Persistence(
+                    PersistenceError::StateTransition {
+                        code: "project_path_duplicate",
+                    },
+                ));
+            }
+        }
+
+        let mirror =
+            read_project_mirror(&canonical).map_err(|_| ProjectServiceError::RelocationMismatch)?;
+        if let Some(mirror_id) = mirror.and_then(|value| value.id) {
+            if mirror_id != project.id {
+                return Err(ProjectServiceError::RelocationMismatch);
+            }
+        }
+
+        project.source_directory = canonical_string.clone();
+        project.path_status = ProjectPathStatus::Available;
+        project.last_opened_at = timestamp_now();
+        self.database
+            .repository()
+            .update_project(
+                &project,
+                ProjectRowMetadata {
+                    canonical_source_directory: canonical_string,
+                    created_at: project.last_opened_at.clone(),
+                    updated_at: timestamp_now(),
+                },
+            )
+            .await?;
+
+        Ok(ProjectRelocationResult {
+            config_mirror_warning: write_project_mirror(&project).is_err(),
+            project,
+        })
+    }
+
     /// Updates the API routing, default model, and concurrency used by future
     /// Runs.
     ///
@@ -1151,7 +1230,12 @@ impl<'database> ProjectService<'database> {
     ///
     /// Returns a stable persistence error when the list cannot be read.
     pub async fn list_projects(&self) -> Result<Vec<Project>, PersistenceError> {
-        self.database.repository().list_projects().await
+        let projects = self.database.repository().list_projects().await?;
+        let mut refreshed = Vec::with_capacity(projects.len());
+        for project in projects {
+            refreshed.push(self.refresh_project_path_status(project).await?);
+        }
+        Ok(refreshed)
     }
 
     /// Lists a project's persisted file records for the file table.
@@ -1315,7 +1399,37 @@ impl<'database> ProjectService<'database> {
         &self,
         project_id: &ProjectId,
     ) -> Result<Option<Project>, PersistenceError> {
-        self.database.repository().get_project(project_id).await
+        match self.database.repository().get_project(project_id).await? {
+            Some(project) => self.refresh_project_path_status(project).await.map(Some),
+            None => Ok(None),
+        }
+    }
+
+    async fn refresh_project_path_status(
+        &self,
+        mut project: Project,
+    ) -> Result<Project, PersistenceError> {
+        let next_status = if SafeRoot::new(&project.source_directory).is_ok() {
+            ProjectPathStatus::Available
+        } else {
+            ProjectPathStatus::Unavailable
+        };
+        if project.path_status == next_status {
+            return Ok(project);
+        }
+        project.path_status = next_status;
+        self.database
+            .repository()
+            .update_project(
+                &project,
+                ProjectRowMetadata {
+                    canonical_source_directory: project.source_directory.clone(),
+                    created_at: project.last_opened_at.clone(),
+                    updated_at: timestamp_now(),
+                },
+            )
+            .await?;
+        Ok(project)
     }
 }
 
@@ -4717,6 +4831,217 @@ mod tests {
         assert_eq!(second.project.id, first.project.id);
 
         let _ = fs::remove_dir_all(path);
+    }
+
+    #[tokio::test]
+    async fn relocates_project_without_changing_identity_or_history_settings() {
+        let database = Database::open_in_memory()
+            .await
+            .expect("database should open");
+        let old_path = temporary_directory("relocate-old");
+        let new_path = temporary_directory("relocate-new");
+        let service = ProjectService::new(&database);
+        let added = service
+            .add_project(&old_path)
+            .await
+            .expect("project should add")
+            .project;
+        let mut unavailable = added.clone();
+        unavailable.path_status = batch_code_analyzer_domain::ProjectPathStatus::Unavailable;
+        database
+            .repository()
+            .update_project(
+                &unavailable,
+                ProjectRowMetadata {
+                    canonical_source_directory: unavailable.source_directory.clone(),
+                    created_at: unavailable.last_opened_at.clone(),
+                    updated_at: timestamp_now(),
+                },
+            )
+            .await
+            .expect("unavailable project should persist");
+        fs::remove_dir_all(&old_path).expect("old project directory should be removed");
+
+        let relocated = service
+            .relocate_project(&added.id, &new_path)
+            .await
+            .expect("project should relocate");
+        let canonical_new_path = SafeRoot::new(&new_path)
+            .expect("target path should remain safe")
+            .path()
+            .to_string_lossy()
+            .into_owned();
+
+        assert_eq!(relocated.project.id, added.id);
+        assert_eq!(relocated.project.source_directory, canonical_new_path);
+        assert_eq!(
+            relocated.project.path_status,
+            batch_code_analyzer_domain::ProjectPathStatus::Available
+        );
+        assert_eq!(relocated.project.default_prompt, added.default_prompt);
+        assert!(!relocated.config_mirror_warning);
+        let persisted = database
+            .repository()
+            .get_project(&added.id)
+            .await
+            .expect("relocated project should load")
+            .expect("relocated project should exist");
+        assert_eq!(persisted, relocated.project);
+        let mirror: serde_json::Value = serde_json::from_slice(
+            &fs::read(new_path.join(".batch-analysis/project.json"))
+                .expect("updated target mirror should exist"),
+        )
+        .expect("updated target mirror should be valid");
+        assert_eq!(
+            mirror["sourceDirectory"].as_str(),
+            Some(relocated.project.source_directory.as_str())
+        );
+
+        let _ = fs::remove_dir_all(new_path);
+    }
+
+    #[tokio::test]
+    async fn relocation_reports_unavailable_target_without_mutating_project() {
+        let database = Database::open_in_memory()
+            .await
+            .expect("database should open");
+        let old_path = temporary_directory("relocate-unavailable-old");
+        let new_path = std::env::temp_dir().join(format!(
+            "batch-code-analyzer-project-service-{}-relocate-unavailable-target",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&new_path);
+        let service = ProjectService::new(&database);
+        let added = service
+            .add_project(&old_path)
+            .await
+            .expect("project should add")
+            .project;
+
+        let error = service
+            .relocate_project(&added.id, &new_path)
+            .await
+            .expect_err("missing target should fail");
+        assert_eq!(error, ProjectServiceError::PathUnavailable);
+        let persisted = database
+            .repository()
+            .get_project(&added.id)
+            .await
+            .expect("project should remain readable")
+            .expect("project should remain persisted");
+        assert_eq!(persisted.source_directory, added.source_directory);
+
+        let _ = fs::remove_dir_all(old_path);
+        let _ = fs::remove_dir_all(new_path);
+    }
+
+    #[tokio::test]
+    async fn relocation_keeps_database_update_when_target_mirror_cannot_be_written() {
+        let database = Database::open_in_memory()
+            .await
+            .expect("database should open");
+        let old_path = temporary_directory("relocate-warning-old");
+        let new_path = temporary_directory("relocate-warning-new");
+        let service = ProjectService::new(&database);
+        let added = service
+            .add_project(&old_path)
+            .await
+            .expect("project should add")
+            .project;
+        fs::remove_dir_all(&old_path).expect("old project directory should be removed");
+        fs::write(new_path.join(".batch-analysis"), b"not a directory")
+            .expect("mirror blocker should be created");
+
+        let relocated = service
+            .relocate_project(&added.id, &new_path)
+            .await
+            .expect("database relocation should succeed");
+        assert!(relocated.config_mirror_warning);
+        assert_eq!(
+            database
+                .repository()
+                .get_project(&added.id)
+                .await
+                .expect("project should remain readable")
+                .expect("project should remain persisted")
+                .source_directory,
+            relocated.project.source_directory
+        );
+
+        let _ = fs::remove_dir_all(new_path);
+    }
+
+    #[tokio::test]
+    async fn relocation_rejects_mismatched_target_mirror_without_mutating_project() {
+        let database = Database::open_in_memory()
+            .await
+            .expect("database should open");
+        let old_path = temporary_directory("relocate-mismatch-old");
+        let new_path = temporary_directory("relocate-mismatch-new");
+        let service = ProjectService::new(&database);
+        let added = service
+            .add_project(&old_path)
+            .await
+            .expect("project should add")
+            .project;
+        fs::remove_dir_all(&old_path).expect("old project directory should be removed");
+        fs::create_dir_all(new_path.join(".batch-analysis"))
+            .expect("target mirror directory should exist");
+        fs::write(
+            new_path.join(".batch-analysis/project.json"),
+            b"{\"schemaVersion\":2,\"id\":\"another-project\"}",
+        )
+        .expect("mismatched target mirror should be written");
+
+        let error = service
+            .relocate_project(&added.id, &new_path)
+            .await
+            .expect_err("mismatched mirror should be rejected");
+        assert_eq!(error, ProjectServiceError::RelocationMismatch);
+        let persisted = database
+            .repository()
+            .get_project(&added.id)
+            .await
+            .expect("project should remain readable")
+            .expect("project should remain persisted");
+        assert_eq!(persisted.source_directory, added.source_directory);
+
+        let _ = fs::remove_dir_all(new_path);
+    }
+
+    #[tokio::test]
+    async fn relocation_rejects_a_directory_owned_by_another_project() {
+        let database = Database::open_in_memory()
+            .await
+            .expect("database should open");
+        let old_path = temporary_directory("relocate-duplicate-old");
+        let new_path = temporary_directory("relocate-duplicate-new");
+        let service = ProjectService::new(&database);
+        let added = service
+            .add_project(&old_path)
+            .await
+            .expect("project should add")
+            .project;
+        service
+            .add_project(&new_path)
+            .await
+            .expect("target project should add");
+        fs::remove_dir_all(&old_path).expect("old project directory should be removed");
+
+        let error = service
+            .relocate_project(&added.id, &new_path)
+            .await
+            .expect_err("duplicate target should be rejected");
+        assert_eq!(error.code(), "project_path_duplicate");
+        let persisted = database
+            .repository()
+            .get_project(&added.id)
+            .await
+            .expect("project should remain readable")
+            .expect("project should remain persisted");
+        assert_eq!(persisted.source_directory, added.source_directory);
+
+        let _ = fs::remove_dir_all(new_path);
     }
 
     #[tokio::test]
