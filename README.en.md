@@ -4,6 +4,10 @@
 
 Batch Code Analyzer is a local-first desktop tool for batch AI analysis of code files across Windows, macOS, and Linux. It scans registered local repositories, filters real project files safely, sends one request per file to services compatible with the OpenAI Responses API, and stores traceable Markdown results, run statistics, and request history. It never modifies source code.
 
+## Video tutorial
+
+Watch the [Bilibili usage tutorial](https://www.bilibili.com/video/BV1jg3F6dEVQ/) for a walkthrough of Batch Code Analyzer.
+
 ## Core capabilities
 
 - Register and switch between multiple local code repositories.

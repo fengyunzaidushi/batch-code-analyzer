@@ -6,6 +6,10 @@
 
 Batch Code Analyzer 是一个本地优先（local-first）的桌面开发者工具：登记本地代码仓库，安全筛选真实项目文件，按文件调用兼容 OpenAI Responses API 的模型，并保存可追溯的 Markdown 分析结果、运行统计和请求历史。工具不会修改用户源代码。
 
+## 使用教程
+
+观看 [Bilibili 使用教程](https://www.bilibili.com/video/BV1jg3F6dEVQ/) 了解 Batch Code Analyzer 的实际使用流程。
+
 ## 产品能力
 
 用户可以登记多个本地代码仓库，按 `.gitignore`、文件类型、大小和安全规则筛选项目文件；为项目或单文件设置提示词与模型；批量调用兼容 OpenAI Responses API 的服务；查看 Markdown 结果、Token、耗时、错误、重试与主备切换历史；并将每次运行的结果安全地写入独立输出目录。
