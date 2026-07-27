@@ -40,3 +40,5 @@ Thumbs.db
 *.db-wal
 .batch-analysis/
 local-output/
+garden-gpt-image-2/
+infographic/
