@@ -3,7 +3,7 @@ name = "batch-code-analyzer-api-profiles"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.97"
-license = "UNLICENSED"
+license = "GPL-3.0-only"
 
 [dependencies]
 batch-code-analyzer-secret-store = { path = "../secret-store" }

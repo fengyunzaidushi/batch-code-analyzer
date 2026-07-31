@@ -3,7 +3,7 @@ name = "batch-code-analyzer-model-providers"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.97"
-license = "UNLICENSED"
+license = "GPL-3.0-only"
 
 [dependencies]
 async-trait = "0.1.89"

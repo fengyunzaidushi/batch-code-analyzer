@@ -127,3 +127,9 @@ pnpm dev
 cargo check --workspace
 pnpm typecheck
 ```
+
+## 许可证
+
+版权所有 (C) 2026 Batch Code Analyzer。
+
+本项目仅依据 [GNU 通用公共许可证第 3 版](LICENSE) 授权。你可以在该许可证条款下使用、修改和分发本项目；本项目不提供任何担保。

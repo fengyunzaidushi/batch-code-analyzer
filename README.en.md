@@ -96,3 +96,9 @@ pnpm dev
 cargo check --workspace
 pnpm typecheck
 ```
+
+## License
+
+Copyright (C) 2026 Batch Code Analyzer.
+
+This project is licensed under the [GNU General Public License version 3 only](LICENSE). You may use, modify, and distribute it under those terms. The software is provided without warranty.
